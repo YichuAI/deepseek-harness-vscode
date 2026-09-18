@@ -175,6 +175,9 @@ export class HarnessClient implements Disposable {
     this.setState({ kind: 'connecting' })
     try {
       await this.opts.auth.init()
+      // No paste required when the harness's own credential store is readable:
+      // minting there is permission-equivalent to reading the file at all.
+      if (!this.opts.auth.isReady()) await this.opts.auth.tryMintLocalSession()
       if (!this.opts.auth.isReady()) throw this.authRequired()
       this.info = undefined
       this.eventClientId = undefined

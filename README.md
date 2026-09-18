@@ -99,9 +99,9 @@ For your safety, the following remain out of scope:
    code --install-extension harness-connector-deepseek-0.0.4.vsix
    ```
 
-3. **Give the extension the browser session.** Run **`DeepSeek Harness: Set Session Token from Launch URL`** from the Command Palette and paste the launch URL (or the raw token). The extension exchanges it for the `dsh-auth-…` cookie and stores it in VS Code's secret storage (OS keychain — never written to `settings.json`).
-
-   Harness ≥ 0.1.6 rejects every `/api/*` call without that cookie, so this step is mandatory. Skip it and Connect fails with "requires a browser session" instead of a bare `401`.
+3. Nothing to configure. The extension auto-connects: it reads the browser-session
+   signing secret that `dsh web` keeps in `$DSH_HOME/.credentials.yaml` and mints the
+   same `dsh-auth-…` cookie itself. No token to paste.
 
 4. Open a folder in VS Code that you want to bind to a Harness workspace.
 
@@ -113,23 +113,46 @@ For your safety, the following remain out of scope:
 
 8. Open the same session in your browser at `http://127.0.0.1:3080/` — both surfaces see the same turn.
 
-### Do I have to do this again?
+> The manual command **`DeepSeek Harness: Set Session Token from Launch URL`** still
+> exists as a fallback — it is the only sanctioned path when the credential store
+> cannot be read (see below).
 
-No — not on restart. The launch **token** dies with the `dsh web` process, but the
-**cookie** it buys is signed with a secret persisted in `$DSH_HOME/.credentials.yaml`
-and lives **30 days** by default. The extension stores that cookie, so you can
-restart `dsh web` freely.
+### How the session is obtained
 
-You only need to re-run the command when:
+Harness ≥ 0.1.6 rejects every `/api/*` call without a browser-session cookie, and
+the sanctioned way to get one is exchanging the per-process launch token. Nothing
+writes that token to disk, so officially you must paste it.
+
+But the cookie carries no trace of the token: it is an HMAC over
+`{version, authority, issuedAt, expiresAt}` keyed by a secret persisted in
+`$DSH_HOME/.credentials.yaml` (`client-connection/browser-session`), created once
+and reused by every later `dsh web` process. Anything that can read that file can
+therefore mint a byte-identical cookie — so the extension does, and you never
+have to paste anything.
+
+**Is this safe?** The file is written owner-only (`0600`) and holds your model API
+keys, so being able to read it already implies full authority over this harness
+home. Minting from it is *permission-equivalent*, not an escalation. It does skip
+the per-process token gate, but that gate defends against remote callers
+(rebinding, CSRF) — not against code already running as you. Set
+`deepseekHarness.autoSession = false` to require the manual exchange instead.
+
+The plugin log records which path was used on every connect.
+
+### When manual entry is unavoidable
 
 | Situation | Why |
 | --- | --- |
-| The cookie passes its 30-day expiry | `expiresAt` is inside the signed cookie payload |
-| You change `deepseekHarness.port` (or `host`) | the cookie name is `dsh-auth-<sha256(host:port)>`, so it is bound to the authority it was minted under |
-| `$DSH_HOME/.credentials.yaml` is wiped or regenerated | the signing secret is gone, so every existing cookie fails verification |
+| `$DSH_HOME` points elsewhere and you have not set the env var | nothing can be found to read |
+| `dsh web` has never run in this harness home | no `client-connection/browser-session` record exists yet; run it once |
+| You set `deepseekHarness.autoSession = false` | you asked for the sanctioned exchange |
 
-If it ever does lapse, the extension tells you which command to run instead of
-just reporting `401`.
+A cookie granted either way then lives its own life: the extension stores it in VS
+Code's secret storage (OS keychain — never `settings.json`), it survives `dsh web`
+restarts, and it is only re-derived when it expires or you change `host`/`port`
+(the cookie name is `dsh-auth-<sha256(host:port)>`, so it is bound to the
+authority that minted it). If it ever lapses, the extension tells you which
+command to run instead of just reporting `401`.
 
 ## Configuration
 
@@ -173,7 +196,7 @@ A standalone Node script drives the real client code against a **fake** 0.1.6
 harness — no `dsh web` needed:
 
 ```bash
-npm run protocol-test    # 39 assertions: auth, cookie derivation, remote.mux,
+npm run protocol-test    # 50 assertions: auth, cookie derivation, remote.mux,
                          # endpoint naming, {args} payloads, approval waterfall,
                          # assistant stream, deleted-endpoint 404 handling
 ```

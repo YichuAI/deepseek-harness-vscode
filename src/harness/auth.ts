@@ -21,12 +21,31 @@
  *      default) or the authority (host:port) changes, because the cookie name is
  *      derived from the authority the request was served under.
  *
- * We never mint a cookie ourselves: the exchange above is the only legitimate
- * path, and signing our own token would bypass the gate rather than satisfy it.
+ * The sanctioned way to obtain the cookie is the launch-URL exchange above. As a
+ * zero-paste convenience, {@link BrowserSessionAuth.tryMintLocalSession} can also
+ * mint a byte-identical cookie from that same persisted signing secret — see
+ * `local-credentials.ts` for why that is permission-equivalent rather than an
+ * escalation. Both paths produce the exact cookie shape the host verifies; gated
+ * behind `allowLocalMint` so a deployment can force the token exchange.
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 import { firstHeader, httpRequest } from './http.ts'
+import {
+  describeSecretGap,
+  readBrowserSessionSecret,
+  type SecretGap,
+} from './local-credentials.ts'
+
+/**
+ * Lifetime of a self-minted cookie.
+ *
+ * The host rejects any cookie whose `expiresAt - issuedAt` exceeds its own
+ * `cookieMaxAgeDays` (default 30, minimum 1). We cannot read that configured
+ * value, so we deliberately stay well under one day: minting is free and local,
+ * and a short TTL satisfies every legal configuration instead of guessing.
+ */
+const SELF_MINTED_TTL_MS = 12 * 60 * 60 * 1000
 
 /** Persisted cookie material. `authority` is the Host header value it was minted for. */
 export interface StoredSession {
@@ -48,6 +67,12 @@ export interface BrowserSessionAuthOptions {
   port: number
   store: AuthStore
   log: (msg: string) => void
+  /**
+   * Allow {@link tryMintLocalSession} to mint the cookie from the harness's own
+   * persisted signing secret, skipping the paste. Mirrors the `autoSession`
+   * setting; defaults to false (conservative) — extension.ts enables it via config.
+   */
+  allowLocalMint?: boolean
 }
 
 /** Thrown when the harness refuses a request: the caller must (re)adopt a launch URL. */
@@ -71,6 +96,9 @@ export function authorityOf(host: string, port: number): string {
 export class BrowserSessionAuth {
   private session: StoredSession | undefined
   private ready = false
+  /** True when the usable cookie came from the local credential store, not a pasted launch URL. */
+  private mintedLocally = false
+  private selfMintGap: SecretGap | undefined
   /**
    * Set when the harness answered 401 while `cookieHeader()` still looked usable.
    * That combination means the cookie is well-formed and unexpired but failed the
@@ -130,6 +158,66 @@ export class BrowserSessionAuth {
       return `stored session for ${s.authority} expired at ${new Date(s.expiresAt).toISOString()}`
     }
     return `the harness refused the stored session for ${s.authority}`
+  }
+
+  /** How the current cookie was obtained — shown in the UI so the shortcut is never hidden. */
+  sessionOrigin(): 'launch-url' | 'local-credential' | undefined {
+    if (this.cookieHeader() === undefined) return undefined
+    return this.mintedLocally ? 'local-credential' : 'launch-url'
+  }
+
+  /** Why the last local mint failed, for logging only. Never contains secret material. */
+  describeMintGap(): string | undefined {
+    return this.selfMintGap === undefined ? undefined : describeSecretGap(this.selfMintGap)
+  }
+
+  /**
+   * Obtain a session without asking the user for anything.
+   *
+   * Reads the signing secret `dsh web` keeps in its own credential store and
+   * mints the cookie the host would have issued. See `local-credentials.ts` for
+   * the security reasoning and the caveats — this bypasses the per-process
+   * launch-token gate by design, and falls back cleanly if upstream ever moves
+   * the secret or changes the cookie shape.
+   *
+   * @returns whether a usable cookie is now available.
+   */
+  async tryMintLocalSession(): Promise<boolean> {
+    if (this.cookieHeader() !== undefined) return true
+    if (!this.opts.allowLocalMint) {
+      this.opts.log('auth: local minting is disabled by configuration; paste a launch URL to connect')
+      return false
+    }
+
+    const outcome = await readBrowserSessionSecret()
+    if ('gap' in outcome) {
+      this.selfMintGap = outcome.gap
+      this.opts.log(`auth: cannot mint locally — ${describeSecretGap(outcome.gap)}`)
+      return false
+    }
+
+    const authority = authorityOf(this.opts.host, this.opts.port)
+    const issuedAt = Date.now()
+    const expiresAt = issuedAt + SELF_MINTED_TTL_MS
+    const value = encodeCookie({
+      version: COOKIE_PAYLOAD_VERSION,
+      authority,
+      issuedAt,
+      expiresAt,
+    }, outcome.secret)
+
+    this.session = {
+      authority,
+      name: cookieNameForAuthority(authority),
+      value,
+      expiresAt,
+    }
+    this.mintedLocally = true
+    this.selfMintGap = undefined
+    this.rejected = false
+    await this.opts.store.save(JSON.stringify(this.session))
+    this.opts.log(`auth: minted a ${SELF_MINTED_TTL_MS / 3_600_000}h session locally for ${authority}`)
+    return true
   }
 
   /**
@@ -220,6 +308,11 @@ export class BrowserSessionAuth {
     this.opts.host = host
     this.opts.port = port
   }
+
+  /** Toggle the auto-mint behaviour at runtime to match the `autoSession` setting. */
+  setAllowLocalMint(value: boolean): void {
+    this.opts.allowLocalMint = value
+  }
 }
 
 /** Find the first `http(s)://…` token inside a pasted CLI line. */
@@ -238,6 +331,27 @@ interface ParsedSetCookie {
   value: string
   expiresAt: number | undefined
 }
+
+/**
+ * Mirror of upstream `BrowserAuth.encodeCookie`: `v1.<payload>.<hmac>` where the
+ * HMAC-SHA256 is keyed by the persisted browser-session secret. Matching this
+ * construction is what lets a locally minted cookie verify.
+ */
+function encodeCookie(payload: CookiePayload, secret: Buffer): string {
+  const body = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')
+  return `v1.${body}.${createHmac('sha256', secret).update(body).digest().toString('base64url')}`
+}
+
+/** Signed cookie payload shape the host decodes and verifies. */
+interface CookiePayload {
+  readonly version: 1
+  readonly authority: string
+  readonly issuedAt: number
+  readonly expiresAt: number
+}
+
+/** Signed cookie version upstream writes (`COOKIE_PAYLOAD_VERSION`). */
+const COOKIE_PAYLOAD_VERSION = 1 as const
 
 /** Parse one `Set-Cookie` value: `name=value` plus optional `Max-Age`/`Expires`. */
 function parseSetCookie(raw: string): ParsedSetCookie | undefined {

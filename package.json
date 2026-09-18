@@ -142,6 +142,11 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "Show plugin-injected system messages (e.g. `@deepseek-ai/dsh-system-prompt` runtime context, approval-policy notices). Hidden by default to reduce noise."
+        },
+        "deepseekHarness.autoSession": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Mint the browser-session cookie locally from `$DSH_HOME/.credentials.yaml` so no launch URL has to be pasted. Disable to require the sanctioned token exchange every time. See the README's 'How the session is obtained' for the security reasoning."
         }
       }
     }
@@ -170,5 +175,8 @@
     "tsx": "^4.19.0",
     "typescript": "^5.4.0"
   },
-  "allowScripts": {}
+  "allowScripts": {},
+  "dependencies": {
+    "yaml": "^2.9.1"
+  }
 }

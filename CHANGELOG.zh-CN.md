@@ -66,8 +66,8 @@ Harness 0.1.6-alpha 对线缆协议做了三处破坏性变更，导致本扩展
 
 - `tsc --noEmit` —— 0 错误
 - 生产构建 —— `dist/extension.js` 98.4 kb
-- `scripts/protocol-test.ts` —— 针对假 0.1.6 harness，39/39 断言通过
-  （含 cookie 跨重启存活、密钥轮换的报错措辞）
+- `scripts/protocol-test.ts` —— 针对假 0.1.6 harness，50/50 断言通过
+  （含凭据存储本地自签、autoSession 关闭守卫、cookie 跨重启存活、密钥轮换的报错措辞）
 
 ## [0.0.3] — 2026-08-16
 

@@ -170,7 +170,7 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 一个独立的 Node 脚本用真实客户端代码驱动一个**假**的 0.1.6 harness —— 不需要 `dsh web`：
 
 ```bash
-npm run protocol-test    # 39 项断言：认证、cookie 派生、remote.mux、
+npm run protocol-test    # 50 项断言：认证、cookie 派生、remote.mux、
                          # 端点命名、{args} payload、审批瀑布、
                          # assistant 流、已删除端点的 404 处理
 ```
@@ -189,7 +189,7 @@ npm run build        # esbuild → dist/extension.js
 npm run watch        # 变更时自动重建
 npm run typecheck
 npm run package      # → harness-connector-deepseek-0.0.4.vsix
-npm run protocol-test      # 针对假 0.1.6 harness 的 39 项协议断言
+npm run protocol-test      # 针对假 0.1.6 harness 的 50 项协议断言
 ```
 
 在 VS Code 中按 `F5` 启动带有该扩展的扩展开发宿主。

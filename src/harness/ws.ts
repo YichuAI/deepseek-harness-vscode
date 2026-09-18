@@ -183,7 +183,7 @@ function buildFrame(opcode: number, payload: Buffer, mask: boolean): Buffer {
 
 /** Incremental frame parser: reassembles fragmented text messages. */
 class FrameReader {
-  private buffer = Buffer.alloc(0)
+  private buffer: Buffer = Buffer.alloc(0)
   private fragments: Buffer[] = []
   private fragmented = false
 

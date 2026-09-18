@@ -54,6 +54,7 @@ export function activate(context: vscode.ExtensionContext): void {
     port: cfg.port,
     store: authStore,
     log: (m) => log.info(m),
+    allowLocalMint: cfg.autoSession,
   })
 
   const client = new HarnessClient({
@@ -231,6 +232,16 @@ export function activate(context: vscode.ExtensionContext): void {
       cfg.showSystemMessages = next.showSystemMessages
       controller.applyConfigShowSystem(next.showSystemMessages)
     }
+    if (next.autoSession !== cfg.autoSession) {
+      cfg.autoSession = next.autoSession
+      auth.setAllowLocalMint(next.autoSession)
+      // Re-evaluate connectivity: enabling may mint a cookie now; disabling may
+      // leave us without one and must fall back to the launch-URL exchange.
+      if (auth.cookieHeader() === undefined) {
+        client.disconnect()
+        void controller.doConnect()
+      }
+    }
   }))
 
   // Auto-connect on activation. If no session is stored the connect fails with
@@ -242,10 +253,11 @@ export function deactivate(): void {
   // Disposables owned by context.subscriptions; nothing to do here.
 }
 
-function readConfig(): { host: string; port: number; showSystemMessages: boolean } {
+function readConfig(): { host: string; port: number; showSystemMessages: boolean; autoSession: boolean } {
   const cfg = vscode.workspace.getConfiguration(SECTION)
   const host = cfg.get<string>('host') ?? '127.0.0.1'
   const port = cfg.get<number>('port') ?? 3080
   const showSystemMessages = cfg.get<boolean>('showSystemMessages') ?? false
-  return { host, port, showSystemMessages }
+  const autoSession = cfg.get<boolean>('autoSession') ?? true
+  return { host, port, showSystemMessages, autoSession }
 }

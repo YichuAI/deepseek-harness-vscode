@@ -262,7 +262,7 @@ media/
 ├── origin.png                # 源材料（VSIX 排除）
 └── markdown-it.umd.min.js    # VSIX 打包用（114 KB）
 scripts/
-├── protocol-test.ts          # 假 harness 协议测试，34 项断言（无需 dsh web）
+├── protocol-test.ts          # 假 harness 协议测试，50 项断言（无需 dsh web）
 ├── integration-test.ts       # 针对真实 dsh 的闭环测试
 └── gen-icon.ts               # 从 origin.png 生成图标
 test/fixtures/                # 脱敏协议快照

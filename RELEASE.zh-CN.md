@@ -33,7 +33,7 @@ npm run typecheck          # → tsc --noEmit, 退出码 0
 npm run build              # → dist/extension.js
 
 # 1.3 协议测试（假 harness——不需要 dsh web）
-npm run protocol-test      # → 全部 39 项断言 ✓
+npm run protocol-test      # → 全部 50 项断言 ✓
 
 # 1.4 集成测试（会写入会话——需要 dsh web 运行）
 #     先在另一个终端启动 dsh web：

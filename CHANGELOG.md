@@ -58,10 +58,11 @@ is now implemented natively.
 
 ### New modules
 
-- `src/harness/auth.ts` — `BrowserSessionAuth`, cookie derivation, launch-URL adoption, persistence
+- `src/harness/auth.ts` — `BrowserSessionAuth`, cookie derivation, launch-URL adoption, persistence, optional local mint
+- `src/harness/local-credentials.ts` — reads the harness signing secret to mint a cookie without a paste
 - `src/harness/http.ts` — `node:http` client (platform `fetch` has no cookie jar)
 - `src/harness/ws.ts` — minimal RFC 6455 WebSocket client, because browser-shaped `WebSocket` cannot send the `Cookie` header required by the mux upgrade
-- `scripts/protocol-test.ts` — fake-harness protocol test, 34 assertions
+- `scripts/protocol-test.ts` — fake-harness protocol test, 50 assertions
 
 ### Bug fixes
 
@@ -80,6 +81,11 @@ is now implemented natively.
 - A refused `/api/remote.mux` upgrade sat until the open timeout and then blamed
   a generic timeout. It now fails fast with the actionable auth error (the mux
   status carries the HTTP status of the refused upgrade).
+- **Zero-paste connection.** With `deepseekHarness.autoSession` on (default), the
+  extension mints the browser-session cookie from the harness's own persisted
+  signing secret in `$DSH_HOME/.credentials.yaml` — byte-identical to one `dsh web`
+  would issue — so no launch URL is ever pasted. Set it to `false` to force the
+  sanctioned token exchange. The path used is logged on every connect.
 
 ### Session lifetime
 
@@ -94,8 +100,8 @@ needed after the 30-day expiry, a `host`/`port` change (the cookie name is
 
 - `tsc --noEmit` — 0 errors
 - Production build — `dist/extension.js` 98.4 kb
-- `scripts/protocol-test.ts` — 39/39 assertions pass against a fake 0.1.6 harness
-  (includes cookie-survives-restart and rotated-secret reporting)
+- `scripts/protocol-test.ts` — 50/50 assertions pass against a fake 0.1.6 harness
+  (includes local mint from the credential store, autoSession-off guard, cookie-survives-restart and rotated-secret reporting)
 
 ## [0.0.3] — 2026-08-16
 

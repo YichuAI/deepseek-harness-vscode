@@ -22,6 +22,9 @@
 import http from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createHash, createHmac, randomBytes } from 'node:crypto'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { Duplex } from 'node:stream'
 import { BrowserSessionAuth } from '../src/harness/auth.ts'
 import { HarnessClient } from '../src/harness/client.ts'
@@ -463,6 +466,105 @@ async function main(): Promise<void> {
     rotatedMsg.slice(0, 150),
   )
   rotatedClient.dispose()
+
+  // 40. Automatic session: no pasted token at all. Reading the harness's own
+  //     credential store must produce a cookie the host accepts.
+  const fakeHome = mkdtempSync(join(tmpdir(), 'dsh-home-'))
+  writeFileSync(join(fakeHome, '.credentials.yaml'), [
+    'version: 1',
+    'refs: {}',
+    'records:',
+    '  client-connection/browser-session:',
+    '    kind: grant',
+    '    payload:',
+    '      version: 1',
+    `      secret: ${SECRET.toString('base64url')}`,
+    '',
+  ].join('\n'))
+  const previousHome = process.env['DSH_HOME']
+  process.env['DSH_HOME'] = fakeHome
+  try {
+    let autoStore: string | undefined
+    const autoAuth = new BrowserSessionAuth({
+      host: '127.0.0.1',
+      port,
+      store: { load: async () => autoStore, save: async (v) => { autoStore = v } },
+      log: () => {},
+      allowLocalMint: true,
+    })
+    await autoAuth.init()
+    check('a fresh auth with nothing stored starts unready', !autoAuth.isReady())
+    await autoAuth.tryMintLocalSession()
+    eq('the local secret mints a usable cookie', autoAuth.cookieHeader()?.split('=')[0], cookieNameFor(authority))
+    eq('the mint is reported as local-credential', autoAuth.sessionOrigin(), 'local-credential')
+
+    // The minted cookie must actually verify against the host, i.e. connect
+    // succeeds end to end with no launch URL involved.
+    const autoClient = new HarnessClient({ host: '127.0.0.1', port, auth: autoAuth, log: () => {} })
+    await autoClient.connect()
+    check('connect succeeds with a locally minted cookie', autoClient.getState().kind === 'connected')
+    autoClient.dispose()
+  } finally {
+    if (previousHome === undefined) delete process.env['DSH_HOME']
+    else process.env['DSH_HOME'] = previousHome
+    rmSync(fakeHome, { recursive: true, force: true })
+  }
+
+  // 41a. `$DSH_HOME` points somewhere with no credentials document at all.
+  const absentHome = mkdtempSync(join(tmpdir(), 'dsh-absent-'))
+  process.env['DSH_HOME'] = absentHome
+  try {
+    const goneAuth = new BrowserSessionAuth({
+      host: '127.0.0.1',
+      port,
+      store: { load: async () => undefined, save: async () => {} },
+      log: () => {},
+      allowLocalMint: true,
+    })
+    const minted = await goneAuth.tryMintLocalSession()
+    check('an absent credential store cannot mint', !minted && !goneAuth.isReady())
+    check('the failure says where it looked', /no \.credentials\.yaml/.test(goneAuth.describeMintGap() ?? ''), goneAuth.describeMintGap()?.slice(0, 90))
+  } finally {
+    rmSync(absentHome, { recursive: true, force: true })
+  }
+
+  // 41b. The document exists but has not recorded a browser session yet — the
+  //      state of a harness home where `dsh web` never ran.
+  const emptyHome = mkdtempSync(join(tmpdir(), 'dsh-empty-'))
+  writeFileSync(join(emptyHome, '.credentials.yaml'), 'version: 1\nrefs: {}\nrecords: {}\n')
+  process.env['DSH_HOME'] = emptyHome
+  try {
+    let bareStore: string | undefined
+    const bareAuth = new BrowserSessionAuth({
+      host: '127.0.0.1',
+      port,
+      store: { load: async () => bareStore, save: async (v) => { bareStore = v } },
+      log: () => {},
+      allowLocalMint: true,
+    })
+    const minted = await bareAuth.tryMintLocalSession()
+    check('a store without the browser-session record cannot mint', !minted && !bareAuth.isReady())
+    check('the failure names the missing record', /client-connection\/browser-session/.test(bareAuth.describeMintGap() ?? ''), bareAuth.describeMintGap()?.slice(0, 90))
+    check('no cookie is persisted after a failed mint', bareStore === undefined)
+  } finally {
+    rmSync(emptyHome, { recursive: true, force: true })
+  }
+
+  // 41c. Disabling local mint must short-circuit before reading $DSH_HOME at all.
+  {
+    const gatedAuth = new BrowserSessionAuth({
+      host: '127.0.0.1',
+      port,
+      store: { load: async () => undefined, save: async () => {} },
+      log: () => {},
+      allowLocalMint: false,
+    })
+    const minted = await gatedAuth.tryMintLocalSession()
+    check('autoSession off refuses the mint without reading the credential store', !minted && !gatedAuth.isReady())
+  }
+
+  if (previousHome === undefined) delete process.env['DSH_HOME']
+  else process.env['DSH_HOME'] = previousHome
 
   client.dispose()
   await new Promise<void>((resolve) => { server.close(() => { resolve() }) })

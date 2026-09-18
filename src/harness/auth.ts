@@ -71,6 +71,14 @@ export function authorityOf(host: string, port: number): string {
 export class BrowserSessionAuth {
   private session: StoredSession | undefined
   private ready = false
+  /**
+   * Set when the harness answered 401 while `cookieHeader()` still looked usable.
+   * That combination means the cookie is well-formed and unexpired but failed the
+   * host's signature check — i.e. the signing secret in
+   * `$DSH_HOME/.credentials.yaml` changed underneath us. Reporting "expired"
+   * here would send the user chasing the wrong fix.
+   */
+  private rejected = false
 
   constructor(private readonly opts: BrowserSessionAuthOptions) {}
 
@@ -110,15 +118,34 @@ export class BrowserSessionAuth {
   /** Human-readable reason the plugin cannot talk to the harness yet. */
   describeGap(): string {
     const s = this.session
+    if (this.rejected && s !== undefined) {
+      return `the running harness rejected the stored cookie for ${s.authority} — `
+        + 'its signing secret ($DSH_HOME/.credentials.yaml) was almost certainly regenerated'
+    }
     if (s === undefined) return 'no browser session yet'
     if (s.authority !== authorityOf(this.opts.host, this.opts.port)) {
       return `stored session belongs to ${s.authority}, but the plugin is pointed at ${authorityOf(this.opts.host, this.opts.port)}`
     }
-    return `stored session for ${s.authority} expired at ${new Date(s.expiresAt).toISOString()}`
+    if (s.expiresAt <= Date.now()) {
+      return `stored session for ${s.authority} expired at ${new Date(s.expiresAt).toISOString()}`
+    }
+    return `the harness refused the stored session for ${s.authority}`
+  }
+
+  /**
+   * Record that the harness answered 401 even though we sent a cookie we
+   * believed was valid. See {@link rejected}.
+   */
+  noteRejected(): void {
+    if (!this.rejected) {
+      this.rejected = true
+      this.opts.log('auth: harness rejected a cookie we thought was valid — signing secret likely rotated')
+    }
   }
 
   async clear(): Promise<void> {
     this.session = undefined
+    this.rejected = false
     await this.opts.store.save(undefined)
   }
 
@@ -182,6 +209,7 @@ export class BrowserSessionAuth {
       value: parsed.value,
       expiresAt: parsed.expiresAt ?? Date.now() + 30 * 24 * 60 * 60 * 1000,
     }
+    this.rejected = false
     await this.opts.store.save(JSON.stringify(this.session))
     this.opts.log(`auth: acquired ${parsed.name} for ${authority}, valid until ${new Date(this.session.expiresAt).toISOString()}`)
     return { host: url.hostname, port }

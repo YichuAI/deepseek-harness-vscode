@@ -34,7 +34,7 @@ npm run typecheck          # → tsc --noEmit, exit 0
 npm run build              # → dist/extension.js
 
 # 1.3 protocol test (fake harness — no dsh web needed)
-npm run protocol-test      # → all 34 assertions ✓
+npm run protocol-test      # → all 39 assertions ✓
 
 # 1.4 integration test (writes a session — needs dsh web running)
 #     start dsh web first in another terminal:

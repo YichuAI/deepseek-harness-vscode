@@ -74,12 +74,28 @@ is now implemented natively.
   rebuilding the client (which leaked the old mux socket).
 - Editor context is rendered into the prompt text via `renderContextBlock()`
   because the new `session/prompt` has no `context` field.
+- A cookie that is well-formed, unexpired and authority-correct but still
+  rejected by the host was reported as "expired", sending users after the wrong
+  fix. It now reports that the host's signing secret was rotated.
+- A refused `/api/remote.mux` upgrade sat until the open timeout and then blamed
+  a generic timeout. It now fails fast with the actionable auth error (the mux
+  status carries the HTTP status of the refused upgrade).
+
+### Session lifetime
+
+The launch **token** dies with the `dsh web` process, but the **cookie** it buys
+is signed with a secret persisted in `$DSH_HOME/.credentials.yaml` and is valid
+for **30 days** by default. The extension stores that cookie, so restarting
+`dsh web` does **not** require re-running Set Session Token. Re-entry is only
+needed after the 30-day expiry, a `host`/`port` change (the cookie name is
+`dsh-auth-<sha256(host:port)>`), or a wiped/regenerated credentials file.
 
 ### Verification
 
 - `tsc --noEmit` — 0 errors
 - Production build — `dist/extension.js` 98.4 kb
-- `scripts/protocol-test.ts` — 34/34 assertions pass against a fake 0.1.6 harness
+- `scripts/protocol-test.ts` — 39/39 assertions pass against a fake 0.1.6 harness
+  (includes cookie-survives-restart and rotated-secret reporting)
 
 ## [0.0.3] — 2026-08-16
 

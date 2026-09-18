@@ -113,7 +113,21 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 
 8. 在浏览器中打开 `http://127.0.0.1:3080/` 的同一会话——两端看到的是同一轮对话。
 
-> **重启了 `dsh web`？** token 是按进程生成的。用新的启动 URL 重新执行一次 **Set Session Token from Launch URL**（或先 **Clear Session Token**）。扩展现在会明确告诉你该执行哪条命令，而不只是抛一个 `401`。
+### 需要每次都重填吗？
+
+不用——**重启不需要**。启动 URL 里的 **token** 确实随 `dsh web` 进程消亡，但它换来的
+**cookie** 是用持久化在 `$DSH_HOME/.credentials.yaml` 里的密钥签名的，**默认有效期 30 天**。
+扩展保存的就是这个 cookie，所以 `dsh web` 可以随便重启。
+
+只有这几种情况才需要重新执行：
+
+| 情况 | 原因 |
+| --- | --- |
+| cookie 超过 30 天有效期 | `expiresAt` 写在被签名的 cookie 载荷里 |
+| 你改了 `deepseekHarness.port`（或 `host`） | cookie 名是 `dsh-auth-<sha256(host:port)>`，绑定签发时的 authority |
+| `$DSH_HOME/.credentials.yaml` 被删或重新生成 | 签名密钥没了，现存 cookie 全部校验失败 |
+
+万一真过期了，扩展会明确告诉你该跑哪条命令，而不是只抛一个 `401`。
 
 ## 配置
 
@@ -156,7 +170,7 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 一个独立的 Node 脚本用真实客户端代码驱动一个**假**的 0.1.6 harness —— 不需要 `dsh web`：
 
 ```bash
-npm run protocol-test    # 34 项断言：认证、cookie 派生、remote.mux、
+npm run protocol-test    # 39 项断言：认证、cookie 派生、remote.mux、
                          # 端点命名、{args} payload、审批瀑布、
                          # assistant 流、已删除端点的 404 处理
 ```
@@ -175,7 +189,7 @@ npm run build        # esbuild → dist/extension.js
 npm run watch        # 变更时自动重建
 npm run typecheck
 npm run package      # → harness-connector-deepseek-0.0.4.vsix
-npm run protocol-test      # 针对假 0.1.6 harness 的 34 项协议断言
+npm run protocol-test      # 针对假 0.1.6 harness 的 39 项协议断言
 ```
 
 在 VS Code 中按 `F5` 启动带有该扩展的扩展开发宿主。

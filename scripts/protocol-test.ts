@@ -412,6 +412,58 @@ async function main(): Promise<void> {
   catch (e) { gone = (e as Error).message }
   check('a deleted endpoint reports 404 with guidance', /404/.test(gone) && /0\.1\.6-alpha/.test(gone), gone.slice(0, 80))
 
+  // 35. The cookie outlives the `dsh web` process. Only the launch *token* is
+  //     per-process; the cookie is signed by a secret persisted in
+  //     $DSH_HOME/.credentials.yaml, so a fresh auth object (as after a restart)
+  //     restoring the same stored cookie must still connect without a new token.
+  const restartedAuth = new BrowserSessionAuth({
+    host: '127.0.0.1',
+    port,
+    store: { load: async () => persisted, save: async (v) => { persisted = v } },
+    log: () => {},
+  })
+  await restartedAuth.init()
+  check('the cookie survives a restart without a new token', restartedAuth.isReady())
+  const restartedClient = new HarnessClient({ host: '127.0.0.1', port, auth: restartedAuth, log: () => {} })
+  await restartedClient.connect()
+  check('reconnect after a restart succeeds', restartedClient.getState().kind === 'connected')
+  restartedClient.dispose()
+
+  // 36. A cookie that is well-formed, unexpired and authority-correct but fails
+  //     the host's signature check means the signing secret rotated. Reporting
+  //     "expired" here would send the user after the wrong fix.
+  const authority = `127.0.0.1:${String(port)}`
+  const staleBody = Buffer.from(JSON.stringify({
+    version: 1,
+    authority,
+    issuedAt: Date.now(),
+    expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
+  }), 'utf8').toString('base64url')
+  const rotatedCookie = `v1.${staleBody}.${createHmac('sha256', randomBytes(32)).update(staleBody).digest().toString('base64url')}`
+  let rotatedStore: string | undefined = JSON.stringify({
+    authority,
+    name: cookieNameFor(authority),
+    value: rotatedCookie,
+    expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
+  })
+  const rotatedAuth = new BrowserSessionAuth({
+    host: '127.0.0.1',
+    port,
+    store: { load: async () => rotatedStore, save: async (v) => { rotatedStore = v } },
+    log: () => {},
+  })
+  await rotatedAuth.init()
+  check('a rotated-secret cookie still looks usable to the client', rotatedAuth.isReady())
+  const rotatedClient = new HarnessClient({ host: '127.0.0.1', port, auth: rotatedAuth, log: () => {} })
+  let rotatedMsg = ''
+  try { await rotatedClient.connect() } catch (e) { rotatedMsg = (e as Error).message }
+  check(
+    'a rejected cookie is blamed on the signing secret, not expiry',
+    /signing secret/.test(rotatedMsg) && !/expired/.test(rotatedMsg),
+    rotatedMsg.slice(0, 150),
+  )
+  rotatedClient.dispose()
+
   client.dispose()
   await new Promise<void>((resolve) => { server.close(() => { resolve() }) })
 

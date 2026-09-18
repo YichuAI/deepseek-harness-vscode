@@ -113,7 +113,23 @@ For your safety, the following remain out of scope:
 
 8. Open the same session in your browser at `http://127.0.0.1:3080/` — both surfaces see the same turn.
 
-> **Restarted `dsh web`?** The token is per-process. Re-run **Set Session Token from Launch URL** with the new launch URL (or **Clear Session Token** first). The extension now tells you exactly which command to run instead of just reporting `401`.
+### Do I have to do this again?
+
+No — not on restart. The launch **token** dies with the `dsh web` process, but the
+**cookie** it buys is signed with a secret persisted in `$DSH_HOME/.credentials.yaml`
+and lives **30 days** by default. The extension stores that cookie, so you can
+restart `dsh web` freely.
+
+You only need to re-run the command when:
+
+| Situation | Why |
+| --- | --- |
+| The cookie passes its 30-day expiry | `expiresAt` is inside the signed cookie payload |
+| You change `deepseekHarness.port` (or `host`) | the cookie name is `dsh-auth-<sha256(host:port)>`, so it is bound to the authority it was minted under |
+| `$DSH_HOME/.credentials.yaml` is wiped or regenerated | the signing secret is gone, so every existing cookie fails verification |
+
+If it ever does lapse, the extension tells you which command to run instead of
+just reporting `401`.
 
 ## Configuration
 
@@ -157,7 +173,7 @@ A standalone Node script drives the real client code against a **fake** 0.1.6
 harness — no `dsh web` needed:
 
 ```bash
-npm run protocol-test    # 34 assertions: auth, cookie derivation, remote.mux,
+npm run protocol-test    # 39 assertions: auth, cookie derivation, remote.mux,
                          # endpoint naming, {args} payloads, approval waterfall,
                          # assistant stream, deleted-endpoint 404 handling
 ```
@@ -177,7 +193,7 @@ npm run build        # esbuild → dist/extension.js
 npm run watch        # rebuild on change
 npm run typecheck
 npm run package      # → harness-connector-deepseek-0.0.4.vsix
-npm run protocol-test      # 34 protocol assertions against a fake 0.1.6 harness
+npm run protocol-test      # 39 protocol assertions against a fake 0.1.6 harness
 ```
 
 Press `F5` in VS Code to launch an Extension Development Host with the extension loaded.

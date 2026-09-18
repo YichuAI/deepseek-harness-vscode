@@ -49,12 +49,25 @@ Harness 0.1.6-alpha 对线缆协议做了三处破坏性变更，导致本扩展
 - 审批应答改用 `eventId`（瀑布事件）作键，而非旧的 `approvalId`；`agentId` 即会话 id。
 - 修改 `host`/`port` 现在调用 `client.retarget()` + 重连，而不是重建 client（旧实现会泄漏原来的 mux socket）。
 - 编辑器上下文通过 `renderContextBlock()` 渲染进提示文本，因为新的 `session/prompt` 没有 `context` 字段。
+- 格式正确、未过期、authority 也匹配、但仍被 host 拒绝的 cookie，之前被报成"已过期"，
+  把用户引向错误的修复方向。现在会明确报告 host 的签名密钥已被轮换。
+- 被拒绝的 `/api/remote.mux` 升级之前会一直等到超时，然后归咎于一个笼统的超时。
+  现在会立刻失败并给出可操作的认证错误（mux 状态携带被拒升级的 HTTP 状态码）。
+
+### 会话有效期
+
+启动 URL 里的 **token** 随 `dsh web` 进程消亡，但它换来的 **cookie** 是用持久化在
+`$DSH_HOME/.credentials.yaml` 里的密钥签名的，**默认 30 天**有效。扩展保存的就是这个 cookie，
+所以**重启 `dsh web` 不需要**重新执行 Set Session Token。只有三种情况需要重新填：
+超过 30 天有效期、改了 `host`/`port`（cookie 名是 `dsh-auth-<sha256(host:port)>`）、
+或凭据文件被删除/重新生成。
 
 ### 验证结果
 
 - `tsc --noEmit` —— 0 错误
 - 生产构建 —— `dist/extension.js` 98.4 kb
-- `scripts/protocol-test.ts` —— 针对假 0.1.6 harness，34/34 断言通过
+- `scripts/protocol-test.ts` —— 针对假 0.1.6 harness，39/39 断言通过
+  （含 cookie 跨重启存活、密钥轮换的报错措辞）
 
 ## [0.0.3] — 2026-08-16
 

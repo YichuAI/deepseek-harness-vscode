@@ -209,6 +209,9 @@ export class HarnessClient implements Disposable {
 
   /** The message shown when the harness refuses us: it names the exact fix. */
   private authRequired(): HarnessAuthRequiredError {
+    // Only meaningful when we *did* send a cookie: that means the host rejected
+    // its signature rather than missing it, and the wording should say so.
+    this.opts.auth.noteRejected()
     return new HarnessAuthRequiredError(
       `DeepSeek Harness requires a browser session before it answers /api/* (${this.opts.auth.describeGap()}). `
       + 'Start `dsh web`, then run "DeepSeek Harness: Set Session Token from Launch URL" '
@@ -615,6 +618,12 @@ export class HarnessClient implements Disposable {
         },
         onStatus: (s) => {
           this.opts.log(`mux ${s.kind}${'reason' in s ? `: ${s.reason}` : ''}${'message' in s ? `: ${s.message}` : ''}`)
+          // A refused upgrade never produces a `$events` ready frame, so without
+          // this the connect would sit until OPEN_TIMEOUT_MS and then blame a
+          // generic timeout instead of the real cause.
+          if (s.kind === 'error') {
+            this.failReady(s.status === 401 ? this.authRequired() : new Error(`mux: ${s.message}`))
+          }
           for (const l of this.muxStatusListeners) {
             try { l(s) } catch { /* noop */ }
           }

@@ -30,7 +30,8 @@ export type MuxStatus =
   | { kind: 'connecting' }
   | { kind: 'open' }
   | { kind: 'closed'; reason: string }
-  | { kind: 'error'; message: string }
+  /** `status` is present when the WebSocket *upgrade* was answered with that HTTP code. */
+  | { kind: 'error'; message: string; status?: number }
 
 /** Reconnect backoff: 250ms, 500ms, 1s, 2s, 5s (capped). */
 const BACKOFF_STEPS = [250, 500, 1000, 2000, 5000] as const
@@ -125,6 +126,7 @@ export class RemoteStreamMux implements Disposable {
           message: err instanceof WebSocketUpgradeError && err.status === 401
             ? 'unauthorized: the harness requires a browser session cookie'
             : err.message,
+          ...(err instanceof WebSocketUpgradeError ? { status: err.status } : {}),
         })
         // A refused upgrade never fires 'close'; keep the socket from leaking.
         try { this.ws?.destroy() } catch { /* noop */ }

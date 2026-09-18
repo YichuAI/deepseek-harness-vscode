@@ -1,4 +1,4 @@
-# DeepSeek Harness Connector for VS Code (v0.0.3)
+# DeepSeek Harness Connector for VS Code (v0.0.4)
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
@@ -82,8 +82,10 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 
    ```bash
    dsh web
-   # → http://127.0.0.1:3080
+   # → http://127.0.0.1:3080/?token=<43 位 token>
    ```
+
+   Harness ≥ 0.1.6 会打印一个**带一次性 token 的启动 URL**。复制它。
 
 2. 从 [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek) 安装，或通过命令行：
 
@@ -94,18 +96,24 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
    或从 [GitHub Releases](https://github.com/liangwythu/deepseek-harness-vscode/releases) 安装 VSIX：
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.0.3.vsix
+   code --install-extension harness-connector-deepseek-0.0.4.vsix
    ```
 
-3. 在 VS Code 中打开一个你想绑定到 Harness 工作区的文件夹。
+3. **把浏览器会话交给扩展。** 在命令面板执行 **`DeepSeek Harness: Set Session Token from Launch URL`**，粘贴启动 URL（或裸 token）。扩展会用它换取 `dsh-auth-…` cookie，并存入 VS Code 的 secret storage（系统钥匙串，**不会**写入 `settings.json`）。
 
-4. DeepSeek Harness 活动栏图标出现；扩展自动连接。如果你的文件夹匹配到一个已有的 Harness 工作区，其会话会出现在下拉列表中。选择一个，继续对话。
+   Harness ≥ 0.1.6 对所有 `/api/*` 强制校验该 cookie，因此这一步是必需的。跳过的话 Connect 会报"requires a browser session"，而不是一个光秃秃的 `401`。
 
-5. **没有匹配的工作区？** 直接输入提示按 Send——工作区和会话会自动创建。
+4. 在 VS Code 中打开一个你想绑定到 Harness 工作区的文件夹。
 
-6. **附加文件上下文** —— 输入 `@file:src/main.ts`，或在资源管理器中右键文件选择 **Add to Harness Chat**。在编辑器中选中文本，右键选择 **Send Selection to Harness** 可插入带行范围的引用。
+5. DeepSeek Harness 活动栏图标出现；扩展自动连接。如果你的文件夹匹配到一个已有的 Harness 工作区，其会话会出现在下拉列表中。选择一个，继续对话。
 
-7. 在浏览器中打开 `http://127.0.0.1:3080/` 的同一会话——两端看到的是同一轮对话。
+6. **没有匹配的工作区？** 直接输入提示按 Send——工作区和会话会自动创建。
+
+7. **附加文件上下文** —— 输入 `@file:src/main.ts`，或在资源管理器中右键文件选择 **Add to Harness Chat**。在编辑器中选中文本，右键选择 **Send Selection to Harness** 可插入带行范围的引用。
+
+8. 在浏览器中打开 `http://127.0.0.1:3080/` 的同一会话——两端看到的是同一轮对话。
+
+> **重启了 `dsh web`？** token 是按进程生成的。用新的启动 URL 重新执行一次 **Set Session Token from Launch URL**（或先 **Clear Session Token**）。扩展现在会明确告诉你该执行哪条命令，而不只是抛一个 `401`。
 
 ## 配置
 
@@ -118,6 +126,8 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 ## 命令
 
 - `DeepSeek Harness: Connect` / `Disconnect`（连接 / 断开）
+- `DeepSeek Harness: Set Session Token from Launch URL`（从启动 URL 设置会话 token）——粘贴 `dsh web` 启动 URL 以获取浏览器会话 cookie
+- `DeepSeek Harness: Clear Session Token`（清除会话 token）——删除已存储的 cookie（例如切换 `dsh web` 实例前）
 - `DeepSeek Harness: New Session`（在当前工作区新建会话）
 - `DeepSeek Harness: Refresh Sessions`（刷新会话列表）
 - `DeepSeek Harness: Move to Right Side Bar`（移至右侧边栏）——将视图停靠在辅助侧边栏（像聊天面板一样），不再与文件浏览器争抢左侧空间。也可通过 webview 头部的 ⇲ 按钮触发。
@@ -137,17 +147,24 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 
 `test/fixtures/` 存放了线缆格式的脱敏快照，用于检测上游 Harness 协议漂移：
 
-- `host-describe.json`、`workspace-list.json`、`session-list.json`、`session-history.json`、`session-prompt.json`、`session-event.json`
+- `host-describe.json`、`workspace-list.json`、`session-list.json`、`session-history.json`、`session-prompt.json`、`session-event.json` —— **注意：** 这些是 0.1.6 之前的快照，仅作为历史漂移参考保留。`host-describe` / `session-history` / `workspace-list` 在上游已不存在。
 
 不存储任何凭据、API 密钥或真实提示内容——仅保留 JSON 结构（文本字段已脱敏）。
 
-## 协议探测
+## 协议测试
 
-一个独立的 Node 脚本可在你运行的 `dsh web` 上验证完整闭环：
+一个独立的 Node 脚本用真实客户端代码驱动一个**假**的 0.1.6 harness —— 不需要 `dsh web`：
 
 ```bash
-npm run spike            # 只读验证（连接 / 列表 / 历史 / 打开 mux）
-npm run spike -- --prompt  # 同时测试提示 + 实时事件 + 取消
+npm run protocol-test    # 34 项断言：认证、cookie 派生、remote.mux、
+                         # 端点命名、{args} payload、审批瀑布、
+                         # assistant 流、已删除端点的 404 处理
+```
+
+要对**真实** `dsh web` 做闭环验证，用集成测试（需先启动 `dsh web`）：
+
+```bash
+DSH_LAUNCH_URL='http://127.0.0.1:3080/?token=<token>' npm run integration-test
 ```
 
 ## 开发
@@ -157,15 +174,16 @@ npm install
 npm run build        # esbuild → dist/extension.js
 npm run watch        # 变更时自动重建
 npm run typecheck
-npm run package      # → harness-connector-deepseek-0.0.3.vsix
+npm run package      # → harness-connector-deepseek-0.0.4.vsix
+npm run protocol-test      # 针对假 0.1.6 harness 的 34 项协议断言
 ```
 
 在 VS Code 中按 `F5` 启动带有该扩展的扩展开发宿主。
 
 ## 已验证版本
 
-- DeepSeek Harness host `v0.0.1`（`@deepseek-ai/dsh-root`），默认 `dsh web` 端口 `3080`。
-- 线缆契约：`packages/host/apiproxy/src/api/`（权威来源）。
+- DeepSeek Harness host `v0.1.6-alpha`，默认 `dsh web` 端口 `3080`。旧版 host（≤ 0.0.x）已不再支持 —— 0.1.6 的线缆协议是一次破坏性变更。
+- 线缆契约：`/api/remote.mux` 逻辑流多路复用器 + 浏览器会话 cookie 认证。上游在 0.1.6 移除了 `packages/host/apiproxy`，旧的 `host.describe` / `events.mux` 契约已不存在。
 
 ## 限制
 

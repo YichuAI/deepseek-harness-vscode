@@ -32,13 +32,14 @@ npm run typecheck          # → tsc --noEmit, 退出码 0
 # 1.2 构建打包
 npm run build              # → dist/extension.js
 
-# 1.3 协议探测（只读，不发送提示）
-npm run spike              # → 全部 9 个协议步骤 ✓
+# 1.3 协议测试（假 harness——不需要 dsh web）
+npm run protocol-test      # → 全部 34 项断言 ✓
 
 # 1.4 集成测试（会写入会话——需要 dsh web 运行）
 #     先在另一个终端启动 dsh web：
 #       cd ../deepseek-harness && npm run dsh -- web
-npm run integration-test   # → 11/11 检查 ✓, 闭环 OK
+#     然后复制它打印的启动 URL
+DSH_LAUNCH_URL='http://127.0.0.1:3080/?token=<token>' npm run integration-test
 
 # 1.5 打包 VSIX
 npm run package            # → harness-connector-deepseek-<版本>.vsix

@@ -15,7 +15,9 @@ export type ConnectionKind = 'disconnected' | 'connecting' | 'connected' | 'erro
 
 export interface UiState {
   connection: ConnectionKind
-  hostInfo?: { version: string; provider?: string; model?: string }
+  /** Host identity. `home` comes from the `$events` ready frame; provider/model
+   *  are best-effort (the removed `host.describe` used to supply them). */
+  hostInfo?: { version?: string; home?: string; provider?: string; model?: string }
   errorMessage?: string
   muxStatus?: string
   /** Workspace:
@@ -85,7 +87,12 @@ export function connectionToUi(
     case 'connected':
       return {
         connection: 'connected',
-        hostInfo: { version: conn.describe.version, provider: conn.describe.provider, model: conn.describe.model },
+        hostInfo: {
+          version: conn.info.version,
+          home: conn.info.home,
+          provider: conn.info.provider,
+          model: conn.info.model,
+        },
         muxStatus: mux ? muxLabel(mux) : undefined,
       }
     case 'error': return { connection: 'error', errorMessage: conn.message, muxStatus: undefined }

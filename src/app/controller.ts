@@ -28,7 +28,7 @@ import { connectionToUi, sessionsToUi, workspaceToUi } from './state.ts'
 import type { WebviewAction } from '../view/provider.ts'
 import type { HarnessWebviewViewProvider } from '../view/provider.ts'
 import { CompositeDisposable } from '../disposable.ts'
-import { collectEditorContext, mergeContext, parseAtFileReferences } from '../context/collector.ts'
+import { collectEditorContext, mergeContext, parseAtFileReferences, renderContextBlock } from '../context/collector.ts'
 import { ReviewController } from '../review/controller.ts'
 import { ReviewVirtualDocumentProvider } from '../review/virtualDocument.ts'
 import { ApprovalStore } from '../approval/store.ts'
@@ -228,12 +228,32 @@ export class AppController {
 
   private applyMuxFrame(frame: unknown): void {
     if (!this.model || !this.activeSessionId) return
-    const f = frame as { type?: string; sessionId?: string; event?: unknown; error?: unknown }
+    const f = frame as {
+      type?: string
+      sessionId?: string
+      event?: unknown
+      error?: unknown
+      turn?: number
+      step?: number
+      chunk?: unknown
+    }
     if (f.type === 'session/event' && f.sessionId === this.activeSessionId && f.event) {
       this.model.applyEvent(f.event as Parameters<ConversationModel['applyEvent']>[0])
       this.d.setState({ snapshot: this.model.snapshot() })
       const snap = this.d.getState().snapshot
       this.d.setState({ canStop: snap?.running === true })
+      return
+    }
+    // DSH 0.1.6+ carries assistant deltas outside the durable journal, so they
+    // arrive as their own frame type and bypass the model's seq guard.
+    if (f.type === 'assistant/stream' && f.sessionId === this.activeSessionId
+      && typeof f.turn === 'number' && typeof f.step === 'number' && f.chunk) {
+      this.model.applyStreamChunk(
+        f.turn,
+        f.step,
+        f.chunk as Parameters<ConversationModel['applyStreamChunk']>[2],
+      )
+      this.d.setState({ snapshot: this.model.snapshot() })
       return
     }
     if (f.type === 'stream/error' && f.error) {
@@ -242,8 +262,8 @@ export class AppController {
     }
   }
 
-  /** Handle approval frames from the dedicated approval listener (has rpcId). */
-  private handleApprovalFrame(frame: unknown, rpcId: RpcId): void {
+  /** Handle approval frames from the dedicated approval listener (has the waterfall eventId). */
+  private handleApprovalFrame(frame: unknown, eventId: RpcId): void {
     const f = frame as {
       type: string
       sessionId?: SessionId
@@ -254,8 +274,8 @@ export class AppController {
       outcome?: string
     }
     if (f.type === 'approval/requested' && f.sessionId && f.approvalId) {
-      const approval = this.approvalStore.upsert({
-        rpcId,
+      this.approvalStore.upsert({
+        rpcId: eventId,
         sessionId: f.sessionId,
         approvalId: f.approvalId,
         toolName: f.toolName,
@@ -264,7 +284,7 @@ export class AppController {
       })
       // Link approval to ToolItem if callId matches
       if (f.callId && this.model) {
-        this.model.setApprovalRpcId(f.callId, rpcId)
+        this.model.setApprovalRpcId(f.callId, eventId)
         this.d.setState({ snapshot: this.model.snapshot() })
       }
       this.d.log.info(`Approval requested: ${f.toolName ?? 'unknown'} (callId=${f.callId ?? '—'})`)
@@ -272,16 +292,16 @@ export class AppController {
       return
     }
     if (f.type === 'approval/resolved' && f.approvalId) {
-      this.approvalStore.resolve(rpcId, f.outcome ?? 'resolved')
+      this.approvalStore.resolve(eventId, f.outcome ?? 'resolved')
       this.d.log.info(`Approval resolved: outcome=${f.outcome ?? '—'}`)
       this.pushReviewApprovalState()
       return
     }
   }
 
-  /** Respond to an approval via POST /api/respond. */
-  private async respondApproval(rpcId: RpcId, outcome: 'allowed-once' | 'rejected'): Promise<void> {
-    const approval = this.approvalStore.getByRpcId(rpcId)
+  /** Answer an approval waterfall via `POST /api/$events/result`. */
+  private async respondApproval(eventId: RpcId, outcome: 'allowed-once' | 'rejected'): Promise<void> {
+    const approval = this.approvalStore.getByRpcId(eventId)
     if (!approval) {
       this.d.notifyError('Approval not found or already resolved.')
       return
@@ -291,14 +311,10 @@ export class AppController {
       this.d.notifyError('This approval cannot be allowed from VS Code. Please review in the Harness Web UI.')
       return
     }
-    this.approvalStore.setResponding(rpcId)
+    this.approvalStore.setResponding(eventId)
     this.pushReviewApprovalState()
     try {
-      await this.d.client.respondApproval(rpcId, {
-        sessionId: approval.sessionId,
-        approvalId: approval.approvalId,
-        outcome,
-      })
+      await this.d.client.respondApproval(eventId, outcome)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       this.d.log.error('respondApproval: ' + msg)
@@ -408,13 +424,14 @@ export class AppController {
         }
       }
 
-      // 6: only attach `context` metadata on the first prompt of this session.
-      //    On subsequent prompts, file content is already inlined above.
+      // 6: only attach editor context on the first prompt of this session — on
+      //    later prompts the file content is already inlined above. DSH 0.1.6
+      //    removed `payload.context`, so the metadata is rendered into the text.
       const isFirstPrompt = !this.firstPromptSent.has(this.activeSessionId)
-      let context: PromptContext | undefined
       if (isFirstPrompt) {
         const editorCtx = collectEditorContext(this.d.vscodeAPI.window)
-        context = mergeContext(editorCtx, resolvedRefs)
+        const contextBlock = renderContextBlock(mergeContext(editorCtx, resolvedRefs))
+        if (contextBlock) promptText = `${promptText}\n\n${contextBlock}`
         this.firstPromptSent.add(this.activeSessionId)
       }
 
@@ -426,7 +443,6 @@ export class AppController {
         this.activeSessionId,
         promptText,
         Intl.DateTimeFormat().resolvedOptions().timeZone,
-        context,
       )
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -521,10 +537,12 @@ export class AppController {
     this.d.pushState()
   }
 
-  /** Replace the underlying client (e.g. on host/port config change). */
+  /** Replace the underlying client (e.g. on host/port config change).
+   *  The caller owns the connect flow and must re-run `start()`. */
   replaceClient(next: HarnessClient): void {
+    this.d.client = next
     this.disposables.dispose()
-    // Rebuild state on new client; connect flow handled by caller.
+    // Rebuild state on the new client; connect flow handled by the caller.
   }
 
   // ─── helper: push client-derived state (onStateChange + onMuxStatusChange) ──

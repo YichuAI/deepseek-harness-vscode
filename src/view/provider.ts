@@ -24,7 +24,7 @@ import { CLIENT_SCRIPT } from './client.ts'
 /** UI state pushed to the webview (full snapshot each time). */
 export interface UiState {
   connection: 'disconnected' | 'connecting' | 'connected' | 'error'
-  hostInfo?: { version: string; provider?: string; model?: string }
+  hostInfo?: { version?: string; home?: string; provider?: string; model?: string }
   errorMessage?: string
   muxStatus?: string
   workspace?: { workspaceId: string; title: string; path: string } | null

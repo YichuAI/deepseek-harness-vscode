@@ -2,7 +2,11 @@
  * Integration test — exercises the REAL extension source (HarnessClient +
  * ConversationModel) against the running dsh web, without the webview/VS Code layer.
  *
- * Run:  npx tsx scripts/integration-test.ts
+ * Run:  DSH_LAUNCH_URL='dsh web: http://127.0.0.1:3080/?token=…' npx tsx scripts/integration-test.ts
+ *
+ * DSH 0.1.6 authenticates every /api/* request and the mux upgrade with a
+ * browser-session cookie, so the test needs the launch URL the CLI prints
+ * (`DSH_LAUNCH_URL`) and exchanges its token the same way the extension does.
  *
  * Validates that the production code path completes the closed loop:
  * connect → workspace → session → history → prompt → live events fold →
@@ -12,15 +16,28 @@
  */
 
 import { HarnessClient } from '../src/harness/client.ts'
+import { BrowserSessionAuth } from '../src/harness/auth.ts'
 import { ConversationModel } from '../src/conversation/model.ts'
 import type { ConversationItem } from '../src/conversation/types.ts'
 
 const HOST = process.env.DSH_HOST ?? '127.0.0.1'
 const PORT = Number(process.env.DSH_PORT ?? 3080)
+const LAUNCH_URL = process.env.DSH_LAUNCH_URL ?? ''
 const TEST_CWD = process.env.TEST_CWD ?? 'e:\\deepseek\\workspace_test'
 
 const log: string[] = []
-const client = new HarnessClient({ host: HOST, port: PORT, log: (m) => log.push(m) })
+/** The test owns no VS Code SecretStorage; the cookie lives in this run only. */
+let persisted: string | undefined
+const auth = new BrowserSessionAuth({
+  host: HOST,
+  port: PORT,
+  store: {
+    load: async () => persisted,
+    save: async (value) => { persisted = value },
+  },
+  log: (m) => log.push(m),
+})
+const client = new HarnessClient({ host: HOST, port: PORT, auth, log: (m) => log.push(m) })
 
 let step = 0
 function check(name: string, ok: boolean, detail = ''): void {
@@ -30,17 +47,38 @@ function check(name: string, ok: boolean, detail = ''): void {
 }
 
 async function main(): Promise<void> {
-  console.log(`\nDeepSeek Harness Connector v0.0.2 integration test → http://${HOST}:${PORT}\n`)
+  console.log(`\nDeepSeek Harness Connector integration test → http://${HOST}:${PORT}\n`)
+
+  if (LAUNCH_URL === '') {
+    console.log('Set DSH_LAUNCH_URL to the `dsh web: http://127.0.0.1:<port>/?token=…` line the CLI printed.')
+    process.exit(1)
+  }
+  const origin = await auth.adoptLaunchUrl(LAUNCH_URL)
+  if (origin.host !== HOST || origin.port !== PORT) {
+    console.log(`note: launch URL targets ${origin.host}:${String(origin.port)}; retargeting the client.`)
+    client.retarget(origin.host, origin.port)
+  }
+  check('session acquired', auth.isReady(), auth.isReady() ? 'cookie stored' : auth.describeGap())
 
   // 01. Security boundary: non-loopback is refused.
-  const evil = new HarnessClient({ host: '0.0.0.0', port: PORT, log: () => {} })
+  const evilAuth = new BrowserSessionAuth({
+    host: '0.0.0.0',
+    port: PORT,
+    store: { load: async () => undefined, save: async () => {} },
+    log: () => {},
+  })
+  const evil = new HarnessClient({ host: '0.0.0.0', port: PORT, auth: evilAuth, log: () => {} })
   try { await evil.connect(); check('loopback fence', false, '0.0.0.0 was accepted') }
   catch (e) { check('loopback fence', /local DeepSeek Harness/i.test((e as Error).message), (e as Error).message) }
 
   // 02. Connect + state.
   await client.connect()
   const conn = client.getState()
-  check('connect', conn.kind === 'connected', conn.kind === 'connected' ? `v${conn.describe.version}` : conn.kind)
+  check(
+    'connect',
+    conn.kind === 'connected',
+    conn.kind === 'connected' ? `home=${conn.info.home} ${conn.info.provider ?? ''}/${conn.info.model ?? ''}` : conn.kind,
+  )
 
   // 03. Resolve (or create) a workspace for the test cwd.
   const { items } = await client.listWorkspaces()
@@ -70,11 +108,24 @@ async function main(): Promise<void> {
   let receivedTurnEnd = false
   const sub = client.subscribe(sessionId, (frames) => {
     for (const f of frames) {
-      const frame = f as { type?: string; sessionId?: string; event?: { type?: string } }
+      const frame = f as {
+        type?: string
+        sessionId?: string
+        event?: { type?: string }
+        turn?: number
+        step?: number
+        chunk?: unknown
+      }
       if (frame.type === 'session/event' && frame.sessionId === sessionId && frame.event) {
         model.applyEvent(frame.event as never)
-        if (frame.event.type === 'assistant/message' || frame.event.type === 'assistant/chunk') receivedAssistant = true
+        if (frame.event.type === 'assistant/message') receivedAssistant = true
         if (frame.event.type === 'turn/end') receivedTurnEnd = true
+      }
+      // 0.1.6+ carries assistant deltas out-of-band from the durable journal.
+      if (frame.type === 'assistant/stream' && frame.sessionId === sessionId
+        && typeof frame.turn === 'number' && typeof frame.step === 'number') {
+        model.applyStreamChunk(frame.turn, frame.step, frame.chunk as never)
+        receivedAssistant = true
       }
     }
   })
@@ -124,7 +175,7 @@ async function main(): Promise<void> {
   client.dispose()
 
   console.log('\n────────────────────────────────────────')
-  console.log('  v0.0.2 integration test passed — ConversationModel closed loop OK')
+  console.log('  integration test passed — ConversationModel closed loop OK')
   console.log('────────────────────────────────────────\n')
 }
 

@@ -85,9 +85,13 @@ export const CLIENT_SCRIPT = /* js */ `
     const labels = { disconnected: 'Disconnected', connecting: 'Connecting…', connected: 'Connected', error: 'Connection error' };
     $('status-text').textContent = labels[conn] || conn;
     const hi = state.hostInfo;
-    $('host-info').textContent = hi
-      ? 'v' + hi.version + (hi.provider ? ' · ' + hi.provider : '') + (hi.model ? ' / ' + hi.model : '')
-      : '';
+    const bits: string[] = [];
+    if (hi) {
+      if (hi.home) bits.push(hi.home);
+      if (hi.provider) bits.push(hi.provider);
+      if (hi.model) bits.push(hi.model);
+    }
+    $('host-info').textContent = bits.join(' · ');
     $('mux-status').textContent = state.muxStatus ? ('stream: ' + state.muxStatus) : '';
     if (state.errorMessage) $('host-info').textContent = state.errorMessage;
 

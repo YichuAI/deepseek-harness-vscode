@@ -22,13 +22,18 @@
 │ view/toolPresentation.ts  — 工具名 → 人类可读标题               │
 ├──────────────────────────────────────────────────────────────────┤
 │ harness/client.ts         — HarnessClient: 唯一的网络边界        │
-│ harness/events.ts         — MuxStream (WS) + EventBuffer (30ms)  │
-│ harness/protocol.ts       — 线缆类型（镜像上游 api/）            │
+│ harness/events.ts         — RemoteStreamMux + EventBuffer (30ms) │
+│ harness/ws.ts             — 最小 RFC6455 客户端（可带 Cookie）   │
+│ harness/auth.ts           — 浏览器会话 cookie（token 换 cookie） │
+│ harness/http.ts           — node:http 封装（可控 Cookie/Set-Cookie）│
+│ harness/protocol.ts       — 线缆类型（镜像上游 Remote 契约）     │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-- `harness/protocol.ts` **只有类型**——零运行时、零依赖。它镜像 `@deepseek-ai/dsh-host-apiproxy/api`（权威契约位于 `deepseek-harness/packages/host/apiproxy/src/api/`）。
-- `harness/client.ts` 是**唯一**允许调用 `fetch` 或打开 WebSocket 的模块。其上层所有代码都通过 `HarnessClient` 访问网络。
+- `harness/protocol.ts` **只有类型**——零运行时、零依赖。它镜像 DSH 0.1.6-alpha 的 Remote（Typert Gateway）契约：`packages/client/connection/src/rpc-host.ts`、`packages/api/gateway/src/stream-protocol.ts`、`packages/api/session-controller/src/types.ts`、`packages/api/workspace-controller/src/types.ts`、`packages/api/remotes/src/remote-events.ts`。
+- `harness/client.ts` 是**唯一**允许发起 HTTP 或打开 socket 的模块。其上层所有代码都通过 `HarnessClient` 访问网络。
+- `harness/ws.ts` 自己实现握手与帧编解码，**不用**平台 `WebSocket`：浏览器形状的 WebSocket API 无法设置任意请求头，而 mux 升级现在必须带 `Cookie`。
+- `harness/auth.ts` 是唯一的凭据来源。它读取 `dsh web` 启动 URL 里的进程 token，用 `GET /?token=…` 换回 `Set-Cookie`，并把 cookie 存进 VS Code SecretStorage（`context.secrets`），不写进 settings.json。
 - `conversation/model.ts` 是纯折叠函数（`SessionEvent[] → ConversationItem[]`）；无网络、无 VS Code 依赖，可在纯 Node 环境下单测。
 - `app/controller.ts` 接管全部编排（连接/断开、workspace 生命周期、session 生命周期、prompt/cancel、mux 分发、UiState 推送）。`extension.ts` 是纯接线。
 - `view/provider.ts` 是**纯组合层**：从 `styles.ts` + `html.ts` + `client.ts` + markdown-it UMD 组装 HTML，并桥接状态/动作。provider 内不持有状态。
@@ -59,6 +64,7 @@ type ConversationItem =
 | --- | --- |
 | `user/message` | → `user` 或 `system` 项（`source.kind !== 'user'` 时为 system）；乐观回声已对账 |
 | `assistant/chunk`（`text-delta` / `reasoning-delta`） | 累积到尾部的流式 `assistant` 项 |
+| `assistant/stream`（帧，非持久事件） | 同上，但走 `applyStreamChunk()`（见下） |
 | `assistant/message` | 定稿 `assistant` 项（权威——替换流式文本） |
 | `tool/call` | → 创建 `ToolItem`（state: `running`） |
 | `tool/result` | → **更新**已有 `ToolItem`（按 `callId`，state: `completed`/`error`） |
@@ -68,31 +74,116 @@ type ConversationItem =
 
 重放是幂等的（`seq` 守卫），所以断线重连 → 重新获取历史是安全的。
 
-## 线缆契约（由 `scripts/protocol-spike.ts` 验证）
+> **0.1.6 起流式增量不再进持久日志。** 助手增量改由进程内的 assistant stream 下发，
+> 它们没有真实 `seq`，因此**绕过** `applyEvent` 的单调 seq 守卫，走
+> `ConversationModel.applyStreamChunk(turn, step, chunk)`。若硬塞进 `applyEvent`，
+> 合成的 `seq` 会互相压制，只剩第一个 delta 生效。
 
-**一元 RPC** — `POST /api/<method>`，`Content-Type: application/json`：
+## 线缆契约（DSH 0.1.6-alpha；由 `scripts/protocol-test.ts` 验证）
+
+0.1.6 一次性改了三件事，也是「升级后插件连不上」的根因：
+
+| # | 变化 | 旧 | 新 |
+| --- | --- | --- | --- |
+| 1 | 认证 | 无 | `/api/*` 与 mux 升级都必须带浏览器会话 cookie |
+| 2 | 端点命名 | `session.prompt` | `session/prompt`（`namespace/method`） |
+| 3 | 事件通道 | `/api/events.mux`，仅下行推送 | `/api/remote.mux`，**双向逻辑流多路复用** |
+
+同时 `POST /api/host.describe` 被删除（连 `packages/host/apiproxy` 整包都没了），
+`/api/respond` 也被删除。
+
+### 认证：浏览器会话 cookie
+
+```
+dsh web 打印：dsh web: http://127.0.0.1:3080/?token=<43 字符 base64url>   ← 每进程随机，不落盘
+GET /?token=<token>            → 303 See Other + Set-Cookie
+之后每个请求：Cookie: dsh-auth-<base64url(sha256("<host>:<port>"))>=v1.<payload>.<hmac>
+```
+
+- cookie 名由 **authority（Host 头，即 `host:port`）** 派生，所以换端口就失效。
+- 签名 secret 持久化在 `$DSH_HOME/.credentials.yaml` 的 `client-connection/browser-session`，
+  因此 cookie 能跨 `dsh web` 重启复用（默认 30 天）。
+- 我们**不自己签 cookie**：token 换 cookie 才是被认可的路径，自签等于绕过认证关口。
+- 实现见 `harness/auth.ts`；cookie 存在 `context.secrets`，不进 settings.json。
+
+### 一元 RPC — `POST /api/<namespace>/<method>`
 
 ```jsonc
-// 请求体
-{ "type": "client-request", "rpcId": "<uuid>", "method": "session.prompt", "payload": { … } }
+// 请求头
+Cookie: dsh-auth-…=v1.…
+Content-Type: application/json
+// 请求体：payload 必须恰好只有一个 args 字段，且是纯对象
+{ "type": "client-request", "rpcId": "<uuid>", "method": "session/prompt",
+  "payload": { "args": { "request": { "requestId": "…", "sessionId": "…", "mode": "queue",
+                                     "content": [{ "type": "text", "text": "…" }] } } } }
 // 响应体
 { "type": "server-response", "rpcId": "<相同>", "result": { "ok": true, "value": { … } } }
 ```
 
-业务错误始终返回 `200` + `{ ok: false, error: { code, message, details } }`。HTTP 状态码仅表示传输层（上游 `handler.ts`）。
+**`args` 的字段名就是上游方法声明的形参名**，多一个少一个都会被
+`assertExactArguments` 拒绝（`gateway/arguments-invalid`）。两个易错点：
 
-**事件流** — `GET /api/events.mux` 会被升级为 **WebSocket**（普通 GET 返回 `426 Upgrade Required`）。该 socket 是**仅下行**的：发送任何客户端消息都会以 `1008 "downlink only"` 关闭连接。每个文本帧是一个 JSON `ServerRequest`：
+- `session/list` 的形参**字面就叫 `_request`**，所以是 `{ "_request": {} }`。
+- 返回 `AbortSignal` 的取消位是**传输层参数**（形参名必须是 `signal`），**不是** JSON 字段。
+
+业务错误返回 `200` + `{ ok: false, error: { code, message, details } }`；
+HTTP 状态码只表示传输层（`401` 未认证 / `404` 端点不存在 / `415` 非 JSON）。
+
+### 事件通道 — `WS /api/remote.mux`
+
+升级同样要求 cookie；`401` 时服务端直接写 HTTP 响应，不发 `101`。
 
 ```jsonc
-{ "type": "server-request", "rpcId": "<uuid>", "method": "session/event",
-  "payload": { "type": "session/event", "sessionId": "…", "event": { … SessionEvent … } } }
+// 客户端 → 服务端
+{ "type": "open", "streamId": "s1", "endpoint": "session/follow", "payload": { "args": { … } } }
+{ "type": "cancel", "streamId": "s1" }
+// 服务端 → 客户端
+{ "type": "item",  "streamId": "s1", "value": { … } }
+{ "type": "end",   "streamId": "s1" }
+{ "type": "error", "streamId": "s1", "error": { "code": "…", "message": "…", "details": {} } }
 ```
 
-**信任围栏**（上游 `api-request-trust.ts`）：`Host` 头必须是回环地址或在 `--trusted-host` 中；附带的 `Origin` 必须匹配。我们的客户端只连接回环地址，因此天然通过。
+本插件用两条逻辑流：
+
+| endpoint | args | 用途 |
+| --- | --- | --- |
+| `$events` | `{}` | 转发的主机事件（含审批瀑布）；首个 item 是 `ready`，带 `clientId` 与 `host.home` |
+| `session/follow` | `{ request: { address: { kind:'session', sessionId }, maxMessages, assistantStream: true } }` | 会话日志快照 + 后续持久事件 + 助手流帧 |
+| `workspace/follow` | `{}` | 首个 item 是 `baseline`，替代已删除的 `workspace/list` |
+
+`session/follow` 的 item 形态：`{ type:'snapshot', header, cursor, records, hasMore, projections }`、
+`{ type:'event', event: SessionEvent }`、`{ type:'assistant-stream', frame }`。
+
+### 客户端如何把新传输翻译回旧帧
+
+`HarnessClient` 把新传输**翻译成 UI 层已经在读的旧帧形状**，因此 `conversation/model.ts`
+与 `approval/store.ts` 无需改动：
+
+| 新传输 | 交给 UI 的帧 |
+| --- | --- |
+| `session/follow` snapshot 的 records | `{ type:'session/event', sessionId, event }`（重放幂等） |
+| `session/follow` 的 `event` item | 同上 |
+| `assistant-stream` 的 `chunk` | `{ type:'assistant/stream', turn, step, chunk }` |
+| `$events` 的 `waterfall`（`approval/request`） | `{ type:'approval/requested', sessionId: agentId, approvalId: eventId, toolName, callId, reason }` |
+
+**审批应答**：`POST /api/$events/result`，`args` 为
+`{ clientId, eventId, outcome: { kind:'result', value: 'allowed-once' | 'rejected' } }`。
+`agentId` 就是 SessionId（上游 `agent.id`），所以能直接做会话过滤。
+
+`user-questions/request` 也是瀑布，但侧边栏渲染不了问答表单，因此**故意不答**——
+Host 以第一个应答为准，随便回 `next` 反而会抢在 Web UI 之前把事情结掉。
+
+**信任围栏**（上游 `api-request-trust.ts` / `browser-auth.ts`）：`Host` 必须是回环地址或
+在 `--trusted-host` 中，且必须通过 cookie 校验。我们只连回环，因此天然通过前者。
 
 ## 方法白名单
 
-客户端只调用：`host.describe`、`workspace.list`、`workspace.create`、`session.list`、`session.history`、`session.create`、`session.prompt`、`session.cancel`。绝不调用 `/api/respond`、`settings.*`、`credentials.*`、`commands.*` 或任何审批/权限变更操作。
+客户端只调用：
+`session/list`、`session/create`、`session/prompt`、`session/cancel`、
+`session/follow`、`session/modelCatalog`、`workspace/create`、`workspace/follow`、
+`$events`、`$events/result`。
+绝不调用 `settings/*`、`credentials/*`、`commands/*`、`terminal/*`、`directoryPicker/*`
+或任何其他审批/权限变更操作。
 
 ## Workspace 生命周期（v0.0.2：惰性创建）
 
@@ -171,12 +262,12 @@ media/
 ├── origin.png                # 源材料（VSIX 排除）
 └── markdown-it.umd.min.js    # VSIX 打包用（114 KB）
 scripts/
-├── protocol-spike.ts         # 独立 Node 验证（不导入 vscode）
-├── integration-test.ts        # 针对 real dsh 的闭环测试
+├── protocol-test.ts          # 假 harness 协议测试，34 项断言（无需 dsh web）
+├── integration-test.ts       # 针对真实 dsh 的闭环测试
 └── gen-icon.ts               # 从 origin.png 生成图标
 test/fixtures/                # 脱敏协议快照
 ```
 
 ## KV-cache / 稳定性说明
 
-扩展自身不跨重连持有任何模型状态——每次重连都从 `session.history`（Harness 真相源）重新派生。唯一的长期客户端状态是 WebSocket 下行链路和内存中的 `ConversationModel`，二者在恢复时都从历史记录重建。这使得缓存一致性不言自明：只有一个缓存（Harness 会话日志），VS Code 只是它的一个视图。
+扩展自身不跨重连持有任何模型状态——每次重连都从 `session/follow` 快照重新派生（Harness 真相源；`session.history` 在 0.1.6 已被移除）。唯一的长期客户端状态是 `remote.mux` 下行链路和内存中的 `ConversationModel`，二者在恢复时都从快照重建。这使得缓存一致性不言自明：只有一个缓存（Harness 会话日志），VS Code 只是它的一个视图。

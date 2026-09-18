@@ -15,7 +15,7 @@
 
 import type {
   AssistantChunkData, AssistantMessageData, CallId, ContentBlock, SessionEvent,
-  SessionId, SessionSummary, ToolCallData, ToolResultData, TurnEndData,
+  SessionId, SessionSummary, StreamChunk, ToolCallData, ToolResultData, TurnEndData,
   UserMessageData,
 } from '../harness/protocol.ts'
 import type { ConversationItem, SessionSnapshot } from './types.ts'
@@ -219,7 +219,22 @@ export class ConversationModel {
   }
 
   private applyAssistantChunk(event: SessionEvent): void {
-    const d = event.data as AssistantChunkData
+    this.applyStreamChunkData(event.data as AssistantChunkData)
+  }
+
+  /**
+   * Live assistant delta delivered out-of-band by the Remote assistant stream
+   * (DSH 0.1.6+ carries streaming chunks outside the durable journal, so they
+   * have no real `seq` and must bypass the monotonic-seq guard in applyEvent).
+   * @param turn - owning turn.
+   * @param step - owning step within the turn.
+   * @param chunk - one stream delta.
+   */
+  applyStreamChunk(turn: number, step: number, chunk: StreamChunk): void {
+    this.applyStreamChunkData({ turn, step, chunk })
+  }
+
+  private applyStreamChunkData(d: AssistantChunkData): void {
     const key = `${d.turn}:${d.step}`
     let entry = this.streaming.get(key)
     if (!entry) { entry = { text: '', reasoning: '' }; this.streaming.set(key, entry) }

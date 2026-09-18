@@ -5,6 +5,57 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.0.4] — 2026-09-18
+
+版本定位：**DeepSeek Harness 0.1.6-alpha 线缆协议迁移。**
+
+Harness 0.1.6-alpha 对线缆协议做了三处破坏性变更，导致本扩展的每一次调用都返回 `401` / `404`。现在这三处全部按新协议原生实现。
+
+### 上游的破坏性变更（本次发布的原因）
+
+1. **`/api/*` 现在要求浏览器会话 cookie。** cookie 名为 `dsh-auth-<b64url(sha256(host:port))>`。没有它每个调用都 401 —— 这正是旧的 `host.describe` 失败表现。
+2. **RPC 端点被重命名**：从 `a.b`（`host.describe`）改为 `namespace/method`（`session/list`）。`host.describe` 本身被彻底删除（`packages/host/apiproxy` 整包移除），`session.history` 与 `workspace/list` 同样被删。
+3. **事件通道变成双向**：仅下行的 `/api/events.mux` WebSocket 被 `/api/remote.mux` 取代，后者是逻辑流多路复用器 —— RPC 与订阅都作为流跑在同一条 socket 上。
+
+### 新功能
+
+- **浏览器会话认证。** 新增 `src/harness/auth.ts`：接收 `dsh web` 启动 URL，跟随 303 的 `Set-Cookie` 交换，并持久化 cookie。cookie 存在 VS Code `context.secrets`（系统钥匙串）中 —— **不**写入 `settings.json`。
+- **新命令** —— `DeepSeek Harness: Set Session Token from Launch URL` 与 `DeepSeek Harness: Clear Session Token`。两者也可从会话视图标题栏触发。
+- **可操作的报错。** 缺失/过期会话现在会说明*原因*并给出该执行的具体命令，而不是抛一个光秃秃的 `401`。已删除的端点会报 `HTTP 404 on /api/host.describe — the running harness does not expose that endpoint` 并附升级指引。
+- **连通性由 `$events` 就绪证明。** `connect()` 不再相信一次成功的 HTTP 探测，而是等待 `$events` 的 `ready` 帧（该帧同时携带 `clientId` 与 `host.home`）。
+
+### 协议映射（旧 → 新）
+
+| 旧 | 新 |
+| --- | --- |
+| `host.describe` | `$events` ready 帧（`home`、`clientId`）+ `session/modelCatalog`（`provider`、`model`） |
+| `events.mux`（仅下行） | `remote.mux`（双向逻辑流） |
+| `session.history` | `session/follow` 快照（或 `session/page`） |
+| `workspace/list` | `workspace/follow` baseline 帧 |
+| `POST /api/respond` | `$events/result` RPC —— `{clientId, eventId, outcome:{kind:'result', value:'allowed-once'\|'rejected'}}` |
+| `assistant/chunk`（持久日志） | 经 `session/follow` 旁路下发的 assistant 流帧 |
+| `{...params}` RPC payload | `{args:{<声明的形参名>: value}}` —— 如 `session/list` 为 `{_request:{}}` |
+
+### 新增模块
+
+- `src/harness/auth.ts` —— `BrowserSessionAuth`、cookie 派生、启动 URL 接管、持久化
+- `src/harness/http.ts` —— 基于 `node:http` 的客户端（平台 `fetch` 没有 cookie jar）
+- `src/harness/ws.ts` —— 最小 RFC 6455 WebSocket 客户端，因为浏览器形状的 `WebSocket` 无法携带 mux 升级所需的 `Cookie` 头
+- `scripts/protocol-test.ts` —— 假 harness 协议测试，34 项断言
+
+### Bug 修复
+
+- 0.1.6 把流式 assistant 增量移出了持久日志且不带真实 `seq`，因此被模型的 seq 守卫静默丢弃。新增 `ConversationModel.applyStreamChunk(turn, step, chunk)` 绕过守卫。
+- 审批应答改用 `eventId`（瀑布事件）作键，而非旧的 `approvalId`；`agentId` 即会话 id。
+- 修改 `host`/`port` 现在调用 `client.retarget()` + 重连，而不是重建 client（旧实现会泄漏原来的 mux socket）。
+- 编辑器上下文通过 `renderContextBlock()` 渲染进提示文本，因为新的 `session/prompt` 没有 `context` 字段。
+
+### 验证结果
+
+- `tsc --noEmit` —— 0 错误
+- 生产构建 —— `dist/extension.js` 98.4 kb
+- `scripts/protocol-test.ts` —— 针对假 0.1.6 harness，34/34 断言通过
+
 ## [0.0.3] — 2026-08-16
 
 版本定位：**Diff 审查、审批工作流 & 文件内容内联。**

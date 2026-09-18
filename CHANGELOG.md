@@ -5,6 +5,82 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.4] — 2026-09-18
+
+Tagline: **DeepSeek Harness 0.1.6-alpha wire-protocol migration.**
+
+Harness 0.1.6-alpha made three breaking changes to the wire protocol that
+returned `401` / `404` for every call this extension made. Every one of them
+is now implemented natively.
+
+### Breaking changes upstream (the reason for this release)
+
+1. **`/api/*` now requires a browser session cookie.** The cookie is named
+   `dsh-auth-<b64url(sha256(host:port))>`. Without it every call 401s — which
+   is what the old `host.describe` failure looked like.
+2. **RPC endpoints were renamed** from `a.b` (`host.describe`) to
+   `namespace/method` (`session/list`). `host.describe` itself was deleted
+   outright (`packages/host/apiproxy` removed), along with `session.history`
+   and `workspace/list`.
+3. **The event channel became bidirectional.** The downlink-only
+   `/api/events.mux` WebSocket was replaced by `/api/remote.mux`, a logical
+   stream multiplexer: RPC and subscriptions both run as streams over one
+   socket.
+
+### New features
+
+- **Browser-session authentication.** New `src/harness/auth.ts` adopts a
+  `dsh web` launch URL, follows the 303 `Set-Cookie` exchange, and persists the
+  cookie. Cookies live in VS Code `context.secrets` (OS keychain) — never in
+  `settings.json`.
+- **New commands** — `DeepSeek Harness: Set Session Token from Launch URL` and
+  `DeepSeek Harness: Clear Session Token`. Both are also reachable from the
+  session-view title bar.
+- **Actionable errors.** A missing/stale session now reports *why* and names the
+  exact command to run, instead of surfacing a bare `401`. A deleted endpoint
+  reports `HTTP 404 on /api/host.describe — the running harness does not expose
+  that endpoint` with upgrade guidance.
+- **Connectivity is proven by `$events` readiness.** `connect()` no longer
+  trusts a successful HTTP probe; it waits for the `$events` `ready` frame,
+  which also carries `clientId` and `host.home`.
+
+### Protocol mapping (old → new)
+
+| Old | New |
+| --- | --- |
+| `host.describe` | `$events` ready frame (`home`, `clientId`) + `session/modelCatalog` (`provider`, `model`) |
+| `events.mux` (downlink only) | `remote.mux` (bidirectional logical streams) |
+| `session.history` | `session/follow` snapshot (or `session/page`) |
+| `workspace/list` | `workspace/follow` baseline frame |
+| `POST /api/respond` | `$events/result` RPC — `{clientId, eventId, outcome:{kind:'result', value:'allowed-once'\|'rejected'}}` |
+| `assistant/chunk` (durable log) | out-of-band assistant stream frames via `session/follow` |
+| `{...params}` RPC payload | `{args:{<declaredParamName>: value}}` — e.g. `{_request:{}}` for `session/list` |
+
+### New modules
+
+- `src/harness/auth.ts` — `BrowserSessionAuth`, cookie derivation, launch-URL adoption, persistence
+- `src/harness/http.ts` — `node:http` client (platform `fetch` has no cookie jar)
+- `src/harness/ws.ts` — minimal RFC 6455 WebSocket client, because browser-shaped `WebSocket` cannot send the `Cookie` header required by the mux upgrade
+- `scripts/protocol-test.ts` — fake-harness protocol test, 34 assertions
+
+### Bug fixes
+
+- Streaming assistant deltas moved out of the durable log in 0.1.6 and have no
+  real `seq`, so they were silently dropped by the model's seq guard. Added
+  `ConversationModel.applyStreamChunk(turn, step, chunk)` to bypass it.
+- Approval replies are keyed by `eventId` (the waterfall event), not the old
+  `approvalId`; `agentId` is used as the session id.
+- Changed `host`/`port` now calls `client.retarget()` + reconnect instead of
+  rebuilding the client (which leaked the old mux socket).
+- Editor context is rendered into the prompt text via `renderContextBlock()`
+  because the new `session/prompt` has no `context` field.
+
+### Verification
+
+- `tsc --noEmit` — 0 errors
+- Production build — `dist/extension.js` 98.4 kb
+- `scripts/protocol-test.ts` — 34/34 assertions pass against a fake 0.1.6 harness
+
 ## [0.0.3] — 2026-08-16
 
 Tagline: **Diff Review, Approval Workflow & File Context Inlining.**

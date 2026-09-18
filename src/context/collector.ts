@@ -1,6 +1,5 @@
 /**
- * Context collector — gathers VS Code editor state into a PromptContext
- * for injection into the session.prompt payload.
+ * Context collector — gathers VS Code editor state into a PromptContext.
  *
  * Two responsibilities:
  *   1. Parse @file references from the prompt text.
@@ -14,8 +13,12 @@
  *      Only non-empty selections are included. The active file is always
  *      included when an editor is open.
  *
- * KV cache consistency: context travels in `payload.context`, NOT in
- * `payload.content`. The backend treats it as ephemeral metadata.
+ * KV cache consistency: until DSH 0.1.6 the context travelled in
+ * `payload.context`, a separate field the backend treated as ephemeral
+ * metadata. That field was removed from `SessionPromptRequest`, so the
+ * context is now rendered into the prompt *text* by `renderContextBlock()`
+ * instead — placed after the message so the user's own words stay the stable
+ * prefix of the turn.
  */
 
 import type * as vscode from 'vscode'
@@ -114,4 +117,42 @@ export function mergeContext(
   }
 
   return merged
+}
+
+/**
+ * Render a PromptContext as a text block appended to the prompt.
+ *
+ * DSH 0.1.6 removed the `context` field from `SessionPromptRequest`, so editor
+ * metadata has to travel inside the message. The block is appended *after* the
+ * user's own words: the turn's stable prefix therefore stays the user's text,
+ * and successive prompts with the same preamble keep a shared KV prefix.
+ *
+ * @param ctx - collected editor/@file context, or undefined.
+ * @returns the block, or an empty string when there is nothing to say.
+ */
+export function renderContextBlock(ctx: PromptContext | undefined): string {
+  if (!ctx) return ''
+  const lines: string[] = []
+  if (ctx.activeFile?.path) {
+    lines.push(`- Active file: ${ctx.activeFile.path}`)
+  }
+  if (ctx.files && ctx.files.length > 0) {
+    for (const f of ctx.files) {
+      const range = f.lineStart
+        ? `:L${String(f.lineStart)}${f.lineEnd ? `-L${String(f.lineEnd)}` : ''}`
+        : ''
+      lines.push(`- Referenced file: ${f.path}${range}`)
+    }
+  }
+  if (ctx.selection) {
+    const { path, lineStart, lineEnd, text } = ctx.selection
+    lines.push(
+      `- Selection in ${path}:L${String(lineStart)}-L${String(lineEnd)}:`,
+      '```',
+      text,
+      '```',
+    )
+  }
+  if (lines.length === 0) return ''
+  return `<context>\n${lines.join('\n')}\n</context>`
 }

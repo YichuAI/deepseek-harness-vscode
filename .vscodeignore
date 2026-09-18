@@ -9,6 +9,7 @@ tsconfig.json
 .github/**
 **/*.map
 **/*.ts
+dist/*.vsix
 .gitignore
 .npmignore
 RELEASE.md

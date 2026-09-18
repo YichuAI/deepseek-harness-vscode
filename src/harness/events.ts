@@ -1,33 +1,29 @@
 /**
- * Event-stream layer: the WebSocket downlink for /api/events.mux, plus the
- * EventBuffer that coalesces assistant chunks into ~30ms flushes.
+ * events.ts / remote.ts — the Remote stream layer.
  *
- * Wire facts (validated by the protocol spike):
- *   - /api/events.mux is a downlink-only WebSocket. A plain GET returns 426.
- *   - Each text frame is one JSON `ServerRequest` envelope:
- *       { type: 'server-request', rpcId, method, payload: MuxFrame }
- *   - Sending any client message closes the socket with code 1008 'downlink only'.
- *   - The harness trust fence requires a loopback Host header; the browser-style
- *     WebSocket sets Host from the URL, so loopback URLs pass naturally.
+ * 0.1.6-alpha replaced the downlink-only `events.mux` socket with a
+ * *bidirectional logical-stream mux* at `/api/remote.mux`:
  *
- * Reconnect (§15): the harness resume semantic is rebuild — reopen the stream
- * and refetch history. No cursor resume. We retry with backoff.
+ *   upgrade:  GET /api/remote.mux   (WebSocket; a browser-session cookie is required)
+ *   client →  { type:'open', streamId, endpoint, payload: { args: {…} } }
+ *             { type:'cancel', streamId }
+ *   host   →  { type:'item',  streamId, value }
+ *             { type:'error', streamId, error: { code, message, details } }
+ *             { type:'end',   streamId }
+ *
+ * Two logical streams matter to this plugin:
+ *   • `$events`        — forwarded Host events, incl. the approval waterfall
+ *   • `session/follow` — one Session's durable journal + assistant stream
+ *
+ * On reconnect every live stream is reopened. The plugin treats reconnect as
+ * "rebuild": `onReopen` lets the caller refetch state rather than replay a
+ * cursor we no longer hold.
  */
 
 import type { Disposable } from '../disposable.ts'
-import type { MuxFrame, ServerRequest } from './protocol.ts'
-
-/** A listener receives every mux frame the host pushes, unfiltered. */
-export type MuxListener = (frame: MuxFrame, envelope: ServerRequest<MuxFrame>) => void
-
-export interface MuxStreamOptions {
-  /** ws://host:port/api/events.mux */
-  url: string
-  onFrame: MuxListener
-  onStatus: (status: MuxStatus) => void
-  /** Logger sink for diagnostics (not surfaced to UI). */
-  log?: (msg: string) => void
-}
+import { openWebSocket, WebSocketUpgradeError, type WebSocketHandle } from './ws.ts'
+import type { RemoteStreamFailure } from './protocol.ts'
+import { REMOTE_STREAM_MUX_PATH } from './protocol.ts'
 
 export type MuxStatus =
   | { kind: 'idle' }
@@ -39,73 +35,210 @@ export type MuxStatus =
 /** Reconnect backoff: 250ms, 500ms, 1s, 2s, 5s (capped). */
 const BACKOFF_STEPS = [250, 500, 1000, 2000, 5000] as const
 
+export interface StreamHandlers {
+  /** One `item` frame from the Host. */
+  onItem: (value: unknown) => void
+  /** The Host ended the stream normally. */
+  onEnd?: () => void
+  /** The Host reported a business/carrier failure for this stream. */
+  onError?: (error: RemoteStreamFailure) => void
+  /** The socket was re-established after a drop; the stream was reopened. */
+  onReopen?: () => void
+}
+
+export interface StreamHandle {
+  readonly id: string
+  readonly endpoint: string
+  cancel(): void
+}
+
+interface LiveStream {
+  id: string
+  endpoint: string
+  args: Record<string, unknown>
+  handlers: StreamHandlers
+  /** Set once after the first successful reopen (not on the initial open). */
+  opened: boolean
+}
+
+export interface RemoteStreamMuxOptions {
+  /**
+   * Build the ws:// URL for the mux. Called on every (re)connect so a config or
+   * authority change is picked up.
+   */
+  url: () => string
+  /** Handshake headers (the browser-session cookie). Called per attempt. */
+  headers: () => Record<string, string>
+  onStatus: (status: MuxStatus) => void
+  log: (msg: string) => void
+}
+
 /**
- * Manages one WebSocket downlink with automatic reconnect. The harness pushes
- * frames; we never send. On close, we reconnect with backoff and let the caller
- * refetch history (the documented rebuild semantic).
+ * One WebSocket carrying every logical stream, with automatic reconnect.
+ * Callers never touch the socket — they open logical streams through `request`.
  */
-export class MuxStream implements Disposable {
-  private ws: WebSocket | undefined
+export class RemoteStreamMux implements Disposable {
+  private ws: WebSocketHandle | undefined
+  private readonly streams = new Map<string, LiveStream>()
+  private counter = 0
   private backoff = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
   private disposed = false
-  private readonly opts: MuxStreamOptions
+  private status: MuxStatus = { kind: 'idle' }
 
-  constructor(opts: MuxStreamOptions) {
-    this.opts = opts
-  }
+  constructor(private readonly opts: RemoteStreamMuxOptions) {}
 
-  /** Open (or reopen) the downlink. Idempotent if already open. */
+  getStatus(): MuxStatus { return this.status }
+
+  /** Open (or reopen) the socket. Idempotent while connecting/open. */
   open(): void {
     if (this.disposed) return
-    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return
+    if (this.ws !== undefined && this.ws.readyState !== 'closed') return
     this.setStatus({ kind: 'connecting' })
-    const ws = new WebSocket(this.opts.url)
-    this.ws = ws
-    ws.addEventListener('open', () => {
-      this.backoff = 0
-      this.setStatus({ kind: 'open' })
-    })
-    ws.addEventListener('message', (ev: MessageEvent) => {
-      try {
-        const env = JSON.parse(typeof ev.data === 'string' ? ev.data : String(ev.data)) as ServerRequest<MuxFrame>
-        if (env && env.type === 'server-request' && env.payload && typeof env.payload === 'object') {
-          this.opts.onFrame(env.payload as MuxFrame, env)
+    const url = this.opts.url()
+    const ws = openWebSocket(url, this.opts.headers(), {
+      onOpen: () => {
+        this.backoff = 0
+        this.setStatus({ kind: 'open' })
+        this.opts.log(`mux: open (${String(this.streams.size)} logical stream(s))`)
+        for (const stream of this.streams.values()) {
+          const reopened = stream.opened
+          stream.opened = true
+          this.sendOpen(stream)
+          if (reopened) {
+            try { stream.handlers.onReopen?.() } catch { /* handler errors must not break the mux */ }
+          }
         }
-      } catch (e) {
-        this.opts.log?.(`mux: dropped malformed frame (${e instanceof Error ? e.message : String(e)})`)
-      }
+      },
+      onText: (text) => { this.onMessage(text) },
+      onClose: (code, reason) => {
+        if (this.disposed) return
+        this.opts.log(`mux: closed (code=${String(code)} reason=${reason || '—'})`)
+        this.setStatus({ kind: 'closed', reason: reason || `code ${String(code)}` })
+        this.scheduleReconnect()
+      },
+      onError: (err) => {
+        if (this.disposed) return
+        this.opts.log(`mux: error — ${err.message}`)
+        this.setStatus({
+          kind: 'error',
+          message: err instanceof WebSocketUpgradeError && err.status === 401
+            ? 'unauthorized: the harness requires a browser session cookie'
+            : err.message,
+        })
+        // A refused upgrade never fires 'close'; keep the socket from leaking.
+        try { this.ws?.destroy() } catch { /* noop */ }
+        this.ws = undefined
+        this.scheduleReconnect()
+      },
     })
-    ws.addEventListener('close', (ev: CloseEvent) => {
-      this.opts.log?.(`mux: closed (code=${ev.code} reason=${ev.reason || '—'})`)
-      if (this.disposed) { this.setStatus({ kind: 'closed', reason: ev.reason || 'disposed' }); return }
-      this.setStatus({ kind: 'closed', reason: ev.code === 1008 ? 'downlink-only violation' : `code ${ev.code}` })
-      this.scheduleReconnect()
-    })
-    ws.addEventListener('error', () => {
-      // The 'error' event carries no detail in the browser WS API; the close
-      // event that follows is where we report and reconnect. Surface a generic
-      // error status only if no close follows shortly.
-      this.opts.log?.('mux: error event')
-      this.setStatus({ kind: 'error', message: 'websocket error' })
-    })
+    this.ws = ws
   }
 
-  /** Force-close without reconnect (used when the user disconnects). */
+  /** Stop the socket permanently (used on disconnect/dispose). */
   close(): void {
     this.disposed = true
-    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = undefined }
-    if (this.ws) { try { this.ws.close() } catch { /* noop */ } this.ws = undefined }
+    if (this.reconnectTimer !== undefined) { clearTimeout(this.reconnectTimer); this.reconnectTimer = undefined }
+    for (const stream of this.streams.values()) {
+      try { this.sendCancel(stream.id) } catch { /* socket may already be gone */ }
+    }
+    this.streams.clear()
+    try { this.ws?.close() } catch { /* noop */ }
+    this.ws = undefined
     this.setStatus({ kind: 'closed', reason: 'closed' })
   }
 
   dispose(): void { this.close() }
 
+  /**
+   * Open one logical stream. It stays open (and is reopened on reconnect) until
+   * the caller cancels it.
+   *
+   * @param endpoint - Remote endpoint, e.g. `session/follow` or `$events`.
+   * @param args - the method's named arguments.
+   */
+  request(endpoint: string, args: Record<string, unknown>, handlers: StreamHandlers): StreamHandle {
+    this.counter += 1
+    const id = `s${String(this.counter)}-${Math.random().toString(36).slice(2, 10)}`
+    const stream: LiveStream = { id, endpoint, args, handlers, opened: false }
+    this.streams.set(id, stream)
+    if (this.ws?.readyState === 'open') {
+      stream.opened = true
+      this.sendOpen(stream)
+    } else {
+      this.open()
+    }
+    return {
+      id,
+      endpoint,
+      cancel: () => {
+        if (!this.streams.delete(id)) return
+        this.sendCancel(id)
+      },
+    }
+  }
+
+  /** Drop every stream for `endpoint` without closing the socket. */
+  cancelEndpoint(endpoint: string): void {
+    for (const [id, stream] of [...this.streams]) {
+      if (stream.endpoint !== endpoint) continue
+      this.streams.delete(id)
+      this.sendCancel(id)
+    }
+  }
+
+  // ─── internals ──────────────────────────────────────────────────────────────
+  private onMessage(text: string): void {
+    let message: unknown
+    try {
+      message = JSON.parse(text) as unknown
+    } catch (e) {
+      this.opts.log(`mux: dropped non-JSON frame (${e instanceof Error ? e.message : String(e)})`)
+      return
+    }
+    if (typeof message !== 'object' || message === null) return
+    const frame = message as { type?: unknown; streamId?: unknown; value?: unknown; error?: unknown }
+    if (typeof frame.streamId !== 'string') return
+    const stream = this.streams.get(frame.streamId)
+    if (stream === undefined) return
+    switch (frame.type) {
+      case 'item':
+        try { stream.handlers.onItem(frame.value) } catch { /* handler errors must not break the mux */ }
+        break
+      case 'end':
+        this.streams.delete(frame.streamId)
+        try { stream.handlers.onEnd?.() } catch { /* noop */ }
+        break
+      case 'error': {
+        this.streams.delete(frame.streamId)
+        const error = normaliseFailure(frame.error)
+        try { stream.handlers.onError?.(error) } catch { /* noop */ }
+        break
+      }
+      default:
+        // Unknown frame types are ignored: the protocol is merge-extensible.
+        break
+    }
+  }
+
+  private sendOpen(stream: LiveStream): void {
+    this.send({ type: 'open', streamId: stream.id, endpoint: stream.endpoint, payload: { args: stream.args } })
+  }
+
+  private sendCancel(streamId: string): void {
+    this.send({ type: 'cancel', streamId })
+  }
+
+  private send(message: unknown): void {
+    if (this.ws?.readyState !== 'open') return
+    this.ws.send(JSON.stringify(message))
+  }
+
   private scheduleReconnect(): void {
-    if (this.disposed) return
+    if (this.disposed || this.reconnectTimer !== undefined) return
     const delay = BACKOFF_STEPS[Math.min(this.backoff, BACKOFF_STEPS.length - 1)]
     this.backoff += 1
-    this.opts.log?.(`mux: reconnecting in ${delay}ms (attempt ${this.backoff})`)
+    this.opts.log(`mux: reconnecting in ${String(delay)}ms (attempt ${String(this.backoff)})`)
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined
       this.open()
@@ -113,15 +246,34 @@ export class MuxStream implements Disposable {
   }
 
   private setStatus(s: MuxStatus): void {
+    this.status = s
     try { this.opts.onStatus(s) } catch { /* listener errors must not break the stream */ }
   }
+}
+
+/** The ws:// URL for the mux on one loopback target. */
+export function muxUrl(host: string, port: number): string {
+  const literal = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
+  return `ws://${literal}:${String(port)}${REMOTE_STREAM_MUX_PATH}`
+}
+
+function normaliseFailure(value: unknown): RemoteStreamFailure {
+  if (typeof value === 'object' && value !== null) {
+    const v = value as Record<string, unknown>
+    return {
+      code: typeof v['code'] === 'string' ? v['code'] : 'gateway/internal',
+      message: typeof v['message'] === 'string' ? v['message'] : String(value),
+      details: typeof v['details'] === 'object' && v['details'] !== null ? v['details'] as object : {},
+    }
+  }
+  return { code: 'gateway/internal', message: String(value), details: {} }
 }
 
 /**
  * EventBuffer — coalesces high-frequency assistant chunks into periodic flushes
  * so the webview does not render once per token (§14). Default flush: 30ms.
  *
- * Usage: call `push(event)` for every session/event frame; the buffer invokes
+ * Usage: call `push(event)` for every session event; the buffer invokes
  * `onFlush` at most every `flushMs` with the batched events. `flushNow()`
  * forces a drain (used on turn/end or dispose).
  */

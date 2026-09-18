@@ -82,8 +82,10 @@ For your safety, the following remain out of scope:
 
    ```bash
    dsh web
-   # → http://127.0.0.1:3080
+   # → http://127.0.0.1:3080/?token=<43-char token>
    ```
+
+   Harness ≥ 0.1.6 prints a **launch URL with a one-shot token**. Copy it.
 
 2. Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek) or via command line:
 
@@ -94,18 +96,24 @@ For your safety, the following remain out of scope:
    Or install the VSIX from [GitHub Releases](https://github.com/liangwythu/deepseek-harness-vscode/releases):
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.0.3.vsix
+   code --install-extension harness-connector-deepseek-0.0.4.vsix
    ```
 
-3. Open a folder in VS Code that you want to bind to a Harness workspace.
+3. **Give the extension the browser session.** Run **`DeepSeek Harness: Set Session Token from Launch URL`** from the Command Palette and paste the launch URL (or the raw token). The extension exchanges it for the `dsh-auth-…` cookie and stores it in VS Code's secret storage (OS keychain — never written to `settings.json`).
 
-4. The DeepSeek Harness activity-bar icon appears; the extension auto-connects. If your folder matches an existing Harness workspace, its sessions appear in the dropdown. Pick one and continue the conversation.
+   Harness ≥ 0.1.6 rejects every `/api/*` call without that cookie, so this step is mandatory. Skip it and Connect fails with "requires a browser session" instead of a bare `401`.
 
-5. **No matching workspace?** Just type a prompt and hit Send — the workspace and session are created automatically.
+4. Open a folder in VS Code that you want to bind to a Harness workspace.
 
-6. **Attach file context** — type `@file:src/main.ts` or right-click a file in the explorer and choose **Add to Harness Chat**. Select text in the editor, right-click, and choose **Send Selection to Harness** for line-range references.
+5. The DeepSeek Harness activity-bar icon appears; the extension auto-connects. If your folder matches an existing Harness workspace, its sessions appear in the dropdown. Pick one and continue the conversation.
 
-7. Open the same session in your browser at `http://127.0.0.1:3080/` — both surfaces see the same turn.
+6. **No matching workspace?** Just type a prompt and hit Send — the workspace and session are created automatically.
+
+7. **Attach file context** — type `@file:src/main.ts` or right-click a file in the explorer and choose **Add to Harness Chat**. Select text in the editor, right-click, and choose **Send Selection to Harness** for line-range references.
+
+8. Open the same session in your browser at `http://127.0.0.1:3080/` — both surfaces see the same turn.
+
+> **Restarted `dsh web`?** The token is per-process. Re-run **Set Session Token from Launch URL** with the new launch URL (or **Clear Session Token** first). The extension now tells you exactly which command to run instead of just reporting `401`.
 
 ## Configuration
 
@@ -118,6 +126,8 @@ For your safety, the following remain out of scope:
 ## Commands
 
 - `DeepSeek Harness: Connect` / `Disconnect`
+- `DeepSeek Harness: Set Session Token from Launch URL` — paste the `dsh web` launch URL to obtain the browser-session cookie
+- `DeepSeek Harness: Clear Session Token` — drop the stored cookie (e.g. before switching `dsh web` instances)
 - `DeepSeek Harness: New Session` (in the active workspace)
 - `DeepSeek Harness: Refresh Sessions`
 - `DeepSeek Harness: Move to Right Side Bar` — dock the view in the secondary side bar (like Chat) so it stops competing with the file explorer. Also available via the ⇲ button in the webview header.
@@ -137,17 +147,26 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for the one-page design and the protoco
 
 `test/fixtures/` holds sanitized captures of the live wire format, useful for detecting upstream Harness protocol drift:
 
-- `host-describe.json`, `workspace-list.json`, `session-list.json`, `session-history.json`, `session-prompt.json`, `session-event.json`
+- `host-describe.json`, `workspace-list.json`, `session-list.json`, `session-history.json`, `session-prompt.json`, `session-event.json` — **note:** these are pre-0.1.6 captures, kept only as historical drift references. `host-describe` / `session-history` / `workspace-list` no longer exist upstream.
 
 No credentials, API keys, or real prompt content are stored — only the JSON shapes (text fields are redacted).
 
-## Protocol spike
+## Protocol test
 
-A standalone Node script validates the full loop against your running `dsh web`:
+A standalone Node script drives the real client code against a **fake** 0.1.6
+harness — no `dsh web` needed:
 
 ```bash
-npm run spike            # read-only validation (connect / list / history / mux open)
-npm run spike -- --prompt  # also exercises prompt + live events + cancel
+npm run protocol-test    # 34 assertions: auth, cookie derivation, remote.mux,
+                         # endpoint naming, {args} payloads, approval waterfall,
+                         # assistant stream, deleted-endpoint 404 handling
+```
+
+For a closed loop against your **real** `dsh web`, use the integration test
+(start `dsh web` first):
+
+```bash
+DSH_LAUNCH_URL='http://127.0.0.1:3080/?token=<token>' npm run integration-test
 ```
 
 ## Development
@@ -157,15 +176,19 @@ npm install
 npm run build        # esbuild → dist/extension.js
 npm run watch        # rebuild on change
 npm run typecheck
-npm run package      # → harness-connector-deepseek-0.0.3.vsix
+npm run package      # → harness-connector-deepseek-0.0.4.vsix
+npm run protocol-test      # 34 protocol assertions against a fake 0.1.6 harness
 ```
 
 Press `F5` in VS Code to launch an Extension Development Host with the extension loaded.
 
 ## Verified against
 
-- DeepSeek Harness host `v0.0.1` (`@deepseek-ai/dsh-root`), default `dsh web` port `3080`.
-- Wire contract: `packages/host/apiproxy/src/api/` (authoritative).
+- DeepSeek Harness host `v0.1.6-alpha`, default `dsh web` port `3080`. Older hosts
+  (≤ 0.0.x) are no longer supported — the 0.1.6 wire protocol is a breaking change.
+- Wire contract: `/api/remote.mux` logical-stream multiplexer + browser-session
+  cookie auth. `packages/host/apiproxy` was removed upstream in 0.1.6, so the
+  old `host.describe` / `events.mux` contract no longer exists.
 
 ## Limitations
 

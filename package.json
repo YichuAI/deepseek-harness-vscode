@@ -2,7 +2,7 @@
   "name": "harness-connector-deepseek",
   "displayName": "DeepSeek Harness Connector",
   "description": "Native VS Code client for DeepSeek Harness. Connect to your existing local Harness instance and continue the same workspaces and sessions directly inside VS Code.",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "publisher": "lucasliang",
   "license": "MIT",
   "repository": {
@@ -58,6 +58,16 @@
         "category": "DeepSeek Harness"
       },
       {
+        "command": "deepseekHarness.setSessionToken",
+        "title": "DeepSeek Harness: Set Session Token from Launch URL",
+        "category": "DeepSeek Harness"
+      },
+      {
+        "command": "deepseekHarness.clearSessionToken",
+        "title": "DeepSeek Harness: Clear Stored Session",
+        "category": "DeepSeek Harness"
+      },
+      {
         "command": "deepseekHarness.openWebUI",
         "title": "DeepSeek Harness: Open Web UI",
         "category": "DeepSeek Harness"
@@ -94,6 +104,13 @@
       }
     ],
     "menus": {
+      "view/title": [
+        {
+          "command": "deepseekHarness.setSessionToken",
+          "when": "view == deepseekHarness.sessionView",
+          "group": "navigation@1"
+        }
+      ],
       "explorer/context": [
         {
           "command": "deepseekHarness.addFileToChat",
@@ -133,9 +150,9 @@
     "vscode:prepublish": "npm run build",
     "build": "node esbuild.mjs --production",
     "watch": "node esbuild.mjs --watch",
-    "spike": "tsx scripts/protocol-spike.ts",
     "gen-icon": "tsx scripts/gen-icon.ts",
     "integration-test": "tsx scripts/integration-test.ts",
+    "protocol-test": "tsx scripts/protocol-test.ts",
     "package": "vsce package --no-dependencies",
     "deploy": "npm run build && vsce package --no-dependencies --out dist/harness-connector-deepseek.vsix && code --install-extension dist/harness-connector-deepseek.vsix --force",
     "typecheck": "tsc --noEmit"

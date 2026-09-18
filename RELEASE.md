@@ -33,8 +33,8 @@ npm run typecheck          # → tsc --noEmit, exit 0
 # 1.2 build the bundle
 npm run build              # → dist/extension.js
 
-# 1.3 protocol spike (read-only, no prompts)
-npm run spike              # → all 9 protocol steps ✓
+# 1.3 protocol test (fake harness — no dsh web needed)
+npm run protocol-test      # → all 34 assertions ✓
 
 # 1.4 integration test (writes a session — needs dsh web running)
 #     start dsh web first in another terminal:

@@ -170,8 +170,23 @@ command to run instead of just reporting `401`.
 - `DeepSeek Harness: New Session` (in the active workspace)
 - `DeepSeek Harness: Refresh Sessions`
 - `DeepSeek Harness: Move to Right Side Bar` — dock the view in the secondary side bar (like Chat) so it stops competing with the file explorer. Also available via the ⇲ button in the webview header.
+- `DeepSeek Harness: Toggle Plan Mode` — flip `/plan` on the active session
+- `DeepSeek Harness: Set Permission Preset` — pick (or type) a preset such as `read-only` / `workspace-write` / `danger-full-access`
+- `DeepSeek Harness: Compact Session Context` — request `/compact`
+- `DeepSeek Harness: Fork Session` — branch off the current session and switch to the fork
+- `DeepSeek Harness: Rename Session` — pin a title (stops automatic regeneration)
+- `DeepSeek Harness: Archive Session` — archive it out of the active workspace list
 - `DeepSeek Harness: Open Web UI`
 - `DeepSeek Harness: Show Logs` (the `DeepSeek Harness` output channel)
+
+The same six controls also live in the sidebar's **Controls** panel, which
+additionally shows what arrived from the host: plan state, sandbox mode,
+approval policy, agent preset, effective model, todos, the active goal,
+subagent activity and the last compaction summary.
+
+Every control is **offered only when this host actually serves it** — capability
+probing happens at connect time, so an older `dsh web` simply shows fewer knobs
+instead of buttons that would fail.
 
 ### Context menu actions
 
@@ -196,10 +211,11 @@ A standalone Node script drives the real client code against a **fake** 0.1.6
 harness — no `dsh web` needed:
 
 ```bash
-npm run protocol-test    # 64 assertions: wire negotiation (dot/slash, cookie
+npm run protocol-test    # 98 assertions: wire negotiation (dot/slash, cookie
                          # gating, event socket), auth, cookie derivation,
                          # {args} payloads, approval waterfall, assistant
-                         # stream, removed-endpoint 404 handling
+                         # stream, removed-endpoint 404 handling, control-surface
+                         # capability probing and the whole-value control fold
 ```
 
 To ask your **real** `dsh web` what it actually serves (endpoint style, event
@@ -225,7 +241,7 @@ npm run build        # esbuild → dist/extension.js
 npm run watch        # rebuild on change
 npm run typecheck
 npm run package      # → harness-connector-deepseek-0.0.4.vsix
-npm run protocol-test      # 64 protocol assertions against a fake harness
+npm run protocol-test      # 98 protocol assertions against a fake harness
 npm run protocol-probe     # report what your real dsh web exposes
 ```
 
@@ -249,8 +265,11 @@ Press `F5` in VS Code to launch an Extension Development Host with the extension
 - Unknown harness event types are ignored (the protocol is merge-extensible); they do not crash the client but also do not render.
 - Diff review revert uses `git checkout` — uncommitted changes to the target file will be lost on Reject.
 
-## Roadmap (v0.0.4+)
+## Roadmap (v0.0.7+)
 
+- Model / reasoning-effort pickers driven by `session/selectModel` and `llm/models`
+- Sub-agent controls (`subagent/interrupt`, queued-message steering)
+- "Load older" history pagination
 - Inline Completion
 - VS Code filesystem provider
 - Terminal integration

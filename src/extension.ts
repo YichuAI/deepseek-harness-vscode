@@ -179,6 +179,32 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   }
 
+  /**
+   * Pick a permission preset.
+   *
+   * Upstream's preset table is deployment-configurable, so the documented
+   * defaults are offered as choices and any other name can be typed — the host
+   * rejects unknown presets with a message naming what it does serve.
+   */
+  const setPermissionPreset = async (): Promise<void> => {
+    const known = ['read-only', 'workspace-write', 'danger-full-access']
+    const picked = await vscode.window.showQuickPick(
+      [...known, 'Type a preset name…'],
+      { title: 'DeepSeek Harness: Permission Preset', placeHolder: 'Preset name', ignoreFocusOut: true },
+    )
+    if (picked === undefined) return
+    const name = picked === 'Type a preset name…'
+      ? await vscode.window.showInputBox({
+        title: 'DeepSeek Harness: Permission Preset',
+        prompt: 'Preset name as configured on the harness host.',
+        placeHolder: 'workspace-write',
+        ignoreFocusOut: true,
+      })
+      : picked
+    if (name === undefined || name.trim() === '') return
+    await controller.setPreset(name.trim())
+  }
+
   const clearSessionToken = async (): Promise<void> => {
     await auth.clear()
     client.disconnect()
@@ -203,6 +229,22 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('deepseekHarness.newSession', wireAction('newSession')),
     vscode.commands.registerCommand('deepseekHarness.refreshSessions', wireAction('refreshSessions')),
     vscode.commands.registerCommand('deepseekHarness.openInSecondarySideBar', wireAction('moveToSecondarySideBar')),
+    vscode.commands.registerCommand('deepseekHarness.togglePlanMode', () => {
+      void controller.togglePlanMode()
+    }),
+    vscode.commands.registerCommand('deepseekHarness.setPermissionPreset', setPermissionPreset),
+    vscode.commands.registerCommand('deepseekHarness.forkSession', () => {
+      void controller.forkActive()
+    }),
+    vscode.commands.registerCommand('deepseekHarness.renameSession', () => {
+      void controller.renameActive()
+    }),
+    vscode.commands.registerCommand('deepseekHarness.compactSession', () => {
+      void controller.compactActive()
+    }),
+    vscode.commands.registerCommand('deepseekHarness.archiveSession', () => {
+      void controller.archiveActive()
+    }),
     vscode.commands.registerCommand('deepseekHarness.addFileToChat', (uri: vscode.Uri) => {
       controller.addToChat(uri)
     }),

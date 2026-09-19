@@ -31,6 +31,15 @@ export const HTML_SKELETON = /* html */ `
     </div>
   </div>
 
+  <div id="control" class="ctl" style="display:none;">
+    <div id="ctl-head" class="ctl-head">
+      <span id="ctl-arrow" class="ctl-arrow">▸</span>
+      <span class="ctl-title">Controls</span>
+      <span id="ctl-summary" class="ctl-summary"></span>
+    </div>
+    <div id="ctl-body" class="ctl-body"></div>
+  </div>
+
   <div id="messages"></div>
 
   <div id="input-area">

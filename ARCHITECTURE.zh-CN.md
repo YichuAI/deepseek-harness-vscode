@@ -94,7 +94,36 @@ type ConversationItem =
 干脆没有），逐个尝试直到某个返回 `ok`。结果存为 `WireProfile`，一次连接内缓存，
 并统一经 `HarnessClient.ep()` 生成端点字符串——其它模块不再写端点字面量。
 
+还有一个第五维回答的是另一个问题：**到底有哪些控制方法存在？** 每次连接时
+`probeCapabilities()` 询问一次并把结果记在 `WireProfile.capabilities` 上，因此侧边栏
+只在宿主真的提供某控件的写路径时才把它显示出来（见下方「控制面」）。
+
 对真实 `dsh web` 跑 `npm run protocol-probe` 即可打印该 host 实际提供的内容。
+
+## 控制面（`src/conversation/control.ts`）
+
+harness 把各种旋钮以持久会话事件的形式下发，而且都是**全量值**：后写的覆盖先写的，
+重放时必须仅凭日志还原状态，不依赖任何 catch-up 通道。这让 `ControlSurface` 成为一个
+纯折叠——按序 apply 每个事件就是真相，无论它来自 `session/page` 历史还是实时的
+`session/follow` 帧。
+
+| 事件 | 载荷 | 面板展示 |
+| --- | --- | --- |
+| `plan/mode` | `{ active }` | 计划模式开关 |
+| `permission/preset` | `{ preset }` | 预设选择器的当前值 |
+| `sandbox/mode` | `{ mode }` | 沙箱限制徽标 |
+| `approval/policy` | `{ policy }` | 审批策略徽标 |
+| `todo/write` | `{ todos }` | 待办清单（整表替换） |
+| `goal/change` | `{ operation, goal \| cleared }` | 目标 + 阶段 + 轮次 |
+| `subagent/start` / `end` / `descriptor` | 作用域身份 | 运行中的子代理 |
+| `compaction/start` / `end` / `summary` | provenance + 摘要 | 压缩状态 |
+| `request/header` | `{ header: { config } }` | 当前生效的 provider / model / 推理强度 |
+
+写路径按上游实际提供的方式分两类：计划模式、权限预设、压缩走**命令注册表**
+（`session/command` + `/plan`、`/permission <name>`、`/compact`），而 fork / rename /
+archive / 模型选择有各自的专用端点。每次写之前先查协商出的能力表
+（`requireControl`），否则抛 `HarnessUnsupportedError` 并在消息里点名缺哪个端点——
+于是 UI 表现为「少几个控件」，而不是「几个按了没反应的按钮」。
 
 ### 认证：浏览器会话 cookie
 
@@ -107,7 +136,10 @@ GET /?token=<token>            → 303 See Other + Set-Cookie
 - cookie 名由 **authority（Host 头，即 `host:port`）** 派生，所以换端口就失效。
 - 签名 secret 持久化在 `$DSH_HOME/.credentials.yaml` 的 `client-connection/browser-session`，
   因此 cookie 能跨 `dsh web` 重启复用（默认 30 天）。
-- 我们**不自己签 cookie**：token 换 cookie 才是被认可的路径，自签等于绕过认证关口。
+- 默认**自动取得会话**：`auth.ts` 的 `tryMintLocalSession()` 会读同一份持久化 secret
+  自签一个字节级等价的 cookie，零粘贴（见 `harness/local-credentials.ts`）。能读到该
+  凭据文件即等于对该 harness home 有完整权限，因此自签是权限等价而非越权。
+  由 `deepseekHarness.autoSession`（默认 `true`）控制；关闭后回退到 URL 粘贴流程。
 - 实现见 `harness/auth.ts`；cookie 存在 `context.secrets`，不进 settings.json。
 
 ### 一元 RPC — `POST /api/<namespace>/<method>`

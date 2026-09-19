@@ -43,6 +43,36 @@ button.icon { padding: 4px 6px; }
 .ws-name { font-weight: 600; }
 .ws-path { color: var(--vscode-descriptionForeground); font-size: 11px; word-break: break-all; }
 .ws-pending { color: var(--vscode-charts-yellow, #ca9c2e); font-size: 11px; margin-top: 2px; }
+/* Control surface — the knobs the harness has always shipped. */
+.ctl { border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,.2)); padding: 6px 10px 8px; }
+.ctl-head { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+.ctl-arrow { font-size: 10px; color: var(--vscode-descriptionForeground); width: 10px; }
+.ctl.open .ctl-arrow { transform: rotate(90deg); }
+.ctl-title { font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.ctl-summary { display: flex; flex-wrap: wrap; gap: 4px; flex: 1; justify-content: flex-end; }
+.ctl-body { display: none; margin-top: 6px; }
+.ctl.open .ctl-body { display: block; }
+.ctl-chip {
+  font-size: 10px; padding: 1px 6px; border-radius: 8px;
+  background: var(--vscode-badge-background); color: var(--vscode-badge-foreground);
+  white-space: nowrap;
+}
+.ctl-chip.plan { background: var(--vscode-charts-purple, #8250df); color: #fff; }
+.ctl-chip.risk { background: var(--vscode-errorForeground, #c53149); color: #fff; }
+.ctl-chip.running { background: var(--vscode-charts-yellow, #ca9c2e); color: #1b1b1b; }
+.ctl-section { margin-bottom: 8px; }
+.ctl-section-title { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--vscode-descriptionForeground); margin-bottom: 3px; }
+.ctl-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 3px 0; }
+.ctl-row select { width: auto; flex: 1; min-width: 120px; }
+.ctl-todos { margin: 0; padding-left: 16px; }
+.ctl-todos li { margin: 1px 0; word-break: break-word; }
+.ctl-todos li.done { text-decoration: line-through; color: var(--vscode-descriptionForeground); }
+.ctl-todos li.active { font-weight: 600; }
+.ctl-goal { border-left: 3px solid var(--vscode-charts-blue, #1b7fbd); padding-left: 6px; }
+.ctl-goal-phase { font-size: 10px; color: var(--vscode-descriptionForeground); }
+.ctl-note { font-size: 11px; color: var(--vscode-descriptionForeground); word-break: break-word; }
+.ctl-unsupported { font-size: 10px; color: var(--vscode-descriptionForeground); font-style: italic; }
+
 #messages { flex: 1; overflow-y: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; }
 .msg { padding: 6px 8px; border-radius: 4px; white-space: pre-wrap; word-break: break-word; }
 .msg.user { background: var(--vscode-input-background); border-left: 3px solid var(--vscode-charts-blue, #1b7fbd); }

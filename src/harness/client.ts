@@ -34,7 +34,9 @@ import { CompositeDisposable } from '../disposable.ts'
 import { EventBuffer, muxUrl, RemoteStreamMux, type MuxStatus, type StreamHandle, type StreamHandlers } from './events.ts'
 import { HarnessAuthRequiredError, type BrowserSessionAuth } from './auth.ts'
 import { httpRequest } from './http.ts'
-import { defaultWireProfile, negotiateWire, wireEndpoint, type WireProfile } from './wire.ts'
+import {
+  defaultWireProfile, isShapeRejection, negotiateWire, wireEndpoint, type WireProfile,
+} from './wire.ts'
 import {
   APPROVAL_REQUEST_EVENT,
   REMOTE_EVENT_RESULT_ENDPOINT,
@@ -69,6 +71,23 @@ export class HarnessRpcError extends Error {
   constructor(public readonly code: string, message: string, public readonly details: unknown) {
     super(message)
     this.name = 'HarnessRpcError'
+  }
+}
+
+/**
+ * Thrown when the running harness does not serve a control-surface method.
+ *
+ * The message is written for users: it names what is missing and says the fix
+ * is upstream (a newer host), because nothing in this plugin can conjure an
+ * endpoint the host does not have.
+ */
+export class HarnessUnsupportedError extends Error {
+  constructor(canonicalMethod: string, served: string) {
+    super(
+      `This harness does not serve \`${served}\` (\`${canonicalMethod}\`), so that control is unavailable. `
+      + 'It is provided by newer DeepSeek Harness builds — upgrade the host, or use the Web UI.',
+    )
+    this.name = 'HarnessUnsupportedError'
   }
 }
 
@@ -128,6 +147,8 @@ export class HarnessClient implements Disposable {
   private readonly approvalListeners = new Set<ApprovalFrameListener>()
   private readonly stateListeners = new Set<(s: ConnectionState) => void>()
   private readonly muxStatusListeners = new Set<(s: MuxStatus) => void>()
+  /** Index of the `{args}` spelling that worked, per canonical method. */
+  private readonly argShapes = new Map<string, number>()
 
   constructor(private readonly opts: HarnessClientOptions) {}
 
@@ -323,6 +344,102 @@ export class HarnessClient implements Disposable {
     return this.rpc('session/cancel', { request: { sessionId } })
   }
 
+  // ─── control surface ───────────────────────────────────────────────────────
+  /**
+   * The control-surface methods this host serves, keyed by canonical
+   * `ns/method`. An absent key means "probed and missing", never "unknown".
+   */
+  capabilities(): Readonly<Record<string, boolean>> {
+    return this.profile?.capabilities ?? {}
+  }
+
+  /** Whether `canonicalMethod` was discovered to exist on the running host. */
+  supports(canonicalMethod: string): boolean {
+    return this.profile?.capabilities[canonicalMethod] === true
+  }
+
+  /**
+   * Execute one slash-command line against a session's agent.
+   *
+   * Upstream routes the control-plane writes through the command registry
+   * (`/plan`, `/permission <preset>`, `/goal …`, `/compact`), so this is the one
+   * write path shared by every control — and the reason the command panel can
+   * work on releases whose dedicated endpoints differ.
+   */
+  runCommand(sessionId: SessionId, line: string): Promise<{ matched?: boolean }> {
+    this.requireControl('session/command')
+    const text = line.startsWith('/') ? line : `/${line}`
+    return this.rpcVariants<{ matched?: boolean }>('session/command', [
+      { request: { sessionId, line: text } },
+      { sessionId, line: text },
+      { request: { line: text } },
+      { line: text },
+    ])
+  }
+
+  /** Switch permission preset (`/permission <preset>`), e.g. `workspace-write`. */
+  setPermissionPreset(sessionId: SessionId, preset: string): Promise<{ matched?: boolean }> {
+    return this.runCommand(sessionId, `/permission ${preset}`)
+  }
+
+  /** Flip plan mode (`/plan`), which toggles the host's wanted state. */
+  togglePlanMode(sessionId: SessionId): Promise<{ matched?: boolean }> {
+    return this.runCommand(sessionId, '/plan')
+  }
+
+  /** Request context compaction (`/compact`). */
+  compactSession(sessionId: SessionId): Promise<{ matched?: boolean }> {
+    return this.runCommand(sessionId, '/compact')
+  }
+
+  /**
+   * Fork a session from a completed-turn prefix.
+   *
+   * Upstream's declared options are `{ sessionId, atSeq?, increaseTitle? }`;
+   * all three spellings are offered because the sender that omits `atSeq` is
+   * accepted by strictly more hosts than one that sends `null`.
+   */
+  forkSession(sessionId: SessionId, opts: { atSeq?: number } = {}): Promise<SessionId> {
+    this.requireControl('session/fork')
+    const base = opts.atSeq === undefined ? { sessionId } : { sessionId, atSeq: opts.atSeq }
+    return this.rpcVariants<SessionId>('session/fork', [
+      { request: { ...base, increaseTitle: true } },
+      { request: base },
+      { ...base, increaseTitle: true },
+      base,
+    ])
+  }
+
+  /** Rename the session, pinning its title against automatic regeneration. */
+  renameSession(sessionId: SessionId, title: string): Promise<{ title: string; seq?: number }> {
+    this.requireControl('session/rename')
+    return this.rpcVariants<{ title: string; seq?: number }>('session/rename', [
+      { request: { sessionId, title } },
+      { sessionId, title },
+      { request: { title } },
+      { title },
+    ])
+  }
+
+  /** Select the model (and optionally the provider) for future turns. */
+  selectModel(sessionId: SessionId, model: string, provider?: string): Promise<unknown> {
+    this.requireControl('session/selectModel')
+    const base = provider === undefined ? { sessionId, model } : { sessionId, model, provider }
+    return this.rpcVariants<unknown>('session/selectModel', [
+      { request: base },
+      base,
+    ])
+  }
+
+  /** Archive the session out of the active workspace list. */
+  archiveSession(sessionId: SessionId): Promise<unknown> {
+    this.requireControl('workspace/archiveSession')
+    return this.rpcVariants<unknown>('workspace/archiveSession', [
+      { request: { sessionId } },
+      { sessionId },
+    ])
+  }
+
   /**
    * Answer one approval waterfall.
    *
@@ -430,6 +547,53 @@ export class HarnessClient implements Disposable {
   /** Render one canonically-written `ns/method` in the negotiated style. */
   private ep(method: string): string {
     return wireEndpoint(this.profile?.endpointStyle ?? 'slash', method)
+  }
+
+  /** Fail fast, with actionable wording, when the host lacks a control method. */
+  private requireControl(canonicalMethod: string): void {
+    // No profile means we never negotiated (unit tests, pre-connect): let the
+    // call run so the real answer decides.
+    if (this.profile === undefined) return
+    if (!this.supports(canonicalMethod)) {
+      throw new HarnessUnsupportedError(canonicalMethod, this.ep(canonicalMethod))
+    }
+  }
+
+  /**
+   * Call a control-surface method, tolerating the several `{args}` spellings
+   * upstream has shipped (`request`, `_request`, bare fields, none).
+   *
+   * A business error whose code says "your arguments do not match my declared
+   * parameters" proves the endpoint EXISTS — so it advances to the next
+   * spelling instead of failing. Anything else is a real failure and throws.
+   * The winning SPELLING is remembered per method — never the argument VALUES:
+   * two calls to `session/command` carry different lines, so caching the object
+   * itself would silently replay the first call's payload forever. The follow-up
+   * call then costs exactly one round trip.
+   */
+  private async rpcVariants<V>(
+    canonicalMethod: string,
+    variants: readonly Record<string, unknown>[],
+  ): Promise<V> {
+    const remembered = this.argShapes.get(canonicalMethod)
+    const indexed = variants.map((args, index) => ({ args, index }))
+    const order = remembered === undefined || remembered >= variants.length
+      ? indexed
+      : [indexed[remembered] as { args: Record<string, unknown>; index: number }, ...indexed]
+    let last: unknown
+    for (const { args, index } of order) {
+      try {
+        const value = await this.rpc<V>(canonicalMethod, args)
+        this.argShapes.set(canonicalMethod, index)
+        return value
+      } catch (e) {
+        if (e instanceof HarnessRpcError && isShapeRejection(e.code)) { last = e; continue }
+        throw e
+      }
+    }
+    throw last instanceof Error
+      ? last
+      : new Error(`${canonicalMethod}: the host accepted none of the known argument shapes.`)
   }
 
   private async rpc<V>(method: string, args: Record<string, unknown>): Promise<V> {

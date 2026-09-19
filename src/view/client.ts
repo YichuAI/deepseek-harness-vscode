@@ -19,6 +19,8 @@ export const CLIENT_SCRIPT = /* js */ `
   let lastRenderVersion = -1;
   let currentReviews = [];
   let currentApprovals = [];
+  let currentCapabilities = {};
+  let lastControlSig = '';
 
   // ─── markdown renderer (webview-only, html disabled!) ──────────────────────
   const md = new MarkdownIt({ html: false, linkify: true, breaks: false });
@@ -65,6 +67,7 @@ export const CLIENT_SCRIPT = /* js */ `
     // Store reviews/approvals for lookup in renderTool
     currentReviews = state.reviews || [];
     currentApprovals = state.approvals || [];
+    currentCapabilities = state.capabilities || {};
 
     // Brand bar
     const icon = $('brand-icon');
@@ -175,6 +178,205 @@ export const CLIENT_SCRIPT = /* js */ `
     $('stop').disabled = !state.canStop;
     $('new-session').disabled = state.connection !== 'connected' || state.workspace === null;
     $('refresh').disabled = state.connection !== 'connected';
+  }
+
+  // ─── control surface ────────────────────────────────────────────────────────
+  // The harness ships plan mode, permission presets, sandbox/approval knobs,
+  // todos, goals, subagents and compaction as whole-value session events. Every
+  // one is folded in the extension host; here we only draw what arrived — and
+  // only offer a control whose write path this host actually serves.
+  const PRESET_CANDIDATES = ['read-only', 'workspace-write', 'danger-full-access'];
+
+  function supported(name) { return currentCapabilities[name] === true; }
+
+  function ctlChip(text, extra) {
+    const s = document.createElement('span');
+    s.className = 'ctl-chip' + (extra ? ' ' + extra : '');
+    s.textContent = text;
+    return s;
+  }
+
+  function ctlSection(title, fill) {
+    const box = document.createElement('div');
+    box.className = 'ctl-section';
+    const h = document.createElement('div');
+    h.className = 'ctl-section-title';
+    h.textContent = title;
+    box.appendChild(h);
+    fill(box);
+    return box;
+  }
+
+  function ctlRow(box) {
+    const row = document.createElement('div');
+    row.className = 'ctl-row';
+    box.appendChild(row);
+    return row;
+  }
+
+  function ctlNote(box, text) {
+    const n = document.createElement('div');
+    n.className = 'ctl-note';
+    n.textContent = text;
+    box.appendChild(n);
+    return n;
+  }
+
+  function ctlButton(box, label, opts, onClick) {
+    const b = document.createElement('button');
+    b.className = opts.secondary ? 'secondary' : '';
+    b.textContent = label;
+    if (opts.disabled) b.disabled = true;
+    else b.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
+    box.appendChild(b);
+    return b;
+  }
+
+  function renderControl(state) {
+    const panel = $('control');
+    const live = state.connection === 'connected' && !!state.activeSessionId;
+    if (!live) { panel.style.display = 'none'; lastControlSig = ''; return; }
+    panel.style.display = '';
+    const c = state.control || null;
+    // capabilities change what we can offer, so they belong in the signature.
+    const sig = String(c ? c.version : -1) + '|' + Object.keys(currentCapabilities).join(',');
+    if (sig === lastControlSig) return;
+    lastControlSig = sig;
+
+    const summary = $('ctl-summary');
+    summary.innerHTML = '';
+    const body = $('ctl-body');
+    body.innerHTML = '';
+
+    if (c) {
+      if (c.planActive === true) summary.appendChild(ctlChip('plan', 'plan'));
+      if (c.preset) summary.appendChild(ctlChip(c.preset, c.preset === 'danger-full-access' ? 'risk' : ''));
+      const open = (c.todos || []).filter((t) => t.status !== 'completed').length;
+      if (open > 0) summary.appendChild(ctlChip(open + ' todo', ''));
+      if (c.goal) summary.appendChild(ctlChip('goal:' + c.goal.phase, c.goal.phase === 'active' ? '' : 'running'));
+      if ((c.subagents || []).some((s) => s.running)) summary.appendChild(ctlChip('subagent', 'running'));
+      if (c.compaction && c.compaction.running) summary.appendChild(ctlChip('compacting', 'running'));
+      if (c.model && c.model.model) summary.appendChild(ctlChip(c.model.model, ''));
+    }
+
+    // ── execution knobs ──
+    body.appendChild(ctlSection('Execution', (box) => {
+      const row = ctlRow(box);
+      const planOn = !!(c && c.planActive === true);
+      const planBtn = ctlButton(row, planOn ? 'Plan mode: on' : 'Plan mode: off',
+        { secondary: true, disabled: !supported('session/command') },
+        () => post({ type: 'controlPlan', active: !planOn }));
+      planBtn.title = supported('session/command')
+        ? 'Flip /plan on this session'
+        : 'This host does not expose session/command';
+
+      if (c && (c.sandbox || c.approvalPolicy)) {
+        const chips = ctlRow(box);
+        if (c.sandbox) chips.appendChild(ctlChip('sandbox: ' + c.sandbox, c.sandbox === 'danger-full-access' ? 'risk' : ''));
+        if (c.approvalPolicy) chips.appendChild(ctlChip('approval: ' + c.approvalPolicy, c.approvalPolicy === 'never' ? 'risk' : ''));
+      }
+
+      const presets = PRESET_CANDIDATES.slice();
+      if (c && c.preset && presets.indexOf(c.preset) < 0) presets.unshift(c.preset);
+      const sel = document.createElement('select');
+      for (const name of presets) {
+        const opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = name;
+        if (c && c.preset === name) opt.selected = true;
+        sel.appendChild(opt);
+      }
+      sel.disabled = !supported('session/command');
+      sel.title = 'Permission preset (sandbox mode + approval policy)';
+      sel.addEventListener('change', (e) => {
+        post({ type: 'controlPreset', preset: e.target.value });
+      });
+      const selRow = ctlRow(box);
+      selRow.appendChild(sel);
+      if (c && c.agentPreset) ctlNote(box, 'agent preset: ' + c.agentPreset);
+    }));
+
+    // ── todos ──
+    const todos = (c && c.todos) || [];
+    if (todos.length > 0) {
+      body.appendChild(ctlSection('Todos', (box) => {
+        const ul = document.createElement('ul');
+        ul.className = 'ctl-todos';
+        for (const t of todos) {
+          const li = document.createElement('li');
+          li.className = t.status === 'completed' ? 'done' : (t.status === 'in_progress' ? 'active' : '');
+          li.textContent = (t.status === 'completed' ? '✓ ' : t.status === 'in_progress' ? '▸ ' : '· ') + escapeText(t.content);
+          ul.appendChild(li);
+        }
+        box.appendChild(ul);
+      }));
+    }
+
+    // ── goal ──
+    if (c && c.goal) {
+      body.appendChild(ctlSection('Goal', (box) => {
+        const card = document.createElement('div');
+        card.className = 'ctl-goal';
+        const text = document.createElement('div');
+        text.textContent = escapeText(c.goal.objective);
+        const phase = document.createElement('div');
+        phase.className = 'ctl-goal-phase';
+        const rounds = (c.goal.roundsStarted !== undefined && c.goal.maxGoalRounds !== undefined)
+          ? ' · round ' + c.goal.roundsStarted + '/' + c.goal.maxGoalRounds
+          : '';
+        phase.textContent = c.goal.phase + rounds;
+        card.appendChild(text);
+        card.appendChild(phase);
+        box.appendChild(card);
+      }));
+    }
+
+    // ── subagents ──
+    const subs = (c && c.subagents) || [];
+    if (subs.length > 0) {
+      body.appendChild(ctlSection('Subagents', (box) => {
+        for (const s of subs) {
+          const row = ctlRow(box);
+          row.appendChild(ctlChip(escapeText(s.name || s.key), s.running ? 'running' : ''));
+        }
+      }));
+    }
+
+    // ── compaction ──
+    if (c && c.compaction && (c.compaction.running || c.compaction.summary)) {
+      body.appendChild(ctlSection('Compaction', (box) => {
+        if (c.compaction.running) ctlNote(box, 'Compacting the conversation…');
+        else if (c.compaction.summary) {
+          const note = ctlNote(box, escapeText(c.compaction.summary));
+          note.title = c.compaction.summary || '';
+          if (c.compaction.shadowedTokenCount !== undefined) {
+            ctlNote(box, 'reclaimed ~' + c.compaction.shadowedTokenCount + ' tokens');
+          }
+        }
+      }));
+    }
+
+    // ── session actions ──
+    body.appendChild(ctlSection('Session', (box) => {
+      const row = ctlRow(box);
+      ctlButton(row, 'Fork', { secondary: true, disabled: !supported('session/fork') },
+        () => post({ type: 'controlFork' }));
+      ctlButton(row, 'Rename', { secondary: true, disabled: !supported('session/rename') },
+        () => post({ type: 'controlRename' }));
+      ctlButton(row, 'Compact', { secondary: true, disabled: !supported('session/command') },
+        () => post({ type: 'controlCompact' }));
+      ctlButton(row, 'Archive', { secondary: true, disabled: !supported('workspace/archiveSession') },
+        () => post({ type: 'controlArchive' }));
+      const missing = [];
+      if (!supported('session/fork')) missing.push('session/fork');
+      if (!supported('session/rename')) missing.push('session/rename');
+      if (!supported('workspace/archiveSession')) missing.push('workspace/archiveSession');
+      if (!supported('session/command')) missing.push('session/command');
+      if (missing.length > 0) {
+        const n = ctlNote(box, 'Not served by this host: ' + missing.join(', '));
+        n.className = 'ctl-unsupported';
+      }
+    }));
   }
 
   // ─── per-item render ────────────────────────────────────────────────────────
@@ -562,6 +764,7 @@ export const CLIENT_SCRIPT = /* js */ `
   $('open-web-link').addEventListener('click', () => post({ type: 'openWebUI' }));
   $('toggle-sys').addEventListener('click', () => post({ type: 'toggleSystemMessages' }));
   $('move-right').addEventListener('click', () => post({ type: 'moveToSecondarySideBar' }));
+  $('ctl-head').addEventListener('click', () => $('control').classList.toggle('open'));
   $('input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
       e.preventDefault(); sendPrompt();

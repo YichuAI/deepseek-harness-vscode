@@ -5,6 +5,50 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.0.6] — 2026-09-19
+
+版本定位：**控制面补齐——这些旋钮 harness 一直在下发。**
+
+宿主一直在发 `plan/mode`、`permission/preset`、`sandbox/mode`、`todo/write`、
+`goal/change`、`subagent/*`、`compaction/*`，而插件一个都没渲染。结果是：会话确实
+是共享的，但侧边栏看起来比官方 Web UI 少了半壁江山。这一版把它们显示出来，并且
+在宿主支持时允许你直接改。
+
+### 新增
+
+- **`src/conversation/control.ts` —— 控制面折叠。** 这些事件在上游都是**全量值**
+  （后写的覆盖先写的，且重放必须仅凭日志还原状态），所以折叠就是一个纯粹的
+  「最后写入生效」投影，输入是历史 + 实时帧。`request/header` 额外给出当前生效的
+  provider / model / reasoningEffort。
+- **能力探测。** `wire.ts` 现在会询问宿主提供哪些控制方法（`session/command`、
+  `session/fork`、`session/rename`、`session/selectModel`、
+  `workspace/archiveSession`、`agentPreset/*`、`subagent/list`、`llm/models`），
+  结果缓存在 profile 上。探测**故意发空参数**：形参校验在处理器执行之前，因此
+  「参数被拒」恰好证明方法存在，而且绝不可能改动会话状态。
+- **`HarnessClient` 上的控制面写方法**：`runCommand`（公共写路径——上游把 plan、
+  permission、compact 都路由到命令注册表）、`togglePlanMode`、
+  `setPermissionPreset`、`compactSession`、`forkSession`、`renameSession`、
+  `selectModel`、`archiveSession`。
+- **`rpcVariants()`** —— 容忍上游出过的多种 `{args}` 写法（`request`、`_request`、
+  裸字段）：把「参数形状被拒」当作「写法不对」而非「方法不存在」。缓存的是**写法**，
+  绝不是参数值。
+- **侧边栏 Controls（控制）面板**：计划模式开关、权限预设选择器、沙箱/审批/模型
+  徽标、待办清单、当前目标、子代理活动、最近一次压缩摘要，以及 Fork / Rename /
+  Compact / Archive 动作；每一项都只在这台宿主提供对应写路径时才出现。
+- 六条命令：`Toggle Plan Mode`、`Set Permission Preset`、
+  `Compact Session Context`、`Fork Session`、`Rename Session`、`Archive Session`。
+- `npm run protocol-probe` 现在会打印协商出的控制面清单。
+
+### 变更
+
+- `protocol-test` 从 64 增至 **98 项断言**：覆盖能力探测（存在 / HTTP 404 不存在 /
+  not-found 码不存在 / 参数被拒视作存在）、控制面写调用、完全没有控制面的宿主，
+  以及全量值折叠语义（目标清除、子代理名单对账、reset 等）。
+
+### 说明
+
+- 控制端点缺失时抛 `HarnessUnsupportedError`，消息会点明缺什么，而不是抛出一个裸 404。
+
 ## [0.0.5] — 2026-09-19
 
 版本定位：**线缆是协商出来的，不是猜出来的。**

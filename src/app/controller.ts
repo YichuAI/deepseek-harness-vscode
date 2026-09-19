@@ -18,6 +18,7 @@ import type { HarnessClient } from '../harness/client.ts'
 import type { MuxStatus } from '../harness/events.ts'
 import type { CallId, FileReference, PromptContext, RpcId, SessionId, SessionSummary, WorkspaceView } from '../harness/protocol.ts'
 import { ConversationModel, sessionLabel } from '../conversation/model.ts'
+import { ControlSurface } from '../conversation/control.ts'
 import type { ConversationItem, SessionSnapshot } from '../conversation/types.ts'
 import {
   findHarnessWorkspace, ensureHarnessWorkspace, pickVsCodeFolder,
@@ -62,6 +63,8 @@ export class AppController {
   private muxStatus: MuxStatus | undefined
   private reviewController: ReviewController | undefined
   private approvalStore = new ApprovalStore()
+  /** Control surface for the active session (plan/preset/todos/goal/…). */
+  private control = new ControlSurface()
   /** Tracks which sessions have already received their first prompt (with context). */
   private firstPromptSent = new Set<SessionId>()
 
@@ -123,6 +126,12 @@ export class AppController {
       case 'reviewAcceptAll': this.reviewController?.acceptAll(action.reviewId); break
       case 'reviewRejectAll': await this.reviewController?.rejectAll(action.reviewId); break
       case 'approvalRespond': await this.respondApproval(action.rpcId, action.outcome); break
+      case 'controlPlan': await this.setPlanMode(action.active); break
+      case 'controlPreset': await this.setPreset(action.preset); break
+      case 'controlFork': await this.forkActive(); break
+      case 'controlCompact': await this.compactActive(); break
+      case 'controlArchive': await this.archiveActive(); break
+      case 'controlRename': await this.renameActive(); break
     }
   }
 
@@ -191,6 +200,7 @@ export class AppController {
 
   async selectSession(sessionId: SessionId): Promise<void> {
     this.activeSessionId = sessionId
+    this.control.reset()
     this.model = new ConversationModel(sessionId)
     this.model.setShowSystemMessages(this.d.getState().showSystemMessages)
     // Wire tool completion → ReviewController (creates review transactions for write/edit)
@@ -222,8 +232,19 @@ export class AppController {
   private async refetchHistory(sessionId: SessionId): Promise<void> {
     if (!this.model) return
     const h = await this.d.client.getHistory(sessionId, { maxMessages: 50 })
-    this.model.loadHistory(h.events.map(e => e.event))
+    const events = h.events.map(e => e.event)
+    this.model.loadHistory(events)
+    // The control surface is a log fold: replaying history re-derives plan
+    // mode, presets, todos and goal exactly as the host would.
+    for (const e of events) this.control.apply(e)
     this.d.setState({ snapshot: this.model.snapshot() })
+    this.pushControl()
+  }
+
+  /** Push the folded control state (and what this host lets us change). */
+  private pushControl(): void {
+    this.d.setState({ control: this.control.snapshot() })
+    this.d.pushState()
   }
 
   private applyMuxFrame(frame: unknown): void {
@@ -238,7 +259,9 @@ export class AppController {
       chunk?: unknown
     }
     if (f.type === 'session/event' && f.sessionId === this.activeSessionId && f.event) {
-      this.model.applyEvent(f.event as Parameters<ConversationModel['applyEvent']>[0])
+      const event = f.event as Parameters<ConversationModel['applyEvent']>[0]
+      this.model.applyEvent(event)
+      if (this.control.apply(event)) this.pushControl()
       this.d.setState({ snapshot: this.model.snapshot() })
       const snap = this.d.getState().snapshot
       this.d.setState({ canStop: snap?.running === true })
@@ -516,7 +539,100 @@ export class AppController {
     }))
   }
 
-  toggleSystemMessages(): void {
+  // ─── control surface ───────────────────────────────────────────────────────
+  /**
+   * Run one control write, turning transport/rpc failures into a message the
+   * user can act on instead of a silent no-op.
+   */
+  private async runControl<T>(op: () => Promise<T>, label: string): Promise<T | undefined> {
+    try {
+      return await op()
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      this.d.log.error(`control/${label}: ${msg}`)
+      this.d.notifyError(msg)
+      return undefined
+    }
+  }
+
+  /**
+   * Flip plan mode.
+   *
+   * The write path is `/plan`, which toggles the host's wanted state — so a
+   * click for a state we are already in must do nothing, not toggle twice.
+   */
+  private async setPlanMode(desired: boolean): Promise<void> {
+    const sid = this.activeSessionId
+    if (sid === undefined) return
+    if (this.control.snapshot().planActive === desired) {
+      this.d.notifyInfo(`DeepSeek Harness: plan mode is already ${desired ? 'on' : 'off'}.`)
+      return
+    }
+    await this.runControl(() => this.d.client.togglePlanMode(sid), 'plan')
+  }
+
+  /** Flip plan mode to the opposite of the host's current state. */
+  async togglePlanMode(): Promise<void> {
+    await this.setPlanMode(this.control.snapshot().planActive !== true)
+  }
+
+  /** Switch the permission preset by name (`read-only`, `workspace-write`, …). */
+  async setPreset(preset: string): Promise<void> {
+    const sid = this.activeSessionId
+    if (sid === undefined) return
+    await this.runControl(() => this.d.client.setPermissionPreset(sid, preset), 'permission')
+  }
+
+  /** Fork the active session into a sibling and switch to it. */
+  async forkActive(): Promise<void> {
+    const sid = this.activeSessionId
+    if (sid === undefined) return
+    const child = await this.runControl(() => this.d.client.forkSession(sid), 'fork')
+    if (typeof child !== 'string' || child.length === 0) return
+    await this.refreshSessions()
+    await this.selectSession(child)
+    this.d.notifyInfo('DeepSeek Harness: forked into a new session.')
+  }
+
+  /** Ask the host to compact the session's context. */
+  async compactActive(): Promise<void> {
+    const sid = this.activeSessionId
+    if (sid === undefined) return
+    await this.runControl(() => this.d.client.compactSession(sid), 'compact')
+  }
+
+  /** Archive the active session and drop back to the newest remaining one. */
+  async archiveActive(): Promise<void> {
+    const sid = this.activeSessionId
+    if (sid === undefined) return
+    const done = await this.runControl(() => this.d.client.archiveSession(sid), 'archive')
+    if (done === undefined) return
+    this.activeSessionId = undefined
+    this.model = undefined
+    this.control.reset()
+    this.d.setState({ activeSessionId: undefined, snapshot: undefined, control: this.control.snapshot() })
+    await this.refreshSessions()
+    this.d.notifyInfo('DeepSeek Harness: session archived.')
+  }
+
+  /** Rename the active session from an input box (also used by the command). */
+  async renameActive(): Promise<void> {
+    const sid = this.activeSessionId
+    if (sid === undefined) return
+    const current = this.control.snapshot().goal === undefined ? undefined : undefined
+    void current
+    const next = await this.d.vscodeAPI.window.showInputBox({
+      title: 'DeepSeek Harness: Rename session',
+      prompt: 'A renamed session is pinned — the host stops regenerating its title.',
+      placeHolder: 'Session title',
+      ignoreFocusOut: true,
+    })
+    if (next === undefined || next.trim() === '') return
+    const result = await this.runControl(() => this.d.client.renameSession(sid, next.trim()), 'rename')
+    if (result !== undefined) this.d.notifyInfo(`DeepSeek Harness: renamed to “${result.title}”.`)
+  }
+
+  async toggleSystemMessages(): Promise<void> {
     const next = !this.d.getState().showSystemMessages
     this.model?.setShowSystemMessages(next)
     this.d.setState({
@@ -553,6 +669,8 @@ export class AppController {
       hostInfo: conn.hostInfo,
       errorMessage: conn.errorMessage,
       muxStatus: conn.muxStatus,
+      // What the host serves decides which controls the panel may offer.
+      capabilities: { ...this.d.client.capabilities() },
     })
     this.d.pushState()
   }

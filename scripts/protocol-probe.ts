@@ -133,6 +133,11 @@ async function main(): Promise<void> {
   console.log(`authentication : ${profile.auth}`)
   console.log(`session/list   : args ${JSON.stringify(profile.listArgs)}`)
   if (profile.catalogEndpoint !== undefined) console.log(`model catalog  : ${profile.catalogEndpoint}`)
+  // What the sidebar's control panel may offer is decided by this probe.
+  const controlSurface = Object.entries(profile.capabilities)
+  const served = controlSurface.filter(([, present]) => present).map(([name]) => name)
+  console.log(`control surface: ${String(served.length)}/${String(controlSurface.length)}`
+    + (served.length > 0 ? ` — ${served.join(', ')}` : ' — none'))
 
   const rows: Row[] = []
   for (const candidate of CANDIDATES) {

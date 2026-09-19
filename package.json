@@ -2,7 +2,7 @@
   "name": "harness-connector-deepseek",
   "displayName": "DeepSeek Harness Connector",
   "description": "Native VS Code client for DeepSeek Harness. Connect to your existing local Harness instance and continue the same workspaces and sessions directly inside VS Code.",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "publisher": "lucasliang",
   "license": "MIT",
   "repository": {
@@ -100,6 +100,36 @@
       {
         "command": "deepseekHarness.sendSelectionToChat",
         "title": "Send Selection to Harness",
+        "category": "DeepSeek Harness"
+      },
+      {
+        "command": "deepseekHarness.togglePlanMode",
+        "title": "DeepSeek Harness: Toggle Plan Mode",
+        "category": "DeepSeek Harness"
+      },
+      {
+        "command": "deepseekHarness.setPermissionPreset",
+        "title": "DeepSeek Harness: Set Permission Preset",
+        "category": "DeepSeek Harness"
+      },
+      {
+        "command": "deepseekHarness.forkSession",
+        "title": "DeepSeek Harness: Fork Session",
+        "category": "DeepSeek Harness"
+      },
+      {
+        "command": "deepseekHarness.renameSession",
+        "title": "DeepSeek Harness: Rename Session",
+        "category": "DeepSeek Harness"
+      },
+      {
+        "command": "deepseekHarness.compactSession",
+        "title": "DeepSeek Harness: Compact Session Context",
+        "category": "DeepSeek Harness"
+      },
+      {
+        "command": "deepseekHarness.archiveSession",
+        "title": "DeepSeek Harness: Archive Session",
         "category": "DeepSeek Harness"
       }
     ],

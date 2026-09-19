@@ -61,6 +61,13 @@ export type WebviewAction =
   | { type: 'reviewAcceptAll'; reviewId: string }
   | { type: 'reviewRejectAll'; reviewId: string }
   | { type: 'approvalRespond'; rpcId: string; outcome: 'allowed-once' | 'rejected' }
+  // ─── control surface ────────────────────────────────────────────────────────
+  | { type: 'controlPlan'; active: boolean }
+  | { type: 'controlPreset'; preset: string }
+  | { type: 'controlFork' }
+  | { type: 'controlCompact' }
+  | { type: 'controlArchive' }
+  | { type: 'controlRename' }
 
 export interface ProviderDeps {
   client: HarnessClient

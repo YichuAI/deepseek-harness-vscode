@@ -28,8 +28,14 @@ import { join } from 'node:path'
 import type { Duplex } from 'node:stream'
 import { BrowserSessionAuth } from '../src/harness/auth.ts'
 import { HarnessClient } from '../src/harness/client.ts'
-import type { MuxFrame } from '../src/harness/protocol.ts'
+import type { MuxFrame, SessionEvent } from '../src/harness/protocol.ts'
+import { ControlSurface } from '../src/conversation/control.ts'
 import { negotiateWire, wireEndpoint } from '../src/harness/wire.ts'
+
+/** One durable session event, as the fold receives it. */
+function ev(type: string, data: unknown, seq = 0): SessionEvent {
+  return { type, seq, time: seq, data }
+}
 
 const LAUNCH_TOKEN = 'launch-token-abcdefghijklmnopqrstuvwxyz0123456789A'
 const SECRET = randomBytes(32)
@@ -46,7 +52,11 @@ function eq<T>(name: string, actual: T, expected: T): void {
 }
 
 // ─── fake harness ─────────────────────────────────────────────────────────────
-const seen: { rpc: { endpoint: string; args: unknown }[]; results: unknown[] } = { rpc: [], results: [] }
+const seen: {
+  rpc: { endpoint: string; args: unknown }[]
+  results: unknown[]
+  commands: string[]
+} = { rpc: [], results: [], commands: [] }
 const muxStreams = new Map<string, { endpoint: string; socket: Duplex }>()
 
 function cookieNameFor(authority: string): string {
@@ -182,6 +192,61 @@ const server = http.createServer((req, res) => {
       case 'host.describe':
         // Deleted upstream: the RPC route answers 404, which is what the client
         // turns into its "endpoint does not exist" guidance.
+        res.writeHead(404, { 'content-type': 'text/plain' })
+        res.end('not found')
+        return
+
+      // ─── control surface ────────────────────────────────────────────────────
+      // Upstream routes plan mode, permission presets and compaction through the
+      // command registry, so `session/command` is the one write path every
+      // control shares — which is why the probe looks for it by name.
+      case 'session/command': {
+        const line = (args as { request?: { line?: unknown } }).request?.line
+        seen.commands.push(typeof line === 'string' ? line : '<not-a-string>')
+        sendJson(res, body.rpcId, { ok: true, value: { matched: true } })
+        return
+      }
+      case 'session/fork':
+        sendJson(res, body.rpcId, { ok: true, value: 'session-2' })
+        return
+      case 'session/rename': {
+        const title = String((args as { request?: { title?: unknown } }).request?.title ?? '')
+        sendJson(res, body.rpcId, { ok: true, value: { title, seq: 12 } })
+        return
+      }
+      case 'session/selectModel':
+        sendJson(res, body.rpcId, { ok: true, value: { accepted: true } })
+        return
+      case 'workspace/archiveSession':
+        sendJson(res, body.rpcId, { ok: true, value: { accepted: true } })
+        return
+      case 'agentPreset/list':
+        sendJson(res, body.rpcId, { ok: true, value: { items: [] } })
+        return
+      case 'llm/models':
+        sendJson(res, body.rpcId, { ok: true, value: { models: [] } })
+        return
+      case 'subagent/list':
+        // Served, but rejects an empty args object: an argument-shape rejection
+        // proves the method EXISTS, so the probe must still record it.
+        if (Object.keys(args).length === 0) {
+          sendJson(res, body.rpcId, {
+            ok: false,
+            error: { code: 'invalid_argument', message: 'missing declared parameter `agentId`', details: {} },
+          })
+          return
+        }
+        sendJson(res, body.rpcId, { ok: true, value: { items: [] } })
+        return
+      case 'agentPreset/select':
+        // Served in name only: a not-found-class business error means absence.
+        sendJson(res, body.rpcId, {
+          ok: false,
+          error: { code: 'gateway/not-found', message: 'unknown method', details: {} },
+        })
+        return
+      case 'session/updateQueue':
+        // Not served at all: absence expressed as an HTTP 404.
         res.writeHead(404, { 'content-type': 'text/plain' })
         res.end('not found')
         return
@@ -425,6 +490,127 @@ async function main(): Promise<void> {
   try { await (client as unknown as { rpc: (e: string, a: Record<string, unknown>) => Promise<unknown> }).rpc('host/describe', {}) }
   catch (e) { gone = (e as Error).message }
   check('a removed endpoint reports 404 with guidance', /404/.test(gone) && /wire style/.test(gone), gone.slice(0, 96))
+
+  // 10. Control surface. Nothing here is assumed: the plugin asks what the host
+  //     serves and only then offers the matching write.
+  const caps = client.capabilities()
+  check('served control methods are recorded as present',
+    caps['session/command'] === true && caps['session/fork'] === true && caps['session/rename'] === true)
+  check('a method answering HTTP 404 is recorded as absent', caps['session/updateQueue'] !== true)
+  check('a not-found business error is recorded as absent', caps['agentPreset/select'] !== true)
+  check('an argument-shape rejection still proves the method exists', caps['subagent/list'] === true)
+
+  await client.setPermissionPreset('session-1', 'workspace-write')
+  eq('a preset switch goes out as the /permission line', seen.commands.at(-1), '/permission workspace-write')
+  await client.togglePlanMode('session-1')
+  eq('plan mode toggles through /plan', seen.commands.at(-1), '/plan')
+  await client.compactSession('session-1')
+  eq('compaction requests /compact', seen.commands.at(-1), '/compact')
+  eq('fork returns the child session id', await client.forkSession('session-1'), 'session-2')
+  eq('rename returns the accepted title', (await client.renameSession('session-1', 'My title')).title, 'My title')
+  check('archive answers without throwing', (await client.archiveSession('session-1')) !== undefined)
+  const forkSent = seen.rpc.filter(r => r.endpoint === 'session/fork').at(-1)?.args
+  check('fork offers the increaseTitle option upstream documents',
+    typeof (forkSent as { request?: { increaseTitle?: unknown } } | undefined)?.request?.increaseTitle === 'boolean',
+    JSON.stringify(forkSent))
+
+  // 11. A host with no control surface: every control must refuse with wording
+  //     that names what is missing, instead of failing as a bare 404.
+  const bareServer = http.createServer((req, res) => {
+    // A real WebSocket route answers a bodyless GET with 426, not 404 — that is
+    // what the event-socket probe keys off, so the fake must match.
+    if (req.method !== 'POST') {
+      res.writeHead(426, { 'content-type': 'text/plain' })
+      res.end('upgrade required')
+      return
+    }
+    const chunks: Uint8Array[] = []
+    req.on('data', (c: Buffer) => { chunks.push(c) })
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { rpcId: string; method: string }
+      if (body.method === 'session/list') {
+        sendJson(res, body.rpcId, { ok: true, value: { items: [] } })
+        return
+      }
+      res.writeHead(404, { 'content-type': 'text/plain' })
+      res.end('not found')
+    })
+  })
+  await new Promise<void>((resolve) => { bareServer.listen(0, '127.0.0.1', resolve) })
+  const barePort = (bareServer.address() as { port: number }).port
+  const bareAuth = new BrowserSessionAuth({
+    host: '127.0.0.1', port: barePort, store: { load: async () => undefined, save: async () => {} }, log: () => {},
+  })
+  await bareAuth.init()
+  const bareClient = new HarnessClient({ host: '127.0.0.1', port: barePort, auth: bareAuth, log: () => {} })
+  // Capabilities are discovered during negotiation, which happens before the
+  // event socket — so this fake deliberately stops there (no WebSocket route).
+  await bareClient.connect().catch(() => { /* expected: no mux on this fake */ })
+  check('a host without a control surface is probed as having none',
+    Object.values(bareClient.capabilities()).every(v => v !== true),
+    JSON.stringify(bareClient.capabilities()))
+  let bareMsg = ''
+  try { await bareClient.runCommand('session-1', '/plan') } catch (e) { bareMsg = (e as Error).message }
+  check('an unserved control names the missing endpoint',
+    /session\/command/.test(bareMsg) && /not serve/.test(bareMsg), bareMsg.slice(0, 110))
+  bareClient.dispose()
+  await new Promise<void>((resolve) => { bareServer.close(() => { resolve() }) })
+
+  // 12. The control-surface fold — every knob is a whole value, so replaying
+  //     the log must reproduce the same state with no catch-up channel.
+  const surface = new ControlSurface()
+  check('events the fold does not know are ignored', surface.apply(ev('something/new', {})) === false)
+  check('plan/mode is folded', surface.apply(ev('plan/mode', { active: true }, 1)) === true)
+  check('restating the same value does not bump the version', surface.apply(ev('plan/mode', { active: true }, 2)) === false)
+  check('permission/preset is folded', surface.apply(ev('permission/preset', { preset: 'workspace-write' }, 3)) === true)
+  check('sandbox/mode is folded', surface.apply(ev('sandbox/mode', { mode: 'workspace-write' }, 4)) === true)
+  check('approval/policy is folded', surface.apply(ev('approval/policy', { policy: 'ask' }, 5)) === true)
+  surface.apply(ev('todo/write', {
+    todos: [{ content: 'read the log', status: 'completed' }, { content: 'fix it', status: 'in_progress' }, { content: '', status: 'pending' }],
+  }, 6))
+  eq('todo/write keeps only well-formed entries', surface.snapshot().todos.map(t => t.content), ['read the log', 'fix it'])
+  surface.apply(ev('todo/write', { todos: [{ content: 'read the log', status: 'completed' }] }, 7))
+  eq('a later todo/write replaces the whole list', surface.snapshot().todos.length, 1)
+  check('request/header yields the effective model', (() => {
+    surface.apply(ev('request/header', { header: { config: { provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'high' } } }, 8))
+    return JSON.stringify(surface.snapshot().model) === JSON.stringify({ provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'high' })
+  })())
+  surface.apply(ev('goal/change', {
+    operation: 'create',
+    goal: { id: 'goal-1', revision: 1, objective: 'ship the control surface', phase: 'active', maxGoalRounds: 5 },
+    roundsStarted: 2,
+  }, 9))
+  eq('goal/change creates the goal', [surface.snapshot().goal?.objective, surface.snapshot().goal?.phase], ['ship the control surface', 'active'])
+  check('goal rounds are folded', surface.snapshot().goal?.roundsStarted === 2)
+  surface.apply(ev('goal/change', {
+    operation: 'complete',
+    goal: { id: 'goal-1', revision: 2, objective: 'ship the control surface', phase: 'complete', maxGoalRounds: 5 },
+    roundsStarted: 2,
+  }, 10))
+  eq('a later goal whole value wins', surface.snapshot().goal?.phase, 'complete')
+  surface.apply(ev('goal/change', { operation: 'clear', cleared: { id: 'goal-1', revision: 2 } }, 11))
+  check('goal/clear removes the goal', surface.snapshot().goal === undefined)
+  check('subagent/start marks a child running', surface.apply(ev('subagent/start', { id: 'sub-1', name: 'reviewer' }, 12)) === true)
+  eq('the running child is listed', [surface.snapshot().subagents.length, surface.snapshot().subagents[0]?.running], [1, true])
+  surface.apply(ev('subagent/end', { id: 'sub-1' }, 13))
+  check('subagent/end settles it without losing its name',
+    surface.snapshot().subagents[0]?.running === false && surface.snapshot().subagents[0]?.name === 'reviewer')
+  surface.apply(ev('subagent/descriptor', { subagents: [{ id: 'sub-2', name: 'tester' }] }, 14))
+  eq('a descriptor roster replaces whoever is left', surface.snapshot().subagents.map(s => s.key), ['sub-2'])
+  surface.apply(ev('compaction/start', { compactionId: 'c1', turn: null }, 15))
+  check('compaction/start shows a compaction in flight', surface.snapshot().compaction?.running === true)
+  surface.apply(ev('compaction/summary', { compactionId: 'c1', summary: 'earlier work compacted', shadowedTokenCount: 4096 }, 16))
+  surface.apply(ev('compaction/end', { compactionId: 'c1', turn: null }, 17))
+  eq('a finished compaction keeps its summary',
+    [surface.snapshot().compaction?.running, surface.snapshot().compaction?.summary, surface.snapshot().compaction?.shadowedTokenCount],
+    [false, 'earlier work compacted', 4096])
+  surface.apply(ev('agent-preset/selected', { id: 'preset-deep-research' }, 18))
+  eq('the selected agent preset is folded', surface.snapshot().agentPreset, 'preset-deep-research')
+  const beforeReset = surface.snapshot().version
+  surface.reset()
+  check('reset clears the whole control surface',
+    surface.snapshot().version > beforeReset && surface.snapshot().todos.length === 0
+    && surface.snapshot().goal === undefined && surface.snapshot().planActive === undefined)
 
   // 35. The cookie outlives the `dsh web` process. Only the launch *token* is
   //     per-process; the cookie is signed by a secret persisted in

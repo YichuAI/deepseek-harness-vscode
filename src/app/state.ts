@@ -8,6 +8,7 @@
 import type { MuxStatus } from '../harness/events.ts'
 import type { SessionSummary, WorkspaceView } from '../harness/protocol.ts'
 import type { SessionSnapshot } from '../conversation/types.ts'
+import type { ControlState } from '../conversation/control.ts'
 import type { ReviewSummary } from '../review/types.ts'
 import type { ApprovalSummary } from '../approval/types.ts'
 
@@ -38,6 +39,10 @@ export interface UiState {
   reviews?: ReviewSummary[]
   /** Pending approvals for the current session. */
   approvals?: ApprovalSummary[]
+  /** Control surface folded from the session's knob/goal/todo events. */
+  control?: ControlState
+  /** `ns/method` → served by this host. Absent key means "probed and missing". */
+  capabilities?: Record<string, boolean>
   /** Monotonically increasing. Bumps whenever any UiState field changes,
    *  including sub-object mutations inside snapshot. Webview re-renders on
    *  renderVersion change only (solves streaming no-render bug). */

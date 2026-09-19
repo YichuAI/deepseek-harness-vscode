@@ -145,8 +145,21 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 - `DeepSeek Harness: New Session`（在当前工作区新建会话）
 - `DeepSeek Harness: Refresh Sessions`（刷新会话列表）
 - `DeepSeek Harness: Move to Right Side Bar`（移至右侧边栏）——将视图停靠在辅助侧边栏（像聊天面板一样），不再与文件浏览器争抢左侧空间。也可通过 webview 头部的 ⇲ 按钮触发。
+- `DeepSeek Harness: Toggle Plan Mode`（切换计划模式）——翻转当前会话的 `/plan`
+- `DeepSeek Harness: Set Permission Preset`（设置权限预设）——选择或输入预设名，如 `read-only` / `workspace-write` / `danger-full-access`
+- `DeepSeek Harness: Compact Session Context`（压缩会话上下文）——请求 `/compact`
+- `DeepSeek Harness: Fork Session`（分叉会话）——从当前会话分叉并切到新会话
+- `DeepSeek Harness: Rename Session`（重命名会话）——固定标题（之后不再自动生成）
+- `DeepSeek Harness: Archive Session`（归档会话）——从当前工作区列表归档
 - `DeepSeek Harness: Open Web UI`（打开 Web UI）
 - `DeepSeek Harness: Show Logs`（显示日志，即 `DeepSeek Harness` 输出通道）
+
+这六个控制项同时也在侧边栏的 **Controls（控制）** 面板里，面板还会显示 host
+下发的状态：计划模式、沙箱模式、审批策略、agent 预设、当前生效模型、待办列表、
+当前目标、子代理活动和最近一次压缩摘要。
+
+**每个控制项都只在这台 host 真的提供它时才出现** —— 能力探测在连接时完成，
+所以面对较旧的 `dsh web`，面板只会少显示几个旋钮，而不是给你点不动的按钮。
 
 ### 右键菜单操作
 
@@ -170,9 +183,10 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 一个独立的 Node 脚本用真实客户端代码驱动一个**假**的 0.1.6 harness —— 不需要 `dsh web`：
 
 ```bash
-npm run protocol-test    # 64 项断言：线缆协商（点分/斜杠、cookie 门禁、
+npm run protocol-test    # 98 项断言：线缆协商（点分/斜杠、cookie 门禁、
                          # 事件套接字）、认证、cookie 派生、{args} payload、
-                         # 审批瀑布、assistant 流、已移除端点的 404 处理
+                         # 审批瀑布、assistant 流、已移除端点的 404 处理、
+                         # 控制面能力探测与全量值状态折叠
 ```
 
 想让**真实**的 `dsh web` 自己报出它提供了什么（端点风格、事件套接字，以及
@@ -197,7 +211,7 @@ npm run build        # esbuild → dist/extension.js
 npm run watch        # 变更时自动重建
 npm run typecheck
 npm run package      # → harness-connector-deepseek-0.0.4.vsix
-npm run protocol-test      # 针对假 harness 的 64 项协议断言
+npm run protocol-test      # 针对假 harness 的 98 项协议断言
 npm run protocol-probe     # 报告真实 dsh web 暴露了什么
 ```
 
@@ -220,8 +234,11 @@ npm run protocol-probe     # 报告真实 dsh web 暴露了什么
 - 未知的 harness 事件类型会被忽略（协议是可合并扩展的）；它们不会导致客户端崩溃，但也不会渲染。
 - Diff 审查的 Reject 使用 `git checkout` 回退——目标文件上未提交的本地修改会在 Reject 时丢失。
 
-## 路线图（v0.0.4+）
+## 路线图（v0.0.7+）
 
+- 由 `session/selectModel` 与 `llm/models` 驱动的模型 / 推理强度选择器
+- 子代理控制（`subagent/interrupt`、排队消息转向）
+- 历史分页「加载更早」
 - 内联补全（Inline Completion）
 - VS Code 文件系统提供器
 - 终端集成

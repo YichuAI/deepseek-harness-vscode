@@ -5,6 +5,58 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.6] — 2026-09-19
+
+Tagline: **the control surface — the knobs the harness has always shipped.**
+
+The host has been sending `plan/mode`, `permission/preset`, `sandbox/mode`,
+`todo/write`, `goal/change`, `subagent/*` and `compaction/*` all along, and the
+plugin rendered none of them. That made the sidebar look half-finished next to
+the official Web UI even though the session itself was shared. This release
+shows them and — where the host allows — lets you change them.
+
+### Added
+
+- **`src/conversation/control.ts` — the control-surface fold.** Those events are
+  *whole values* upstream (the latest occurrence wins, and replay must
+  reconstruct state from the log alone), so the fold is a pure last-write-wins
+  projection over history plus live frames. `request/header` additionally yields
+  the effective provider / model / reasoning effort.
+- **Capability probing.** `wire.ts` now asks the host which control methods it
+  serves (`session/command`, `session/fork`, `session/rename`,
+  `session/selectModel`, `workspace/archiveSession`, `agentPreset/*`,
+  `subagent/list`, `llm/models`) and caches the answer on the profile. Probes
+  send empty args on purpose: parameter validation runs before any handler, so a
+  rejection proves the method exists and can never mutate session state.
+- **Control writes** on `HarnessClient`: `runCommand` (the shared write path —
+  upstream routes plan, permission and compaction through the command registry),
+  `togglePlanMode`, `setPermissionPreset`, `compactSession`, `forkSession`,
+  `renameSession`, `selectModel`, `archiveSession`.
+- **`rpcVariants()`** — tolerates the several `{args}` spellings upstream has
+  shipped (`request`, `_request`, bare fields) by treating an argument-shape
+  rejection as "wrong spelling", not "missing method". The winning *spelling* is
+  cached, never the argument values.
+- **A Controls panel** in the sidebar: plan toggle, permission-preset picker,
+  sandbox/approval/model badges, todos, the active goal, subagent activity, the
+  last compaction summary, and Fork / Rename / Compact / Archive actions — each
+  offered only when this host serves its write path.
+- Six commands: `Toggle Plan Mode`, `Set Permission Preset`,
+  `Compact Session Context`, `Fork Session`, `Rename Session`,
+  `Archive Session`.
+- `npm run protocol-probe` now prints the negotiated control surface.
+
+### Changed
+
+- `protocol-test` grew from 64 to **98 assertions**, covering capability probing
+  (present / HTTP-404 absent / not-found-code absent / shape-rejection present),
+  the control writes, a host with no control surface at all, and the whole-value
+  fold semantics including goal clear, subagent roster reconciliation and reset.
+
+### Notes
+
+- `HarnessUnsupportedError` is raised when a control's endpoint is absent; its
+  message names what is missing rather than failing as a bare 404.
+
 ## [0.0.5] — 2026-09-19
 
 Tagline: **the wire is negotiated, not assumed.**

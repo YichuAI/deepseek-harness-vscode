@@ -97,8 +97,41 @@ declared-parameter spellings (`_request`, `request`, none), so each is tried
 until one returns `ok`. The result is a `WireProfile`, cached for the session and
 routed through `HarnessClient.ep()` — no other module writes an endpoint literal.
 
+A fifth axis answers a different question: **which control methods exist at
+all?** `probeCapabilities()` asks once per connect and records the answer on
+`WireProfile.capabilities`, so the sidebar offers a control only when the host
+serves its write path (see *Control surface* below).
+
 Run `npm run protocol-probe` against a live `dsh web` to print what that host
 actually serves.
+
+## Control surface (`src/conversation/control.ts`)
+
+The harness ships its knobs as durable session events, every one of them a
+**whole value**: the latest occurrence wins, and replay must reconstruct state
+from the log alone with no catch-up channel. That makes `ControlSurface` a pure
+fold — apply every event in order and you have the truth, whether it came from
+`session/page` history or a live `session/follow` frame.
+
+| Event | Payload | What the panel shows |
+| --- | --- | --- |
+| `plan/mode` | `{ active }` | plan-mode toggle |
+| `permission/preset` | `{ preset }` | preset picker selection |
+| `sandbox/mode` | `{ mode }` | confinement badge |
+| `approval/policy` | `{ policy }` | approval badge |
+| `todo/write` | `{ todos }` | checklist (replaces the list wholesale) |
+| `goal/change` | `{ operation, goal \| cleared }` | objective + phase + rounds |
+| `subagent/start` / `end` / `descriptor` | scoped identity | running children |
+| `compaction/start` / `end` / `summary` | provenance + summary | compaction state |
+| `request/header` | `{ header: { config } }` | effective provider / model / effort |
+
+Write paths are split by what upstream actually exposes: plan mode, permission
+presets and compaction go through the **command registry** (`session/command`
+with `/plan`, `/permission <name>`, `/compact`), while fork / rename /
+archive / model selection have dedicated endpoints. Every write first checks the
+negotiated capability (`requireControl`) and otherwise throws
+`HarnessUnsupportedError`, whose message names the missing endpoint — the UI then
+shows fewer controls rather than dead ones.
 
 ### Auth: browser session cookie
 

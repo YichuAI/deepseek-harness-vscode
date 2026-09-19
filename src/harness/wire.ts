@@ -38,6 +38,8 @@ export interface WireProfile {
   listArgs: Record<string, unknown>
   /** Model-catalog endpoint that answered, if any. */
   catalogEndpoint?: string
+  /** Control-surface methods this host actually serves (`ns/method` → present). */
+  capabilities: Record<string, boolean>
 }
 
 export type NegotiationResult =
@@ -73,6 +75,59 @@ const LIST_ARGS_CANDIDATES: readonly Record<string, unknown>[] = [{ _request: {}
 
 /** How long to wait for response headers when probing the event socket. */
 const PROBE_TIMEOUT_MS = 2_000
+
+/**
+ * Control-surface methods, canonical `ns/method`.
+ *
+ * Every one of these exists in *some* release and is absent in others, and the
+ * other side of the line may not even be the release we think it is. Rather
+ * than shipping buttons that 404, each is probed at connect time and the UI
+ * only offers what answered.
+ */
+export const CONTROL_METHODS = [
+  'session/command',
+  'session/fork',
+  'session/rename',
+  'session/selectModel',
+  'session/updateQueue',
+  'agentPreset/list',
+  'agentPreset/select',
+  'subagent/list',
+  'subagent/interrupt',
+  'llm/models',
+  'workspace/archiveSession',
+] as const
+
+export type ControlMethod = (typeof CONTROL_METHODS)[number]
+
+/**
+ * Business error codes meaning "I do not serve that method".
+ *
+ * A 404 answers this at the HTTP level; some builds answer 200 with a typed
+ * error instead. The codes below are the ones observed upstream (\
+ * `not_found`, `unknown_method`, `unimplemented`); the match is deliberately
+ * broad because a false positive only hides a control, while a false negative
+ * would render a dead button.
+ */
+const MISSING_METHOD_CODE = /not[_-]?found|unknown|unimplemented|unsupported|no[_-]?such|method/i
+
+/**
+ * Business error codes meaning "the arguments do not match my declared
+ * parameters" — which *proves the method exists*. Contrast with
+ * {@link MISSING_METHOD_CODE}: the distinction is what makes capability
+ * probing possible without calling anything successfully.
+ */
+const SHAPE_REJECTION_CODE = /invalid[_-]?arg|bad[_-]?request|schema|validation|missing|required|malformed|too[_-]?(few|many)|unexpected/i
+
+/** True when a typed RPC error means "no such method on this host". */
+export function isMissingMethodError(code: string): boolean {
+  return MISSING_METHOD_CODE.test(code)
+}
+
+/** True when a typed RPC error proves the method exists but rejected the args. */
+export function isShapeRejection(code: string): boolean {
+  return !isMissingMethodError(code) && SHAPE_REJECTION_CODE.test(code)
+}
 
 /** `/api/<ns><sep><method>` for one style. */
 export function apiPath(style: EndpointStyle, ns: string, method: string): string {
@@ -175,9 +230,11 @@ export async function negotiateWire(opts: NegotiateOptions): Promise<Negotiation
         auth: 'none',
         muxPath: await probeMuxPath(opts, opts.log),
         listArgs,
+        capabilities: {},
       }
       const catalog = await probeCatalog(opts, style)
       if (catalog !== undefined) profile.catalogEndpoint = catalog
+      profile.capabilities = await probeCapabilities(opts, style, opts.log)
       return { kind: 'ok', profile }
     }
   }
@@ -234,7 +291,60 @@ async function probeCatalog(opts: NegotiateOptions, style: EndpointStyle): Promi
   return undefined
 }
 
+/** Parse a `server-response` envelope well enough to classify one probe. */
+function parseOutcome(body: string): { ok: boolean; code?: string } | undefined {
+  try {
+    const env = JSON.parse(body) as {
+      type?: unknown
+      result?: { ok?: unknown; error?: { code?: unknown } }
+    }
+    if (env.type !== 'server-response' || env.result === undefined || typeof env.result.ok !== 'boolean') {
+      return undefined
+    }
+    const code = env.result.error?.code
+    return typeof code === 'string' ? { ok: env.result.ok, code } : { ok: env.result.ok }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Ask the host which control-surface methods it serves.
+ *
+ * Every probe sends EMPTY args on purpose. Declared-parameter validation runs
+ * before any handler executes, so a malformed-argument response can never
+ * mutate session state — and that same rejection is *proof* the method exists,
+ * while a `not_found`-class code proves it does not.
+ */
+export async function probeCapabilities(
+  opts: NegotiateOptions,
+  style: EndpointStyle,
+  log: (m: string) => void,
+): Promise<Record<string, boolean>> {
+  const found: Record<string, boolean> = {}
+  await Promise.all(CONTROL_METHODS.map(async (method) => {
+    const endpoint = wireEndpoint(style, method)
+    const outcome = await postRpc(opts, `/api/${endpoint}`, endpoint, {})
+    if (outcome === undefined) return
+    if (outcome.status !== 200) return // 404 = no such route; 401 = not ours to ask
+    const parsed = parseOutcome(outcome.body)
+    if (parsed === undefined) return
+    if (!parsed.ok && parsed.code !== undefined && isMissingMethodError(parsed.code)) return
+    found[method] = true
+  }))
+  const present = Object.keys(found)
+  log(`wire: control surface ${String(present.length)}/${String(CONTROL_METHODS.length)} available`
+    + (present.length > 0 ? ` — ${present.join(', ')}` : ' — none'))
+  return found
+}
+
 /** A profile for hosts that never negotiated (tests, pre-connect). */
 export function defaultWireProfile(): WireProfile {
-  return { endpointStyle: 'slash', auth: 'cookie', muxPath: MUX_PATH_CANDIDATES[0], listArgs: {} }
+  return {
+    endpointStyle: 'slash',
+    auth: 'cookie',
+    muxPath: MUX_PATH_CANDIDATES[0],
+    listArgs: {},
+    capabilities: {},
+  }
 }

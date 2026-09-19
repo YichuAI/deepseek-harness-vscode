@@ -22,6 +22,8 @@ export interface HttpRequestOptions {
   path: string
   headers?: Record<string, string>
   body?: string
+  /** Abort the request if it has not completed within this many milliseconds. */
+  timeoutMs?: number
 }
 
 export interface HttpResponse {
@@ -65,7 +67,44 @@ export function httpRequest(opts: HttpRequestOptions): Promise<HttpResponse> {
       })
     })
     req.on('error', (err) => { reject(err instanceof Error ? err : new Error(String(err))) })
+    if (opts.timeoutMs !== undefined) {
+      req.setTimeout(opts.timeoutMs, () => { req.destroy(new Error(`timed out after ${String(opts.timeoutMs)}ms`)) })
+    }
     req.end(payload)
+  })
+}
+
+/**
+ * Read only the status code of one GET.
+ *
+ * Used to discover whether an endpoint path exists: a WebSocket route answers
+ * an ordinary GET with 400/426 (upgrade required) while a missing route answers
+ * 404. The response body is never read and the socket is destroyed as soon as
+ * the headers land, so an event stream cannot hold the probe open.
+ */
+export function httpStatus(opts: {
+  host: string
+  port: number
+  path: string
+  headers?: Record<string, string>
+  timeoutMs?: number
+}): Promise<number> {
+  return new Promise((resolve) => {
+    const req = http.request({
+      hostname: bareHost(opts.host),
+      port: opts.port,
+      method: 'GET',
+      path: opts.path,
+      headers: opts.headers ?? {},
+    }, (res) => {
+      res.destroy()
+      resolve(res.statusCode ?? 0)
+    })
+    req.on('error', () => { resolve(0) })
+    if (opts.timeoutMs !== undefined) {
+      req.setTimeout(opts.timeoutMs, () => { req.destroy(); resolve(0) })
+    }
+    req.end()
   })
 }
 

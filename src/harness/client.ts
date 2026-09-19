@@ -34,6 +34,7 @@ import { CompositeDisposable } from '../disposable.ts'
 import { EventBuffer, muxUrl, RemoteStreamMux, type MuxStatus, type StreamHandle, type StreamHandlers } from './events.ts'
 import { HarnessAuthRequiredError, type BrowserSessionAuth } from './auth.ts'
 import { httpRequest } from './http.ts'
+import { defaultWireProfile, negotiateWire, wireEndpoint, type WireProfile } from './wire.ts'
 import {
   APPROVAL_REQUEST_EVENT,
   REMOTE_EVENT_RESULT_ENDPOINT,
@@ -116,6 +117,8 @@ export class HarnessClient implements Disposable {
   private eventClientId: string | undefined
   private readySignal: { resolve: () => void; reject: (e: Error) => void } | undefined
   private info: HarnessInfo | undefined
+  /** Negotiated wire shape; `undefined` until the first successful connect. */
+  private profile: WireProfile | undefined
   /** Active session filter; only frames for this session reach `sessionListeners`. */
   private activeSessionId: SessionId | undefined
   private readonly follow = new Map<SessionId, FollowState>()
@@ -178,7 +181,23 @@ export class HarnessClient implements Disposable {
       // No paste required when the harness's own credential store is readable:
       // minting there is permission-equivalent to reading the file at all.
       if (!this.opts.auth.isReady()) await this.opts.auth.tryMintLocalSession()
-      if (!this.opts.auth.isReady()) throw this.authRequired()
+
+      // Never assume the wire shape — discover it. Endpoint style, cookie
+      // gating and the event-socket path have all drifted between releases.
+      const negotiation = await negotiateWire({
+        host: this.opts.host,
+        port: this.opts.port,
+        cookie: () => this.opts.auth.cookieHeader(),
+        log: this.opts.log,
+      })
+      if (negotiation.kind === 'auth-required') throw this.authRequired()
+      if (negotiation.kind === 'unreachable') throw new Error(negotiation.message)
+      this.profile = negotiation.profile
+      this.opts.log(
+        `wire: style=${negotiation.profile.endpointStyle} auth=${negotiation.profile.auth} `
+        + `mux=${negotiation.profile.muxPath}`,
+      )
+
       this.info = undefined
       this.eventClientId = undefined
       this.openMux()
@@ -228,7 +247,7 @@ export class HarnessClient implements Disposable {
   /** Workspace list. `workspace/list` is gone; the state arrives as a stream baseline. */
   async listWorkspaces(): Promise<{ items: WorkspaceView[]; archivedSessionIds: SessionId[] }> {
     const baseline = await this.firstStreamItem<Extract<WorkspaceFollowFrame, { type: 'baseline' }>>(
-      'workspace/follow',
+      this.ep('workspace/follow'),
       {},
       value => value.type === 'baseline' ? value : undefined,
     )
@@ -241,9 +260,9 @@ export class HarnessClient implements Disposable {
   }
 
   listSessions(): Promise<{ items: SessionSummary[] }> {
-    // The declared parameter is literally named `_request` upstream, and the
-    // gateway rejects an args object whose fields do not match the descriptor.
-    return this.rpc('session/list', { _request: {} })
+    // The declared parameter name has shipped as `_request`, `request` and (in
+    // older builds) nothing at all; negotiation recorded the one this host takes.
+    return this.rpc('session/list', this.profile?.listArgs ?? { _request: {} })
   }
 
   /**
@@ -258,7 +277,7 @@ export class HarnessClient implements Disposable {
     opts: { maxMessages?: number } = {},
   ): Promise<{ events: HistoryEntry[]; hasMore: boolean }> {
     const snapshot = await this.firstStreamItem<Extract<SessionFollowFrame, { type: 'snapshot' }>>(
-      'session/follow',
+      this.ep('session/follow'),
       {
         request: {
           address: sessionAddress(sessionId),
@@ -389,7 +408,7 @@ export class HarnessClient implements Disposable {
     const mux = this.mux
     if (mux === undefined) throw new Error('mux is not open')
     state.handle = mux.request(
-      'session/follow',
+      this.ep('session/follow'),
       { request: { address: sessionAddress(sessionId), maxMessages: HISTORY_WINDOW, assistantStream: true } },
       handlers,
     )
@@ -408,13 +427,21 @@ export class HarnessClient implements Disposable {
   }
 
   // ─── internals ──────────────────────────────────────────────────────────────
-  private async rpc<V>(endpoint: string, args: Record<string, unknown>): Promise<V> {
+  /** Render one canonically-written `ns/method` in the negotiated style. */
+  private ep(method: string): string {
+    return wireEndpoint(this.profile?.endpointStyle ?? 'slash', method)
+  }
+
+  private async rpc<V>(method: string, args: Record<string, unknown>): Promise<V> {
     if (!LOOPBACK_HOSTS.has(this.opts.host)) {
       throw new Error('v0.0.1 only supports local DeepSeek Harness instances.')
     }
     await this.opts.auth.init()
     const cookie = this.opts.auth.cookieHeader()
-    if (cookie === undefined) throw this.authRequired()
+    // Only a cookie-gated host actually needs one; older releases serve /api/*
+    // unauthenticated and must not be pushed into the paste flow.
+    if (cookie === undefined && (this.profile?.auth ?? 'cookie') === 'cookie') throw this.authRequired()
+    const endpoint = this.ep(method)
     const origin = `http://${this.opts.host}:${String(this.opts.port)}`
     const body = JSON.stringify({
       type: 'client-request',
@@ -429,7 +456,7 @@ export class HarnessClient implements Disposable {
         port: this.opts.port,
         method: 'POST',
         path: `/api/${endpoint}`,
-        headers: { cookie, origin },
+        headers: { ...(cookie === undefined ? {} : { cookie }), origin },
         body,
       })
     } catch (e) {
@@ -440,7 +467,7 @@ export class HarnessClient implements Disposable {
     if (res.status === 404) {
       throw new Error(
         `HTTP 404 on /api/${endpoint} — the running harness does not expose that endpoint. `
-        + 'This plugin targets DSH 0.1.6-alpha or newer.',
+        + `Negotiated wire style is "${this.profile?.endpointStyle ?? 'slash'}"; the host may be a different release.`,
       )
     }
     if (res.status !== 200) {
@@ -611,7 +638,7 @@ export class HarnessClient implements Disposable {
   private openMux(): void {
     if (this.mux === undefined) {
       this.mux = new RemoteStreamMux({
-        url: () => muxUrl(this.opts.host, this.opts.port),
+        url: () => muxUrl(this.opts.host, this.opts.port, this.profile?.muxPath ?? defaultWireProfile().muxPath),
         headers: () => {
           const origin = `http://${this.opts.host}:${String(this.opts.port)}`
           const cookie = this.opts.auth.cookieHeader()
@@ -640,7 +667,7 @@ export class HarnessClient implements Disposable {
   /** Best-effort host identity for the UI header (never throws). */
   private async enrichInfo(): Promise<void> {
     try {
-      const catalog = await this.rpc<ModelCatalog>('session/modelCatalog', {})
+      const catalog = await this.rpc<ModelCatalog>(this.profile?.catalogEndpoint ?? 'session/modelCatalog', {})
       if (this.state.kind !== 'connected') return
       const info: HarnessInfo = {
         ...this.state.info,

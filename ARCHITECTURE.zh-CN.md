@@ -79,18 +79,22 @@ type ConversationItem =
 > `ConversationModel.applyStreamChunk(turn, step, chunk)`。若硬塞进 `applyEvent`，
 > 合成的 `seq` 会互相压制，只剩第一个 delta 生效。
 
-## 线缆契约（DSH 0.1.6-alpha；由 `scripts/protocol-test.ts` 验证）
+## 线缆契约（连接时协商；由 `scripts/protocol-test.ts` 验证）
 
-0.1.6 一次性改了三件事，也是「升级后插件连不上」的根因：
+以下几项在 host 版本之间都漂移过，把任何一项写死都会导致插件失联。因此
+`harness/wire.ts` 在每次连接时**探测**线缆，而不是假定某个版本：
 
-| # | 变化 | 旧 | 新 |
+| # | 维度 | 见过的取值 | 探测方式 |
 | --- | --- | --- | --- |
-| 1 | 认证 | 无 | `/api/*` 与 mux 升级都必须带浏览器会话 cookie |
-| 2 | 端点命名 | `session.prompt` | `session/prompt`（`namespace/method`） |
-| 3 | 事件通道 | `/api/events.mux`，仅下行推送 | `/api/remote.mux`，**双向逻辑流多路复用** |
+| 1 | 认证 | 无 / 浏览器会话 cookie | 所有探测都返回 401 ⇒ 需要 cookie |
+| 2 | 端点命名 | `session.prompt` 与 `session/prompt` | 两种都 POST，返回 `server-response` 者胜出；404 表示不是这种 |
+| 3 | 事件通道 | `/api/events.mux` 与 `/api/remote.mux` | 只读响应头的 GET；非 404 即存在 |
 
-同时 `POST /api/host.describe` 被删除（连 `packages/host/apiproxy` 整包都没了），
-`/api/respond` 也被删除。
+还有第四个维度同样协商：`session/list` 的形参名出过三种写法（`_request`、`request`、
+干脆没有），逐个尝试直到某个返回 `ok`。结果存为 `WireProfile`，一次连接内缓存，
+并统一经 `HarnessClient.ep()` 生成端点字符串——其它模块不再写端点字面量。
+
+对真实 `dsh web` 跑 `npm run protocol-probe` 即可打印该 host 实际提供的内容。
 
 ### 认证：浏览器会话 cookie
 

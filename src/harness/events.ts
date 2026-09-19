@@ -253,10 +253,15 @@ export class RemoteStreamMux implements Disposable {
   }
 }
 
-/** The ws:// URL for the mux on one loopback target. */
-export function muxUrl(host: string, port: number): string {
+/**
+ * The ws:// URL for the mux on one loopback target.
+ *
+ * `path` comes from the negotiated WireProfile: the socket has shipped as both
+ * `/api/events.mux` and `/api/remote.mux`.
+ */
+export function muxUrl(host: string, port: number, path: string = REMOTE_STREAM_MUX_PATH): string {
   const literal = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
-  return `ws://${literal}:${String(port)}${REMOTE_STREAM_MUX_PATH}`
+  return `ws://${literal}:${String(port)}${path}`
 }
 
 function normaliseFailure(value: unknown): RemoteStreamFailure {

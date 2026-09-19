@@ -80,19 +80,25 @@ Replays are idempotent (`seq`-guarded), so reconnect → refetch history is safe
 > `applyEvent` with synthetic seqs makes each delta suppress the previous one,
 > leaving only the first visible.
 
-## Wire contract (DSH 0.1.6-alpha; validated by `scripts/protocol-test.ts`)
+## Wire contract (negotiated at connect; validated by `scripts/protocol-test.ts`)
 
-0.1.6 changed three things at once — that combination is why the plugin stopped
-connecting after an upgrade:
+Three things have drifted between host releases, and hardcoding any of them is
+what broke earlier versions. `harness/wire.ts` therefore *discovers* the wire on
+every connect rather than assuming a release:
 
-| # | Change | Before | After |
+| # | Axis | Variants seen | How it is discovered |
 | --- | --- | --- | --- |
-| 1 | Auth | none | `/api/*` and the mux upgrade both require a browser-session cookie |
-| 2 | Endpoint naming | `session.prompt` | `session/prompt` (`namespace/method`) |
-| 3 | Event channel | `/api/events.mux`, push-only | `/api/remote.mux`, **bidirectional logical-stream mux** |
+| 1 | Auth | none / browser-session cookie | every probe answering 401 ⇒ cookie-gated |
+| 2 | Endpoint naming | `session.prompt` vs `session/prompt` | POST both shapes; a `server-response` wins, 404 ⇒ not this shape |
+| 3 | Event channel | `/api/events.mux` vs `/api/remote.mux` | header-only GET; anything but 404 exists |
 
-`POST /api/host.describe` was deleted (the whole `packages/host/apiproxy` package
-is gone) and so was `/api/respond`.
+A fourth axis is negotiated too: `session/list` has shipped with three different
+declared-parameter spellings (`_request`, `request`, none), so each is tried
+until one returns `ok`. The result is a `WireProfile`, cached for the session and
+routed through `HarnessClient.ep()` — no other module writes an endpoint literal.
+
+Run `npm run protocol-probe` against a live `dsh web` to print what that host
+actually serves.
 
 ### Auth: browser session cookie
 

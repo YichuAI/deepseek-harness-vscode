@@ -29,6 +29,7 @@ import type { Duplex } from 'node:stream'
 import { BrowserSessionAuth } from '../src/harness/auth.ts'
 import { HarnessClient } from '../src/harness/client.ts'
 import type { MuxFrame } from '../src/harness/protocol.ts'
+import { negotiateWire, wireEndpoint } from '../src/harness/wire.ts'
 
 const LAUNCH_TOKEN = 'launch-token-abcdefghijklmnopqrstuvwxyz0123456789A'
 const SECRET = randomBytes(32)
@@ -121,6 +122,15 @@ const server = http.createServer((req, res) => {
   if (!authenticated(req)) {
     res.writeHead(401, { 'content-type': 'text/plain' })
     res.end('unauthorized')
+    return
+  }
+
+  // Event-socket discovery probes with a bodyless GET. A real WebSocket route
+  // answers 426 (upgrade required) rather than 404, which is exactly what the
+  // negotiator keys off.
+  if (req.method !== 'POST') {
+    res.writeHead(426, { 'content-type': 'text/plain' })
+    res.end('upgrade required')
     return
   }
 
@@ -409,11 +419,12 @@ async function main(): Promise<void> {
   check('assistant deltas arrive out of band', chunks.length === 2, `${String(chunks.length)} chunk frame(s)`)
   eq('assistant deltas keep their turn/step', [chunks[0]?.turn, chunks[0]?.chunk?.text], [1, 'po'])
 
-  // 09. The deleted endpoint produces guidance rather than a bare 401.
+  // 09. A removed endpoint produces guidance naming the negotiated wire style,
+  //     rather than a bare 401 or a hardcoded upstream version.
   let gone = ''
-  try { await (client as unknown as { rpc: (e: string, a: Record<string, unknown>) => Promise<unknown> }).rpc('host.describe', {}) }
+  try { await (client as unknown as { rpc: (e: string, a: Record<string, unknown>) => Promise<unknown> }).rpc('host/describe', {}) }
   catch (e) { gone = (e as Error).message }
-  check('a deleted endpoint reports 404 with guidance', /404/.test(gone) && /0\.1\.6-alpha/.test(gone), gone.slice(0, 80))
+  check('a removed endpoint reports 404 with guidance', /404/.test(gone) && /wire style/.test(gone), gone.slice(0, 96))
 
   // 35. The cookie outlives the `dsh web` process. Only the launch *token* is
   //     per-process; the cookie is signed by a secret persisted in
@@ -565,6 +576,82 @@ async function main(): Promise<void> {
 
   if (previousHome === undefined) delete process.env['DSH_HOME']
   else process.env['DSH_HOME'] = previousHome
+
+  // 42. Wire negotiation: the plugin must discover the host's shape instead of
+  //     assuming one, because endpoint style and the event socket have both
+  //     drifted between releases.
+  eq('slash style is rendered with a slash separator', wireEndpoint('slash', 'session/follow'), 'session/follow')
+  eq('dot style is rendered with a dot separator', wireEndpoint('dot', 'session/follow'), 'session.follow')
+  eq('special endpoints keep their own separator', wireEndpoint('dot', '$events/result'), '$events/result')
+  eq('an unqualified name is untouched', wireEndpoint('dot', 'session'), 'session')
+
+  {
+    // A pre-0.1-style host: dot endpoints, /api/events.mux, no cookie at all.
+    const legacy = http.createServer((req, res) => {
+      const url = new URL(req.url ?? '/', 'http://dsh.invalid')
+      if (req.method !== 'POST') {
+        res.writeHead(url.pathname === '/api/events.mux' ? 426 : 404)
+        res.end()
+        return
+      }
+      if (url.pathname !== '/api/session.list') {
+        res.writeHead(404)
+        res.end()
+        return
+      }
+      const chunks: Uint8Array[] = []
+      req.on('data', (c: Buffer) => { chunks.push(c) })
+      req.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { rpcId: string; payload: { args?: Record<string, unknown> } }
+        const args = body.payload.args ?? {}
+        const ok = JSON.stringify(args) === JSON.stringify({ _request: {} }) || JSON.stringify(args) === JSON.stringify({})
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          type: 'server-response',
+          rpcId: body.rpcId,
+          result: ok ? { ok: true, value: { items: [] } } : { ok: false, error: { code: 'gateway/bad-args', message: 'nope', details: {} } },
+        }))
+      })
+    })
+    await new Promise<void>((resolve) => { legacy.listen(0, '127.0.0.1', () => { resolve() }) })
+    const legacyPort = (legacy.address() as { port: number }).port
+
+    const result = await negotiateWire({
+      host: '127.0.0.1',
+      port: legacyPort,
+      cookie: () => undefined,
+      log: () => {},
+    })
+    check('a dot-style host is detected', result.kind === 'ok' && result.profile.endpointStyle === 'dot')
+    check('an unauthenticated host is served without a cookie',
+      result.kind === 'ok' && result.profile.auth === 'none')
+    check('the legacy event socket is discovered',
+      result.kind === 'ok' && result.profile.muxPath === '/api/events.mux',
+      result.kind === 'ok' ? result.profile.muxPath : result.kind)
+    check('the args shape the host accepts is recorded',
+      result.kind === 'ok' && JSON.stringify(result.profile.listArgs) === JSON.stringify({ _request: {} }),
+      result.kind === 'ok' ? JSON.stringify(result.profile.listArgs) : '')
+
+    await new Promise<void>((resolve) => { legacy.close(() => { resolve() }) })
+  }
+
+  {
+    // A cookie-gated host we have no session for: every probe is refused 401.
+    const gated = http.createServer((_req, res) => { res.writeHead(401); res.end('unauthorized') })
+    await new Promise<void>((resolve) => { gated.listen(0, '127.0.0.1', () => { resolve() }) })
+    const gatedPort = (gated.address() as { port: number }).port
+    const result = await negotiateWire({ host: '127.0.0.1', port: gatedPort, cookie: () => undefined, log: () => {} })
+    check('a cookie-gated host is reported as auth-required', result.kind === 'auth-required')
+    await new Promise<void>((resolve) => { gated.close(() => { resolve() }) })
+  }
+
+  {
+    const result = await negotiateWire({ host: '127.0.0.1', port: 1, cookie: () => undefined, log: () => {} })
+    check('a dead port is reported as unreachable', result.kind === 'unreachable')
+    check('the unreachable message says to start dsh web',
+      result.kind === 'unreachable' && /dsh web/.test(result.message),
+      result.kind === 'unreachable' ? result.message.slice(0, 60) : '')
+  }
 
   client.dispose()
   await new Promise<void>((resolve) => { server.close(() => { resolve() }) })

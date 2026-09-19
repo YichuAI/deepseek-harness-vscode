@@ -5,6 +5,39 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.0.5] — 2026-09-19
+
+版本定位：**线缆是协商出来的，不是猜出来的。**
+
+v0.0.4 把线缆形状写死了（斜杠端点、`/api/remote.mux`、cookie 认证）。而本机所有
+证据都不支持这套写法：已安装运行时（`0.1.0-rc.6`）用的是 `/api/session.list` +
+`/api/events.mux` 且完全不需要 cookie；而当初报 401 的那台 host 又确实要求认证。
+猜是猜不准的，这一版改成实测。
+
+### 新增
+
+- **`src/harness/wire.ts` —— 协议协商。** 每次连接时客户端自动探测：端点风格
+  （`session/list` 还是 `session.list`）、`/api/*` 是否需要 cookie、事件套接字路径，
+  以及 `session/list` 实际接受的形参名。结果缓存为 `WireProfile`，客户端里所有
+  端点字符串都改由它生成。
+- **`npm run protocol-probe`** —— 直接问真实 `dsh web` 提供了什么：端点风格、
+  事件套接字，以及 29 个候选方法中哪些存在。今后任何线缆疑问都以它为准。
+- `httpStatus()` 与 `httpRequest({ timeoutMs })` —— 只读响应头的探测，带超时上限，
+  避免事件流把探测挂住。
+
+### 变更
+
+- `rpc()` 不再无条件要求 cookie：只有协商结果表明 host 需要认证时才要求，
+  免认证的 host 不会再被推进"粘贴 token"流程。
+- `404` 报错改为提示已协商出的线缆风格，不再写死某个上游版本号。
+- `session/list` 的 args 来自协商结果，不再写死 `_request`。
+- `protocol-test` 断言数从 50 增至 **64**，新增点分风格 host、免认证 host、
+  需 cookie host、以及端口不通四种场景。
+
+### 修复
+
+- 移除客户端里最后一批硬编码的 `0.1.6-alpha` 假设。
+
 ## [0.0.4] — 2026-09-18
 
 版本定位：**DeepSeek Harness 0.1.6-alpha 线缆协议迁移。**

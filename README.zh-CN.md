@@ -170,9 +170,17 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 一个独立的 Node 脚本用真实客户端代码驱动一个**假**的 0.1.6 harness —— 不需要 `dsh web`：
 
 ```bash
-npm run protocol-test    # 50 项断言：认证、cookie 派生、remote.mux、
-                         # 端点命名、{args} payload、审批瀑布、
-                         # assistant 流、已删除端点的 404 处理
+npm run protocol-test    # 64 项断言：线缆协商（点分/斜杠、cookie 门禁、
+                         # 事件套接字）、认证、cookie 派生、{args} payload、
+                         # 审批瀑布、assistant 流、已移除端点的 404 处理
+```
+
+想让**真实**的 `dsh web` 自己报出它提供了什么（端点风格、事件套接字，以及
+29 个候选方法里哪些存在）：
+
+```bash
+npm run protocol-probe            # 默认 127.0.0.1:3080
+npm run protocol-probe 127.0.0.1 3080
 ```
 
 要对**真实** `dsh web` 做闭环验证，用集成测试（需先启动 `dsh web`）：
@@ -189,15 +197,19 @@ npm run build        # esbuild → dist/extension.js
 npm run watch        # 变更时自动重建
 npm run typecheck
 npm run package      # → harness-connector-deepseek-0.0.4.vsix
-npm run protocol-test      # 针对假 0.1.6 harness 的 50 项协议断言
+npm run protocol-test      # 针对假 harness 的 64 项协议断言
+npm run protocol-probe     # 报告真实 dsh web 暴露了什么
 ```
 
 在 VS Code 中按 `F5` 启动带有该扩展的扩展开发宿主。
 
 ## 已验证版本
 
-- DeepSeek Harness host `v0.1.6-alpha`，默认 `dsh web` 端口 `3080`。旧版 host（≤ 0.0.x）已不再支持 —— 0.1.6 的线缆协议是一次破坏性变更。
-- 线缆契约：`/api/remote.mux` 逻辑流多路复用器 + 浏览器会话 cookie 认证。上游在 0.1.6 移除了 `packages/host/apiproxy`，旧的 `host.describe` / `events.mux` 契约已不存在。
+- 默认 `dsh web` 端口 `3080`，且 host 必须位于回环地址。
+- **线缆是协商出来的，不是猜出来的。** 端点风格（`session/list` 还是 `session.list`）、
+  是否需要 cookie、事件套接字是 `/api/remote.mux` 还是 `/api/events.mux`——都在连接时
+  自动探测，同一个构建因此能跨 host 版本工作。跑 `npm run protocol-probe` 可以看到
+  你的 host 到底提供了什么。
 
 ## 限制
 

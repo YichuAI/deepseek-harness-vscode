@@ -5,6 +5,43 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.5] — 2026-09-19
+
+Tagline: **the wire is negotiated, not assumed.**
+
+v0.0.4 hardcoded a single wire shape (slash endpoints, `/api/remote.mux`,
+cookie auth). None of the artifacts on the machine agreed with it: the installed
+runtime (`0.1.0-rc.6`) serves `/api/session.list` over `/api/events.mux` with no
+cookie at all, while the host that produced the original 401 clearly *is*
+cookie-gated. Guessing lost; this release measures instead.
+
+### Added
+
+- **`src/harness/wire.ts` — protocol negotiation.** On every connect the client
+  discovers: endpoint style (`session/list` vs `session.list`), whether `/api/*`
+  is cookie-gated, the event-socket path, and the declared-parameter spelling
+  `session/list` actually accepts. The result is cached in a `WireProfile` and
+  every endpoint string in the client now goes through it.
+- **`npm run protocol-probe`** — asks a live `dsh web` what it serves: endpoint
+  style, event socket, and which of 29 candidate methods exist. This is now the
+  authoritative way to settle any wire question.
+- `httpStatus()` and `httpRequest({ timeoutMs })` — header-only probing with a
+  bounded wait, so an event stream cannot hold a probe open.
+
+### Changed
+
+- `rpc()` no longer demands a cookie unless the negotiated profile says the host
+  is cookie-gated, so unauthenticated hosts no longer fall into the paste flow.
+- A `404` now names the negotiated wire style instead of a hardcoded upstream
+  version.
+- `session/list` args come from negotiation rather than the `_request` literal.
+- `protocol-test` grew from 50 to **64 assertions**, including a dot-style host,
+  an unauthenticated host, a cookie-gated host, and a dead port.
+
+### Fixed
+
+- Removed the last hardcoded `0.1.6-alpha` assumptions from the client.
+
 ## [0.0.4] — 2026-09-18
 
 Tagline: **DeepSeek Harness 0.1.6-alpha wire-protocol migration.**

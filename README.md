@@ -196,9 +196,18 @@ A standalone Node script drives the real client code against a **fake** 0.1.6
 harness — no `dsh web` needed:
 
 ```bash
-npm run protocol-test    # 50 assertions: auth, cookie derivation, remote.mux,
-                         # endpoint naming, {args} payloads, approval waterfall,
-                         # assistant stream, deleted-endpoint 404 handling
+npm run protocol-test    # 64 assertions: wire negotiation (dot/slash, cookie
+                         # gating, event socket), auth, cookie derivation,
+                         # {args} payloads, approval waterfall, assistant
+                         # stream, removed-endpoint 404 handling
+```
+
+To ask your **real** `dsh web` what it actually serves (endpoint style, event
+socket, and which of 29 candidate methods exist):
+
+```bash
+npm run protocol-probe            # defaults to 127.0.0.1:3080
+npm run protocol-probe 127.0.0.1 3080
 ```
 
 For a closed loop against your **real** `dsh web`, use the integration test
@@ -216,18 +225,20 @@ npm run build        # esbuild → dist/extension.js
 npm run watch        # rebuild on change
 npm run typecheck
 npm run package      # → harness-connector-deepseek-0.0.4.vsix
-npm run protocol-test      # 39 protocol assertions against a fake 0.1.6 harness
+npm run protocol-test      # 64 protocol assertions against a fake harness
+npm run protocol-probe     # report what your real dsh web exposes
 ```
 
 Press `F5` in VS Code to launch an Extension Development Host with the extension loaded.
 
 ## Verified against
 
-- DeepSeek Harness host `v0.1.6-alpha`, default `dsh web` port `3080`. Older hosts
-  (≤ 0.0.x) are no longer supported — the 0.1.6 wire protocol is a breaking change.
-- Wire contract: `/api/remote.mux` logical-stream multiplexer + browser-session
-  cookie auth. `packages/host/apiproxy` was removed upstream in 0.1.6, so the
-  old `host.describe` / `events.mux` contract no longer exists.
+- Default `dsh web` port `3080`; the host must be on loopback.
+- **The wire is negotiated, not assumed.** Endpoint style (`session/list` vs
+  `session.list`), cookie gating, and the event socket (`/api/remote.mux` vs
+  `/api/events.mux`) are all discovered at connect time, so one build works
+  across host releases. Run `npm run protocol-probe` to see what your host
+  actually serves.
 
 ## Limitations
 

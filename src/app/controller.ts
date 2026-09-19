@@ -619,12 +619,15 @@ export class AppController {
   async renameActive(): Promise<void> {
     const sid = this.activeSessionId
     if (sid === undefined) return
-    const current = this.control.snapshot().goal === undefined ? undefined : undefined
-    void current
+    // Pre-fill with the title the host is currently projecting, so the box
+    // starts as "edit this" rather than "retype from scratch".
+    const currentTitle = this.sessions.find(s => s.sessionId === sid)
+      ?.projections?.values.title ?? undefined
     const next = await this.d.vscodeAPI.window.showInputBox({
       title: 'DeepSeek Harness: Rename session',
       prompt: 'A renamed session is pinned — the host stops regenerating its title.',
       placeHolder: 'Session title',
+      value: currentTitle,
       ignoreFocusOut: true,
     })
     if (next === undefined || next.trim() === '') return

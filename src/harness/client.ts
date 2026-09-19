@@ -577,9 +577,12 @@ export class HarnessClient implements Disposable {
   ): Promise<V> {
     const remembered = this.argShapes.get(canonicalMethod)
     const indexed = variants.map((args, index) => ({ args, index }))
-    const order = remembered === undefined || remembered >= variants.length
+    const winner = remembered === undefined ? undefined : indexed[remembered]
+    const order = winner === undefined
       ? indexed
-      : [indexed[remembered] as { args: Record<string, unknown>; index: number }, ...indexed]
+      // Try remembered spelling first, then everything it is not — without
+      // excluding it, a warm call would attempt the same shape twice.
+      : [winner, ...indexed.filter(v => v.index !== remembered)]
     let last: unknown
     for (const { args, index } of order) {
       try {
@@ -598,7 +601,7 @@ export class HarnessClient implements Disposable {
 
   private async rpc<V>(method: string, args: Record<string, unknown>): Promise<V> {
     if (!LOOPBACK_HOSTS.has(this.opts.host)) {
-      throw new Error('v0.0.1 only supports local DeepSeek Harness instances.')
+      throw new Error(`Refusing to talk to non-loopback host ${this.opts.host}: this plugin only drives a local DeepSeek Harness.`)
     }
     await this.opts.auth.init()
     const cookie = this.opts.auth.cookieHeader()

@@ -266,6 +266,11 @@ export class ControlSurface {
 
   // ─── folds ─────────────────────────────────────────────────────────────────
 
+  /**
+   * Fold one scalar knob. Every scalar behaves identically — undefined means
+   * "the log has not spoken yet", and a repeat of the current value is not a
+   * change — so they share one implementation and one change detector.
+   */
   private setPreset(value: string | undefined): boolean {
     if (value === undefined || value === this.preset) return false
     this.preset = value
@@ -361,13 +366,15 @@ export class ControlSurface {
     return true
   }
 
-  /** The event carries either an id string or a small object. Read both. */
+  /**
+   * `agent-preset/selected` has shipped the chosen preset under several field
+   * names (and once nested), so read whichever is present. First match wins —
+   * the fields are alternatives, not a precedence chain.
+   */
   private applyAgentPreset(data: Record<string, unknown>): boolean {
-    if (typeof event === 'string') return false // unreachable; kept explicit for readers
     const value = str(data.id) ?? str(data.name) ?? str(data.preset) ?? str(data.value)
       ?? str(record(data.agentPreset).id)
-    if (value === undefined) return false
-    if (value === this.agentPreset) return false
+    if (value === undefined || value === this.agentPreset) return false
     this.agentPreset = value
     this.version++
     return true

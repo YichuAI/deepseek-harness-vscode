@@ -105,34 +105,6 @@ serves its write path (see *Control surface* below).
 Run `npm run protocol-probe` against a live `dsh web` to print what that host
 actually serves.
 
-## Control surface (`src/conversation/control.ts`)
-
-The harness ships its knobs as durable session events, every one of them a
-**whole value**: the latest occurrence wins, and replay must reconstruct state
-from the log alone with no catch-up channel. That makes `ControlSurface` a pure
-fold — apply every event in order and you have the truth, whether it came from
-`session/page` history or a live `session/follow` frame.
-
-| Event | Payload | What the panel shows |
-| --- | --- | --- |
-| `plan/mode` | `{ active }` | plan-mode toggle |
-| `permission/preset` | `{ preset }` | preset picker selection |
-| `sandbox/mode` | `{ mode }` | confinement badge |
-| `approval/policy` | `{ policy }` | approval badge |
-| `todo/write` | `{ todos }` | checklist (replaces the list wholesale) |
-| `goal/change` | `{ operation, goal \| cleared }` | objective + phase + rounds |
-| `subagent/start` / `end` / `descriptor` | scoped identity | running children |
-| `compaction/start` / `end` / `summary` | provenance + summary | compaction state |
-| `request/header` | `{ header: { config } }` | effective provider / model / effort |
-
-Write paths are split by what upstream actually exposes: plan mode, permission
-presets and compaction go through the **command registry** (`session/command`
-with `/plan`, `/permission <name>`, `/compact`), while fork / rename /
-archive / model selection have dedicated endpoints. Every write first checks the
-negotiated capability (`requireControl`) and otherwise throws
-`HarnessUnsupportedError`, whose message names the missing endpoint — the UI then
-shows fewer controls rather than dead ones.
-
 ### Auth: browser session cookie
 
 ```
@@ -177,10 +149,12 @@ Business errors are `200` + `{ ok: false, error: { code, message, details } }`;
 HTTP status expresses only the carrier (`401` unauthenticated / `404` no such
 endpoint / `415` not JSON).
 
-### Event channel — `WS /api/remote.mux`
+### Event channel — `WS /api/remote.mux` *(negotiated)*
 
-The upgrade also requires the cookie; on `401` the server writes a plain HTTP
-response and never sends `101`.
+`remote.mux` is what recent builds serve; older ones served `events.mux`. The
+path actually used comes from `WireProfile.muxPath`, never from a literal here.
+On a cookie-gated host the upgrade requires the cookie too; on `401` the server
+writes a plain HTTP response and never sends `101`.
 
 ```jsonc
 // client → host
@@ -230,11 +204,50 @@ only ever connect to loopback, so the first half passes naturally.
 
 ## Method allowlist
 
-The client only calls: `session/list`, `session/create`, `session/prompt`,
-`session/cancel`, `session/follow`, `session/modelCatalog`, `workspace/create`,
-`workspace/follow`, `$events`, `$events/result`. It never calls `settings/*`,
-`credentials/*`, `commands/*`, `terminal/*`, `directoryPicker/*`, or any other
-approval/permission mutation.
+Transport and messaging — always called:
+
+`session/list`, `session/create`, `session/prompt`, `session/cancel`,
+`session/follow`, `session/modelCatalog`, `workspace/create`,
+`workspace/follow`, `$events`, `$events/result`.
+
+Control surface — called only when capability probing confirmed the host serves
+them (see {@link probeCapabilities} in `harness/wire.ts`), and therefore safe to
+leave enabled against an older host:
+
+`session/command`, `session/fork`, `session/rename`, `session/selectModel`,
+`workspace/archiveSession`.
+
+Never called, ever: `settings/*`, `credentials/*`, `commands/*`, `terminal/*`,
+`directoryPicker/*`, or any approval/permission mutation outside the list above.
+
+
+## Control surface (`src/conversation/control.ts`)
+
+The harness ships its knobs as durable session events, every one of them a
+**whole value**: the latest occurrence wins, and replay must reconstruct state
+from the log alone with no catch-up channel. That makes `ControlSurface` a pure
+fold — apply every event in order and you have the truth, whether it came from
+`session/page` history or a live `session/follow` frame.
+
+| Event | Payload | What the panel shows |
+| --- | --- | --- |
+| `plan/mode` | `{ active }` | plan-mode toggle |
+| `permission/preset` | `{ preset }` | preset picker selection |
+| `sandbox/mode` | `{ mode }` | confinement badge |
+| `approval/policy` | `{ policy }` | approval badge |
+| `todo/write` | `{ todos }` | checklist (replaces the list wholesale) |
+| `goal/change` | `{ operation, goal \| cleared }` | objective + phase + rounds |
+| `subagent/start` / `end` / `descriptor` | scoped identity | running children |
+| `compaction/start` / `end` / `summary` | provenance + summary | compaction state |
+| `request/header` | `{ header: { config } }` | effective provider / model / effort |
+
+Write paths are split by what upstream actually exposes: plan mode, permission
+presets and compaction go through the **command registry** (`session/command`
+with `/plan`, `/permission <name>`, `/compact`), while fork / rename /
+archive / model selection have dedicated endpoints. Every write first checks the
+negotiated capability (`requireControl`) and otherwise throws
+`HarnessUnsupportedError`, whose message names the missing endpoint — the UI then
+shows fewer controls rather than dead ones.
 
 ## Workspace lifecycle (v0.0.2: lazy create)
 
@@ -313,7 +326,9 @@ media/
 ├── origin.png                # source material (excluded from VSIX)
 └── markdown-it.umd.min.js    # bundled for VSIX (114 KB)
 scripts/
-├── protocol-test.ts          # fake-harness protocol test, 50 assertions (no dsh web)
+├── protocol-test.ts          # fake-harness protocol test, 98 assertions (no dsh web)
+├── protocol-probe.ts         # asks a live `dsh web` what it actually serves
+├── probe-shapes.ts           # scratch probe for `{args}` spellings
 ├── integration-test.ts       # closed-loop test against real dsh
 └── gen-icon.ts               # icon generation from origin.png
 test/fixtures/                # sanitized protocol captures
@@ -321,4 +336,4 @@ test/fixtures/                # sanitized protocol captures
 
 ## KV-cache / stability note
 
-The extension holds no model state of its own across reconnects — every reconnect re-derives from the `session/follow` snapshot (the Harness source of truth; `session.history` was removed in 0.1.6). The only long-lived client state is the `remote.mux` downlink and the in-memory `ConversationModel`, both rebuilt from the snapshot on resume. This keeps the cache trivially consistent: there is one cache (the Harness session log), and VS Code is a view onto it.
+The extension holds no model state of its own across reconnects — every reconnect re-derives from the `session/follow` snapshot, which is the Harness source of truth (`session.history` no longer exists on current builds, and the negotiated profile is what tells us which names apply). The only long-lived client state is the event-socket downlink plus the two in-memory folds, `ConversationModel` and `ControlSurface`, all three rebuilt from the snapshot on resume. This keeps cache consistency trivial: there is one cache (the Harness session log), and VS Code is a view onto it.

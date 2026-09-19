@@ -100,31 +100,6 @@ type ConversationItem =
 
 对真实 `dsh web` 跑 `npm run protocol-probe` 即可打印该 host 实际提供的内容。
 
-## 控制面（`src/conversation/control.ts`）
-
-harness 把各种旋钮以持久会话事件的形式下发，而且都是**全量值**：后写的覆盖先写的，
-重放时必须仅凭日志还原状态，不依赖任何 catch-up 通道。这让 `ControlSurface` 成为一个
-纯折叠——按序 apply 每个事件就是真相，无论它来自 `session/page` 历史还是实时的
-`session/follow` 帧。
-
-| 事件 | 载荷 | 面板展示 |
-| --- | --- | --- |
-| `plan/mode` | `{ active }` | 计划模式开关 |
-| `permission/preset` | `{ preset }` | 预设选择器的当前值 |
-| `sandbox/mode` | `{ mode }` | 沙箱限制徽标 |
-| `approval/policy` | `{ policy }` | 审批策略徽标 |
-| `todo/write` | `{ todos }` | 待办清单（整表替换） |
-| `goal/change` | `{ operation, goal \| cleared }` | 目标 + 阶段 + 轮次 |
-| `subagent/start` / `end` / `descriptor` | 作用域身份 | 运行中的子代理 |
-| `compaction/start` / `end` / `summary` | provenance + 摘要 | 压缩状态 |
-| `request/header` | `{ header: { config } }` | 当前生效的 provider / model / 推理强度 |
-
-写路径按上游实际提供的方式分两类：计划模式、权限预设、压缩走**命令注册表**
-（`session/command` + `/plan`、`/permission <name>`、`/compact`），而 fork / rename /
-archive / 模型选择有各自的专用端点。每次写之前先查协商出的能力表
-（`requireControl`），否则抛 `HarnessUnsupportedError` 并在消息里点名缺哪个端点——
-于是 UI 表现为「少几个控件」，而不是「几个按了没反应的按钮」。
-
 ### 认证：浏览器会话 cookie
 
 ```
@@ -165,9 +140,11 @@ Content-Type: application/json
 业务错误返回 `200` + `{ ok: false, error: { code, message, details } }`；
 HTTP 状态码只表示传输层（`401` 未认证 / `404` 端点不存在 / `415` 非 JSON）。
 
-### 事件通道 — `WS /api/remote.mux`
+### 事件通道 — `WS /api/remote.mux`（*协商得到*）
 
-升级同样要求 cookie；`401` 时服务端直接写 HTTP 响应，不发 `101`。
+`remote.mux` 是较新版本提供的名字，更老的版本提供的是 `events.mux`。实际使用的路径来自
+`WireProfile.muxPath`，此处不写死。在需要 cookie 的 host 上，WebSocket 升级同样要求 cookie；
+`401` 时服务端直接写 HTTP 响应，不发 `101`。
 
 ```jsonc
 // 客户端 → 服务端
@@ -214,12 +191,46 @@ Host 以第一个应答为准，随便回 `next` 反而会抢在 Web UI 之前�
 
 ## 方法白名单
 
-客户端只调用：
+传输与消息——总是会调用：
+
 `session/list`、`session/create`、`session/prompt`、`session/cancel`、
 `session/follow`、`session/modelCatalog`、`workspace/create`、`workspace/follow`、
 `$events`、`$events/result`。
-绝不调用 `settings/*`、`credentials/*`、`commands/*`、`terminal/*`、`directoryPicker/*`
-或任何其他审批/权限变更操作。
+
+控制面——**仅在能力探测确认该 host 提供时**才调用（见 `harness/wire.ts` 的
+`probeCapabilities`），因此面对旧版 host 保持开启也是安全的：
+
+`session/command`、`session/fork`、`session/rename`、`session/selectModel`、
+`workspace/archiveSession`。
+
+绝不调用：`settings/*`、`credentials/*`、`commands/*`、`terminal/*`、`directoryPicker/*`，
+或上表之外的任何审批/权限变更操作。
+
+
+## 控制面（`src/conversation/control.ts`）
+
+harness 把各种旋钮以持久会话事件的形式下发，而且都是**全量值**：后写的覆盖先写的，
+重放时必须仅凭日志还原状态，不依赖任何 catch-up 通道。这让 `ControlSurface` 成为一个
+纯折叠——按序 apply 每个事件就是真相，无论它来自 `session/page` 历史还是实时的
+`session/follow` 帧。
+
+| 事件 | 载荷 | 面板展示 |
+| --- | --- | --- |
+| `plan/mode` | `{ active }` | 计划模式开关 |
+| `permission/preset` | `{ preset }` | 预设选择器的当前值 |
+| `sandbox/mode` | `{ mode }` | 沙箱限制徽标 |
+| `approval/policy` | `{ policy }` | 审批策略徽标 |
+| `todo/write` | `{ todos }` | 待办清单（整表替换） |
+| `goal/change` | `{ operation, goal \| cleared }` | 目标 + 阶段 + 轮次 |
+| `subagent/start` / `end` / `descriptor` | 作用域身份 | 运行中的子代理 |
+| `compaction/start` / `end` / `summary` | provenance + 摘要 | 压缩状态 |
+| `request/header` | `{ header: { config } }` | 当前生效的 provider / model / 推理强度 |
+
+写路径按上游实际提供的方式分两类：计划模式、权限预设、压缩走**命令注册表**
+（`session/command` + `/plan`、`/permission <name>`、`/compact`），而 fork / rename /
+archive / 模型选择有各自的专用端点。每次写之前先查协商出的能力表
+（`requireControl`），否则抛 `HarnessUnsupportedError` 并在消息里点名缺哪个端点——
+于是 UI 表现为「少几个控件」，而不是「几个按了没反应的按钮」。
 
 ## Workspace 生命周期（v0.0.2：惰性创建）
 
@@ -278,14 +289,20 @@ src/
 │   ├── controller.ts         # AppController — 编排
 │   └── state.ts              # UiState 形状 + 映射辅助
 ├── conversation/
-│   ├── model.ts              # ConversationModel 折叠
+│   ├── model.ts              # ConversationModel 折叠（"它说了什么"）
+│   ├── control.ts            # ControlSurface 折叠（"它能做什么 / 在做什么"）
 │   └── types.ts              # ConversationItem 联合类型（5 种）
 ├── workspace/
 │   └── binding.ts            # findHarnessWorkspace / ensureHarnessWorkspace
 ├── harness/
 │   ├── protocol.ts           # 线缆类型（镜像上游）
+│   ├── wire.ts               # 协议协商 + 能力探测
 │   ├── client.ts             # HarnessClient — 唯一网络边界
-│   └── events.ts             # MuxStream (WS) + EventBuffer (30ms)
+│   ├── auth.ts               # 浏览器会话 cookie 生命周期 + 本地自签
+│   ├── local-credentials.ts  # 读取 $DSH_HOME/.credentials.yaml（autoSession）
+│   ├── events.ts             # 逻辑流多路复用 (WS) + EventBuffer (30ms)
+│   ├── http.ts               # 最小 http 客户端（无 fetch 时的回退）
+│   └── ws.ts                 # RFC6455 客户端（无运行时依赖）
 └── view/
     ├── provider.ts           # webview 组合（HTML + CSP + 状态桥接）
     ├── styles.ts             # CSS
@@ -298,7 +315,9 @@ media/
 ├── origin.png                # 源材料（VSIX 排除）
 └── markdown-it.umd.min.js    # VSIX 打包用（114 KB）
 scripts/
-├── protocol-test.ts          # 假 harness 协议测试，50 项断言（无需 dsh web）
+├── protocol-test.ts          # 假 harness 协议测试，98 项断言（无需 dsh web）
+├── protocol-probe.ts         # 向真实 `dsh web` 询问它实际提供什么
+├── probe-shapes.ts           # `{args}` 写法的临时探针
 ├── integration-test.ts       # 针对真实 dsh 的闭环测试
 └── gen-icon.ts               # 从 origin.png 生成图标
 test/fixtures/                # 脱敏协议快照
@@ -306,4 +325,4 @@ test/fixtures/                # 脱敏协议快照
 
 ## KV-cache / 稳定性说明
 
-扩展自身不跨重连持有任何模型状态——每次重连都从 `session/follow` 快照重新派生（Harness 真相源；`session.history` 在 0.1.6 已被移除）。唯一的长期客户端状态是 `remote.mux` 下行链路和内存中的 `ConversationModel`，二者在恢复时都从快照重建。这使得缓存一致性不言自明：只有一个缓存（Harness 会话日志），VS Code 只是它的一个视图。
+扩展自身不跨重连持有任何模型状态——每次重连都从 `session/follow` 快照重新派生，它是 Harness 的真相源（`session.history` 在当前版本已不存在，适用哪些名字由协商出的 profile 决定）。唯一的长期客户端状态是事件套接字下行链路与两个内存折叠 `ConversationModel` 和 `ControlSurface`，三者都在恢复时从快照重建。这使得缓存一致性不言自明：只有一个缓存（Harness 会话日志），VS Code 只是它的一个视图。

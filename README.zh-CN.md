@@ -85,7 +85,10 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
    # → http://127.0.0.1:3080/?token=<43 位 token>
    ```
 
-   Harness ≥ 0.1.6 会打印一个**带一次性 token 的启动 URL**。复制它。
+   较新的 Harness 会打印一个**带一次性 token 的启动 URL**。复制它。
+
+   更老的版本则完全不对 `/api/*` 做鉴权、不需要任何 token —— 插件会自行探测所连的是哪一种，
+   所以如果没有出现启动 URL，这一步可以直接跳过。
 
 2. 从 [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek) 安装，或通过命令行：
 
@@ -101,7 +104,7 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 
 3. **把浏览器会话交给扩展。** 在命令面板执行 **`DeepSeek Harness: Set Session Token from Launch URL`**，粘贴启动 URL（或裸 token）。扩展会用它换取 `dsh-auth-…` cookie，并存入 VS Code 的 secret storage（系统钥匙串，**不会**写入 `settings.json`）。
 
-   Harness ≥ 0.1.6 对所有 `/api/*` 强制校验该 cookie，因此这一步是必需的。跳过的话 Connect 会报"requires a browser session"，而不是一个光秃秃的 `401`。
+   需要 cookie 鉴权的 Harness 会对所有 `/api/*` 强制校验该 cookie，因此这一步是必需的。跳过的话 Connect 会报"requires a browser session"，而不是一个光秃秃的 `401`。
 
 4. 在 VS Code 中打开一个你想绑定到 Harness 工作区的文件夹。
 
@@ -180,7 +183,7 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 
 ## 协议测试
 
-一个独立的 Node 脚本用真实客户端代码驱动一个**假**的 0.1.6 harness —— 不需要 `dsh web`：
+一个独立的 Node 脚本用真实客户端代码驱动一个**假**的 harness（不预设具体版本——插件是协商的，这个假实现也是）—— 不需要 `dsh web`：
 
 ```bash
 npm run protocol-test    # 98 项断言：线缆协商（点分/斜杠、cookie 门禁、

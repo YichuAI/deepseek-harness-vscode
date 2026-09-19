@@ -104,8 +104,8 @@ export type ControlMethod = (typeof CONTROL_METHODS)[number]
  * Business error codes meaning "I do not serve that method".
  *
  * A 404 answers this at the HTTP level; some builds answer 200 with a typed
- * error instead. The codes below are the ones observed upstream (\
- * `not_found`, `unknown_method`, `unimplemented`); the match is deliberately
+ * error instead. The codes below are the ones observed upstream
+ * (`not_found`, `unknown_method`, `unimplemented`); the match is deliberately
  * broad because a false positive only hides a control, while a false negative
  * would render a dead button.
  */

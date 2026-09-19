@@ -234,11 +234,15 @@ export const CLIENT_SCRIPT = /* js */ `
 
   function renderControl(state) {
     const panel = $('control');
+    // No session means no control surface: every value here is per-session, and
+    // a stale panel from the previous session would be actively misleading.
     const live = state.connection === 'connected' && !!state.activeSessionId;
     if (!live) { panel.style.display = 'none'; lastControlSig = ''; return; }
     panel.style.display = '';
     const c = state.control || null;
-    // capabilities change what we can offer, so they belong in the signature.
+    // Rebuild gate. The fold's version covers "the state changed"; capabilities
+    // cover "what we are allowed to offer changed" — which can flip without any
+    // new event, e.g. after reconnecting to a different host build.
     const sig = String(c ? c.version : -1) + '|' + Object.keys(currentCapabilities).join(',');
     if (sig === lastControlSig) return;
     lastControlSig = sig;
@@ -367,6 +371,8 @@ export const CLIENT_SCRIPT = /* js */ `
         () => post({ type: 'controlCompact' }));
       ctlButton(row, 'Archive', { secondary: true, disabled: !supported('workspace/archiveSession') },
         () => post({ type: 'controlArchive' }));
+      // Say which ones are absent rather than silently dimming them: "this host
+      // is older" is actionable, an inexplicably dead button is not.
       const missing = [];
       if (!supported('session/fork')) missing.push('session/fork');
       if (!supported('session/rename')) missing.push('session/rename');

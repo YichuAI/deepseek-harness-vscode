@@ -1,7 +1,11 @@
 # 发布流程
 
 本文档描述如何裁剪并发布 **DeepSeek Harness Connector for VS Code** 的一个版本。
-v0.0.3 以 GitHub Release + VSIX 资产 + Marketplace 上传的形式发布；Marketplace 发布是可选的，见末尾说明。
+v0.0.6 以 GitHub Release + VSIX 资产的形式发布；Marketplace 发布是可选的，见第 5 节。
+
+仓库地址 `git@github.com:YichuAI/deepseek-harness-vscode.git`。此处 HTTPS 推送会失败
+（没有凭据助手），因此 remote 走 SSH，并用 repo-local 的 `core.sshCommand` 指向一个
+纯 ASCII 的密钥路径——详见文末"附录 — 本机 SSH 配置"。
 
 ---
 
@@ -33,15 +37,20 @@ npm run typecheck          # → tsc --noEmit, 退出码 0
 npm run build              # → dist/extension.js
 
 # 1.3 协议测试（假 harness——不需要 dsh web）
-npm run protocol-test      # → 全部 50 项断言 ✓
+npm run protocol-test      # → 全部 98 项断言 ✓
 
-# 1.4 集成测试（会写入会话——需要 dsh web 运行）
+# 1.4 协议探测（可选但推荐——需要 dsh web 运行）
+#     打印该 host 的端点风格、是否 cookie 门禁、事件套接字，以及它实际提供哪些
+#     控制面方法。凡是升级过 host 版本，就该跑一次：它是 UI 能提供什么的最终依据。
+npm run protocol-probe     # 接受 [host] [port] 参数，默认 127.0.0.1:3080
+
+# 1.5 集成测试（会写入会话——需要 dsh web 运行）
 #     先在另一个终端启动 dsh web：
 #       cd ../deepseek-harness && npm run dsh -- web
 #     然后复制它打印的启动 URL
 DSH_LAUNCH_URL='http://127.0.0.1:3080/?token=<token>' npm run integration-test
 
-# 1.5 打包 VSIX
+# 1.6 打包 VSIX
 npm run package            # → harness-connector-deepseek-<版本>.vsix
 ```
 
@@ -49,7 +58,11 @@ npm run package            # → harness-connector-deepseek-<版本>.vsix
 
 - [ ] `package.json` 的 `version` 与目标标签一致。
 - [ ] `CHANGELOG.md` 有对应版本的条目（`## [<版本>] — <日期>`）。
-- [ ] `README.md` "已验证版本"部分仍指向正确的 Harness 版本。
+- [ ] 文档**保持双语**：对 `README.md` / `CHANGELOG.md` / `ARCHITECTURE.md` /
+      `RELEASE.md` 的每一处修改，都已镜像到对应的 `*.zh-CN.md`。这是长期约定，
+      不是每次发版再临时判断的事。
+- [ ] `CHANGELOG.md` 与 `ARCHITECTURE.md` 里的断言数与 `npm run protocol-test`
+      的**当前**输出一致（它已历经 50 → 64 → 98；此处数字过期是最常见的文档漂移）。
 - [ ] `LICENSE` 存在（MIT）。
 - [ ] `test/fixtures/` 中无秘钥/API 密钥/真实提示内容
       （固件必须使用 `<redacted:...>` 占位符）。
@@ -121,11 +134,37 @@ git tag v<版本>
 git push origin main --tags
 
 # 4.3 创建 GitHub Release 并附加 VSIX
+#     方式 A —— gh CLI（并非每台机器都装了）：
 gh release create v<版本> \
   harness-connector-deepseek-<版本>.vsix \
   --title "v<版本>" \
   --notes-file CHANGELOG.md \
   --verify-tag
+
+#     方式 B —— 用一个 scope 为 `repo`（公开仓库为 `public_repo`）的 classic PAT
+#     打 REST API。token 走环境变量传入，绝不要作为命令行参数（会泄进 shell
+#     历史和 `ps` 输出）。Release 建好后就把 token 吊销。
+GITHUB_TOKEN=ghp_… python - <<'PY'
+import os, json, urllib.request
+tok = os.environ["GITHUB_TOKEN"]
+repo = "YichuAI/deepseek-harness-vscode"
+def api(method, path, body=None, ctype="application/json"):
+    req = urllib.request.Request(f"https://api.github.com{path}", method=method)
+    req.add_header("Authorization", f"Bearer {tok}")
+    req.add_header("Accept", "application/vnd.github+json")
+    data = None
+    if body is not None:
+        data = body if isinstance(body, bytes) else json.dumps(body).encode()
+        req.add_header("Content-Type", ctype)
+    with urllib.request.urlopen(req, data) as r:
+        return json.loads(r.read() or b"{}")
+rel = api("POST", f"/repos/{repo}/releases",
+          {"tag_name": "<版本>", "name": "v<版本>", "body": open("notes.md").read()})
+with open("harness-connector-deepseek-<版本>.vsix", "rb") as f:
+    api("POST", f"https://uploads.github.com/repos/{repo}/releases/{rel['id']}"
+                "/assets?name=harness-connector-deepseek.vsix",
+        f.read(), "application/octet-stream")
+PY
 ```
 
 Release 说明应为 `CHANGELOG.md` 中对应的 `## [<版本>]` 章节。**仅**附加 `.vsix` 作为二进制资产。
@@ -146,6 +185,15 @@ npx vsce publish --no-dependencies          # → 上线 Marketplace
 
 # 或发布预发布版本
 npx vsce publish --no-dependencies --pre-release
+```
+
+在 Windows 上**不要**直接调用 `node_modules/.bin/vsce`——那是个 bash 脚本，用 node 跑会崩。
+改为调用 JS 入口：
+
+```bash
+node ./node_modules/@vscode/vsce/vsce package --no-dependencies \
+     --out dist/harness-connector-deepseek.vsix
+node ./node_modules/@vscode/vsce/vsce publish --no-dependencies
 ```
 
 如果你更愿意手动发布到 Marketplace，用户仍可直接从 GitHub Release 的 VSIX 安装：
@@ -184,5 +232,22 @@ gh release edit v<版本> --draft
 
 ## 附录 — 版本策略
 
-- `0.0.x`——v0.0.x 线是"最小闭环"线。v0.0.3 引入了 Diff 审查、审批工作流和文件内容内联。
-- `0.1.0` 及以后——见 `README.md` 的路线图（内联补全、VS Code 文件系统提供器、终端集成、LSP/ACP 集成）。
+- `0.0.x`——协议仍在变动，因此功能以补丁形式发布；线缆在连接时协商，所以一个补丁可以
+  放宽调用范围而不会弄坏旧 host（每个控件都由能力探测门控）。
+- 涉及能力的改动应先对真实 host 跑 `npm run protocol-probe` 而不是对着上游源码推理：
+  磁盘上的源码快照已多次与实际运行的版本不一致。
+
+## 附录 — 本机 SSH 配置
+
+Windows 用户名含非 ASCII 字符，而 `ssh` 会通过账户数据库按本地代码页解析 `HOME`，
+于是去一个乱码路径下找密钥并静默失败（`Could not create directory '/c/Users/<乱码>'`）。
+绕开办法：把密钥放在纯 ASCII 路径上，并让 git 显式指向它。
+
+```bash
+mkdir -p /c/ssh
+cp ~/.ssh/id_ed25519 /c/ssh/          # 密钥正常生成后再迁移
+git config core.sshCommand \
+  "ssh -i /c/ssh/id_ed25519 -o UserKnownHostsFile=/c/ssh/known_hosts -o StrictHostKeyChecking=accept-new"
+git remote set-url origin git@github.com:YichuAI/deepseek-harness-vscode.git
+git push origin main --tags
+```

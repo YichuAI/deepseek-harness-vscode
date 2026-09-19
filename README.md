@@ -85,7 +85,11 @@ For your safety, the following remain out of scope:
    # → http://127.0.0.1:3080/?token=<43-char token>
    ```
 
-   Harness ≥ 0.1.6 prints a **launch URL with a one-shot token**. Copy it.
+   Recent Harness builds print a **launch URL with a one-shot token**. Copy it.
+
+   Older builds serve `/api/*` unauthenticated and need no token at all — the
+   plugin detects which it is talking to, so if no launch URL appears you can
+   simply ignore this step.
 
 2. Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek) or via command line:
 
@@ -119,9 +123,9 @@ For your safety, the following remain out of scope:
 
 ### How the session is obtained
 
-Harness ≥ 0.1.6 rejects every `/api/*` call without a browser-session cookie, and
-the sanctioned way to get one is exchanging the per-process launch token. Nothing
-writes that token to disk, so officially you must paste it.
+Cookie-gated Harness builds reject every `/api/*` call without a browser-session
+cookie, and the sanctioned way to get one is exchanging the per-process launch
+token. Nothing writes that token to disk, so officially you must paste it.
 
 But the cookie carries no trace of the token: it is an HMAC over
 `{version, authority, issuedAt, expiresAt}` keyed by a secret persisted in
@@ -207,8 +211,9 @@ No credentials, API keys, or real prompt content are stored — only the JSON sh
 
 ## Protocol test
 
-A standalone Node script drives the real client code against a **fake** 0.1.6
-harness — no `dsh web` needed:
+A standalone Node script drives the real client code against a **fake** harness
+(no particular version — the plugin negotiates, and so does the fake) — so no
+`dsh web` is needed:
 
 ```bash
 npm run protocol-test    # 98 assertions: wire negotiation (dot/slash, cookie

@@ -8,8 +8,8 @@
 #   PAT        必填。repo 作用域的 GitHub Personal Access Token。
 #   owner      默认 YichuAI
 #   repo       默认 deepseek-harness-vscode
-#   tag        默认 v0.0.6（须已存在于远端）
-#   vsix-path  默认 dist/harness-connector-deepseek.vsix
+#   tag        默认 v0.0.7（须已存在于远端）
+#   vsix-path  默认 harness-connector-deepseek-0.0.7.vsix（仓库根目录，*.vsix 被 gitignore）
 #
 # 说明:
 #   - Release 正文从 CHANGELOG.md 的对应 `## [x.y.z]` 段落自动截取。
@@ -22,8 +22,8 @@ cd "$(dirname "$0")/.."   # 切到仓库根目录
 PAT="${1:-}"
 OWNER="${2:-YichuAI}"
 REPO="${3:-deepseek-harness-vscode}"
-TAG="${4:-v0.0.6}"
-VSIX="${5:-dist/harness-connector-deepseek.vsix}"
+TAG="${4:-v0.0.7}"
+VSIX="${5:-harness-connector-deepseek-0.0.7.vsix}"
 
 if [ -z "$PAT" ]; then
   echo "用法: ./scripts/release.sh <PAT> [owner] [repo] [tag] [vsix-path]" >&2

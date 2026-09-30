@@ -224,7 +224,7 @@ npm run protocol-probe     # 报告真实 dsh web 暴露了什么
 
 - 默认 `dsh web` 端口 `3080`，且 host 必须位于回环地址。
 - **线缆是协商出来的，不是猜出来的。** 端点风格（`session/list` 还是 `session.list`）、
-  是否需要 cookie、事件套接字是 `/api/remote.mux` 还是 `/api/events.mux`——都在连接时
+  是否需要 cookie、事件套接字在 rc.6 上是 `/api/events.mux`、旧版上是 `/api/remote.mux`——都在连接时
   自动探测，同一个构建因此能跨 host 版本工作。跑 `npm run protocol-probe` 可以看到
   你的 host 到底提供了什么。
 

@@ -62,8 +62,8 @@ const CONVERTIBLE_NAMESPACES = new Set([
   'session', 'workspace', 'host', 'agentPreset', 'goal', 'llm', 'subagent', 'skill', 'settings', 'credentials',
 ])
 
-/** Endpoint candidates for the event socket, most-recent first. */
-const MUX_PATH_CANDIDATES = ['/api/remote.mux', '/api/events.mux'] as const
+/** Endpoint candidates for the event socket, rc.6 first (downlink-only). */
+const MUX_PATH_CANDIDATES = ['/api/events.mux', '/api/remote.mux'] as const
 
 /**
  * Declared-parameter spellings `session/list` has shipped with. `_request` is
@@ -129,6 +129,17 @@ export function isShapeRejection(code: string): boolean {
   return !isMissingMethodError(code) && SHAPE_REJECTION_CODE.test(code)
 }
 
+/**
+ * Business error codes meaning "you need a browser-session cookie". Some builds
+ * answer an unauthenticated probe with a 200 envelope carrying one of these
+ * rather than a bare 401, so capability probing must recognise it too — otherwise
+ * the host would be wrongly classified as unauthenticated (`auth: 'none'`).
+ */
+const AUTH_ERROR_CODE = /unauthor|forbidden|denied|token|session|expired|secret|not[_-]?authenticat|invalid[_-]?credential/i
+export function isAuthError(code: string): boolean {
+  return AUTH_ERROR_CODE.test(code)
+}
+
 /** `/api/<ns><sep><method>` for one style. */
 export function apiPath(style: EndpointStyle, ns: string, method: string): string {
   return `/api/${wireEndpoint(style, `${ns}/${method}`)}`
@@ -182,7 +193,7 @@ async function postRpc(
 ): Promise<ProbeOutcome | undefined> {
   const cookie = opts.cookie()
   const rpcId = randomUUID()
-  const body = JSON.stringify({ type: 'client-request', rpcId, method, payload: { args } })
+  const body = JSON.stringify({ type: 'client-request', rpcId, method, payload: args })
   try {
     const res = await httpRequest({
       host: opts.host,
@@ -223,8 +234,20 @@ export async function negotiateWire(opts: NegotiateOptions): Promise<Negotiation
       if (outcome.status === 404) break
       if (outcome.status !== 200) continue
       if (!isServerResponse(outcome.body, extractRpcId(outcome.body))) continue
+      // A 200 envelope with `result.ok === false` is NOT a confirmed endpoint: it
+      // may be an auth rejection (the same host that answers 401 elsewhere) or a
+      // parameter error. Treating it as success would mislabel this host as
+      // unauthenticated and skip the cookie flow. An auth-class error means
+      // "needs a cookie"; anything else means "keep probing this style".
+      if (!isOk(outcome.body)) {
+        const parsed = parseOutcome(outcome.body)
+        if (parsed !== undefined && !parsed.ok && parsed.code !== undefined && isAuthError(parsed.code)) {
+          sawUnauthorized = true
+        }
+        continue
+      }
       opts.log(`wire: endpoint style "${style}" confirmed via ${endpoint}`)
-      const listArgs = isOk(outcome.body) ? args : {}
+      const listArgs = args
       const profile: WireProfile = {
         endpointStyle: style,
         auth: 'none',

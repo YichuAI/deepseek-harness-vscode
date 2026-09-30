@@ -1,26 +1,30 @@
 /**
  * Wire protocol types — a faithful, dependency-free mirror of the DeepSeek
- * Harness Remote (Typert Gateway) contract as shipped in 0.1.6-alpha.
+ * Harness Remote contract as implemented by the installed `dsh web` runtime
+ * (observed against the bundled `@deepseek-ai/dsh-client-connection` 0.1.0-rc.6).
  *
  * This file is the single source of truth for everything that crosses the
- * network. Authoritative upstream paths (all under `deepseek-harness/`):
+ * network. Authoritative shapes (read from the installed runtime, not guessed):
  *
- *   packages/client/connection/src/rpc-host.ts        envelope + `/api/<ns>/<method>`
- *   packages/client/connection/src/browser-auth.ts    cookie authentication
- *   packages/api/gateway/src/index.ts                 endpoint resolution, `{args}`
- *   packages/api/gateway/src/stream-protocol.ts       `/api/remote.mux` frames
- *   packages/api/session-controller/src/types.ts      session/page, session/follow
- *   packages/api/workspace-controller/src/types.ts    workspace/follow
- *   packages/api/remotes/src/remote-events.ts         forwarded Host events
+ *   packages/client/connection/src/client.js        envelope + `/api/<method>`
+ *   packages/client/connection/src/client.js        `api.events.mux`  (downlink)
+ *   packages/client/connection/src/client.js        `api.events.host` (downlink)
+ *   packages/client/connection/src/client.js        `muxFrameSchema` / `hostFrameSchema`
  *
- * Two shape rules changed in that release and both are load-bearing:
+ * Three shape rules are load-bearing and were wrong in earlier plugin versions:
  *
- *   1. Endpoints are `namespace/method` (`session/list`), not `a.b`
- *      (`session.list`). `HostConnectionService` splits the path after `/api/`
- *      on `/`, and `claimsEndpoint()` asserts exactly two segments.
- *   2. Request payloads are `{ args: { <wireName>: value, … } }` — exactly one
- *      key, a plain object, whose fields are the *declared parameter names* of
- *      the Remote method. `signal` is transport cancellation, never a field.
+ *   1. Endpoints are `namespace/method` rendered dot-style on the wire:
+ *      `POST /api/session.list` (never `session/list`). The Host splits the
+ *      path after `/api/` and the gateway resolves `namespace` + `method`.
+ *   2. Request payloads are the *args object directly* — NOT wrapped in
+ *      `{ args: … }`. `callUnary(method, payload)` posts
+ *      `{ type:'client-request', rpcId, method, payload }` where `payload` is
+ *      the declared-parameter object (e.g. `{ request: { sessionId } }`).
+ *   3. The event socket is a **downlink-only WebSocket**. The browser opens
+ *      `ws://host:port/api/events.mux` (or `/api/events.host`) and the Host
+ *      pushes `server-request` envelopes; each frame is `envelope.payload`.
+ *      There is NO `ready` frame and the client never sends anything on it —
+ *      connection-open IS the ready signal.
  *
  * The harness protocol is merge-extensible: unknown event/frame types MUST be
  * ignored by callers, so every union here is treated as open.
@@ -49,12 +53,19 @@ export interface ServerResponse<V = unknown> {
   result: { ok: true; value: V } | { ok: false; error: RpcError }
 }
 
-/** Server-initiated message — frames on the mux WebSocket, or any push. */
+/** Server-initiated message — delivered on the downlink event WebSockets. */
 export interface ServerRequest<P = unknown> {
   type: 'server-request'
   rpcId: RpcId
   method: string
   payload: P
+}
+
+/** Client answer to a ServerRequest (used by `POST /api/respond`). */
+export interface ClientResponse<V = unknown> {
+  type: 'client-response'
+  rpcId: RpcId
+  result: V
 }
 
 export interface RpcError {
@@ -63,110 +74,85 @@ export interface RpcError {
   details: unknown
 }
 
-/**
- * The named-argument payload every Remote RPC expects. `args` must be a plain
- * object holding the method's declared parameter names — no more, no fewer.
- */
-export interface RemoteArgs {
-  args: Record<string, unknown>
-}
-
 // ─── harness identity ────────────────────────────────────────────────────────
 /**
- * What the plugin knows about the host it is talking to. `host.describe` was
- * removed in 0.1.6-alpha; identity now comes from the `$events` ready frame
- * (`home`) plus `session/modelCatalog` (`provider`/`model`).
+ * What the plugin knows about the host. rc.6 serves `host.describe` (called once
+ * at connect) which returns version/cwd/provider/model. The event stream has no
+ * `ready` frame — connection-open is the ready signal.
  */
 export interface HarnessInfo {
   /** Host account home, used only to abbreviate displayed paths. */
   home: string
-  /** Opaque id of this client event generation. */
+  /** Opaque id of this client event generation (from `host.describe`, if any). */
   clientId?: string
   version?: string
   provider?: string
   model?: string
 }
 
-// ─── remote.mux  (packages/api/gateway/src/stream-protocol.ts) ───────────────
-/** Exact WebSocket route carrying every Remote stream. */
-export const REMOTE_STREAM_MUX_PATH = '/api/remote.mux'
-/** Gateway-internal logical stream carrying forwarded Cordis events. */
-export const REMOTE_EVENT_STREAM_ENDPOINT = '$events'
-/** Gateway-internal unary endpoint accepting one Remote Event outcome. */
-export const REMOTE_EVENT_RESULT_ENDPOINT = '$events/result'
+// ─── event socket routes (from the runtime's `api-path.js`) ───────────────────
+/** Browser mux-frame WebSocket pathname (downlink-only). */
+export const EVENTS_MUX_PATH = '/api/events.mux'
+/** Browser host-frame WebSocket pathname (downlink-only). */
+export const EVENTS_HOST_PATH = '/api/events.host'
 
-/** Browser → Host logical-stream request. */
-export type RemoteStreamClientMessage =
-  | { type: 'open'; streamId: string; endpoint: string; payload: RemoteArgs }
-  | { type: 'cancel'; streamId: string }
+// ─── mux frames (the runtime's `muxFrameSchema`) ─────────────────────────────
+/**
+ * One frame on `/api/events.mux`. Each is the `payload` of a `server-request`
+ * envelope pushed by the Host. `sessionId` scopes the per-session frames; the
+ * conversation model and control surface consume these directly.
+ */
+export type MuxFrame =
+  | { type: 'session/event'; sessionId: SessionId; event: SessionEvent; view?: ToolEventView }
+  | { type: 'session/subscribed'; sessionId: SessionId; lastSeq: number }
+  | { type: 'approval/requested'; sessionId: SessionId; approvalId: string; toolName: string; callId?: string; reason?: string }
+  | { type: 'approval/resolved'; sessionId: SessionId; approvalId: string; outcome: 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable' }
+  | { type: 'question/requested'; sessionId: SessionId; questions: unknown[] }
+  | { type: 'question/resolved'; sessionId: SessionId; questionRpcId: RpcId; outcome: 'answered' | 'cancelled' }
+  | { type: 'session/queue'; sessionId: SessionId; items: unknown[] }
+  | { type: 'session/jobs'; sessionId: SessionId; jobs: unknown[] }
+  | { type: 'session/projection'; sessionId: SessionId; key: string; value: unknown; seq: number }
+  | { type: 'stream/error'; error: RpcError }
+  | { type: string; [k: string]: unknown }
 
-/** Carrier-safe failure delivered by the Host. */
-export interface RemoteStreamFailure {
-  code: string
-  message: string
-  details: object
-}
+// ─── host frames (the runtime's `hostFrameSchema`) ───────────────────────────
+/** One frame on `/api/events.host` — host-wide, not session-scoped. */
+export type HostFrame =
+  | { type: 'host/session-added'; sessionId: SessionId; blank: boolean; parentSessionId?: SessionId; origin?: 'subagent'; cwd?: string; agentPreset?: string }
+  | { type: 'host/session-removed'; sessionId: SessionId }
+  | { type: 'host/session-status'; sessionId: SessionId; running: boolean }
+  | { type: 'host/agent-error'; sessionId: SessionId; message: string }
+  | { type: 'host/workspace-changed'; workspace: WorkspaceView }
+  | { type: 'host/workspace-removed'; workspaceId: WorkspaceId }
+  | { type: 'host/workspace-order-changed'; workspaceIds: WorkspaceId[] }
+  | { type: 'host/archived-sessions-changed'; archivedSessionIds: SessionId[] }
+  | { type: 'host/remote-event'; event: string; args: unknown[] }
+  | { type: 'stream/error'; error: RpcError }
+  | { type: string; [k: string]: unknown }
 
-/** Host → browser logical-stream frame. */
-export type RemoteStreamServerMessage =
-  | { type: 'item'; streamId: string; value?: unknown }
-  | { type: 'error'; streamId: string; error: RemoteStreamFailure }
-  | { type: 'end'; streamId: string }
-
-// ─── forwarded Remote events ─────────────────────────────────────────────────
-/** Opening item that binds later HTTP results to this event generation. */
-export interface RemoteEventReadyFrame {
-  type: 'ready'
-  clientId: string
-  host: { home: string }
-}
-
-/** One Host notification. */
-export interface RemoteEventEmitFrame {
-  type: 'emit'
-  event: string
-  args: readonly unknown[]
-}
-
-/** One pending agent-scoped waterfall awaiting a Client answer. */
-export interface RemoteEventInvocationFrame {
-  type: 'waterfall'
-  event: string
-  eventId: string
-  agentId: string
-  request: Record<string, unknown>
-}
-
-/** Cancellation of a pending waterfall previously delivered under the same id. */
-export interface RemoteEventCancellationFrame {
-  type: 'cancel'
-  eventId: string
-}
-
-export type RemoteEventDownlinkFrame =
-  | RemoteEventReadyFrame
-  | RemoteEventEmitFrame
-  | RemoteEventInvocationFrame
-  | RemoteEventCancellationFrame
-
-/** Client answer to one scoped Remote Event delivery (POST `$events/result`). */
-export interface RemoteEventResult {
-  clientId: string
-  eventId: string
-  outcome:
-    | { kind: 'next' }
-    | { kind: 'result'; value?: unknown }
-    | { kind: 'rejected'; error: { name: string; message: string; code?: string; details?: unknown } }
-}
-
-/** Event names this deployment forwards (`packages/api/remotes/src/remote-events.ts`). */
-export const APPROVAL_REQUEST_EVENT = 'approval/request'
-export const USER_QUESTIONS_REQUEST_EVENT = 'user-questions/request'
-
-/** Host-side outcome of one approval waterfall. */
+// ─── approvals ───────────────────────────────────────────────────────────────
+/** Host-side outcome of one approval waterfall (mirrors the runtime union). */
 export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
 
-// ─── session domain (packages/api/session-controller/src/types.ts) ───────────
+/** Body POSTed to `/api/respond` to settle an approval (a `client-response`). */
+export interface ApprovalRespondRequest {
+  sessionId: SessionId
+  approvalId: string
+  outcome: 'allowed-once' | 'rejected'
+}
+
+// ─── host.describe ──────────────────────────────────────────────────────────
+/** Response of `host.describe` (called once at connect). */
+export interface HostDescribeValue {
+  version: string
+  cwd: string
+  provider?: string
+  model?: string
+  reasoningEffort?: string
+  [k: string]: unknown
+}
+
+// ─── session domain ──────────────────────────────────────────────────────────
 /** Durable identity selecting an ordinary Session or one direct subagent child. */
 export type SessionAddress =
   | { kind: 'session'; sessionId: SessionId }
@@ -218,119 +204,46 @@ export interface SessionCreateValue {
   agentPreset?: string
 }
 
-export interface SessionCancelRequest {
-  sessionId: SessionId
-}
-
-export interface SessionCancelValue {
-  accepted: true
-}
-
 export interface SessionRenameRequest {
   sessionId: SessionId
   title: string
 }
 
-/** One message-aligned backwards-history request. */
-export interface SessionPageRequest {
-  address: SessionAddress
-  /** Inclusive log cut. `-1` yields an empty page, so a real cursor is required. */
-  throughSeq: number
+export interface SessionRenameValue {
+  title: string
+  seq: number
+}
+
+export interface SessionForkRequest {
+  sessionId: SessionId
+  atSeq?: number
+  increaseTitle?: boolean
+}
+
+export interface SessionForkValue {
+  sessionId: SessionId
+}
+
+export interface SessionHistoryRequest {
+  sessionId: SessionId
   beforeSeq?: number
   maxMessages?: number
 }
 
-/** One live event request for a durable Session address. */
-export interface SessionFollowRequest {
-  address: SessionAddress
-  maxMessages?: number
-  /** Include process-local assistant presentation frames (needed for streaming). */
-  assistantStream?: true
-}
-
-/** Current logical Session metadata carried on the browser wire. */
-export interface SessionWireHeader {
-  version: number
-  id: SessionId
-  createdAt: number
-  cwd?: string
-  parentSession?: SessionId
-  isSeeded: boolean
-  origin?: 'subagent'
-  delegationDepth?: number
-  agentPreset?: string
-}
-
-/** One history page record: a durable event, optionally with a tool presentation view. */
-export interface SessionEventEntry {
-  type: 'event'
+/** One session.history item: the session event plus its optional host-computed tool view. */
+export interface SessionHistoryEntry {
   event: SessionEvent
   view?: ToolEventView
 }
 
-export interface SessionPage {
-  records: readonly SessionEventEntry[]
+/** `session.history` response value (unary RPC in rc.6). */
+export interface SessionHistoryValue {
+  events: SessionHistoryEntry[]
   hasMore: boolean
+  projections?: { asOfSeq: number; values: Record<string, unknown> }
 }
 
-/** One active assistant attempt in a reconnect opening snapshot. */
-export interface SessionAssistantStreamAttempt {
-  attemptId: string
-  startedAfterSeq: number
-  turn: number
-  step: number
-  nextIndex: number
-  stream: readonly unknown[]
-}
-
-export interface SessionAssistantStreamBaseline {
-  revision: number
-  activeAttempt?: SessionAssistantStreamAttempt
-}
-
-/** Browser wire form of one process-local assistant frame. */
-export type SessionAssistantStreamFrame =
-  | {
-    type: 'start'
-    attemptId: string
-    revision: number
-    startedAfterSeq: number
-    turn: number
-    step: number
-  }
-  | {
-    type: 'chunk'
-    attemptId: string
-    revision: number
-    index: number
-    time: number
-    chunk: StreamChunk
-  }
-  | {
-    type: 'end'
-    attemptId: string
-    revision: number
-    index: number
-    outcome:
-      | { kind: 'committed'; eventType: string; seq: number }
-      | { kind: 'abandoned' }
-  }
-
-/** Complete opening window followed by ordered durable events and assistant frames. */
-export type SessionFollowFrame =
-  | {
-    type: 'snapshot'
-    header: SessionWireHeader
-    cursor: number
-    records: readonly SessionEventEntry[]
-    hasMore: boolean
-    projections?: { asOfSeq: number; values: Record<string, unknown> }
-    assistantStream?: SessionAssistantStreamBaseline
-  }
-  | SessionEventEntry
-  | { type: 'assistant-stream'; frame: SessionAssistantStreamFrame }
-
-/** Model selection resolved by the Host for unconfigured sessions. */
+/** Model selection resolved by the Host for an unconfigured session. */
 export interface ModelCatalog {
   default: { provider: string; model: string; reasoningEffort?: string }
   routableProviders: readonly string[]
@@ -338,7 +251,15 @@ export interface ModelCatalog {
   failures: readonly { id: string; name: string; message: string }[]
 }
 
-// ─── workspace domain (packages/api/workspace-controller/src/types.ts) ───────
+/** `session.models` response value (current selection + catalog). */
+export interface SessionModelsValue {
+  current: { provider: string; model: string; reasoningEffort?: string }
+  routable: boolean
+  groups: ModelCatalog['groups']
+  failures: ModelCatalog['failures']
+}
+
+// ─── workspace domain ────────────────────────────────────────────────────────
 export interface WorkspaceView {
   workspaceId: WorkspaceId
   /** Canonical directory path (host-side realpath canon). */
@@ -349,24 +270,18 @@ export interface WorkspaceView {
   updatedAt: string
 }
 
-/** Complete reconnect baseline for Workspace browser state. */
-export interface WorkspaceBaseline {
+export interface WorkspaceListValue {
   items: readonly WorkspaceView[]
   archivedSessionIds: readonly SessionId[]
 }
 
-/** One ordered Workspace change after a generation's baseline. */
-export type WorkspaceFollowIncrement =
-  | { type: 'upsert'; workspace: WorkspaceView }
-  | { type: 'remove'; workspaceId: WorkspaceId }
-  | { type: 'order'; workspaceIds: readonly WorkspaceId[] }
-  | { type: 'archived'; archivedSessionIds: readonly SessionId[] }
+/** `workspace.create` response value (rc.6: `{ workspace, created }`). */
+export interface WorkspaceCreateValue {
+  workspace: WorkspaceView
+  created: boolean
+}
 
-export type WorkspaceFollowFrame =
-  | { type: 'baseline'; value: WorkspaceBaseline }
-  | WorkspaceFollowIncrement
-
-// ─── prompt content (packages/api/session-controller/src/types.ts) ───────────
+// ─── prompt content ──────────────────────────────────────────────────────────
 /** One content part of a prompt. The plugin only sends text. */
 export type PromptContentPart =
   | { type: 'text'; text: string }
@@ -407,13 +322,10 @@ export interface ActiveFileContext {
 }
 
 /**
- * Structured editor context attached to a prompt.
- *
- * NOTE: 0.1.6-alpha dropped the old `payload.context` escape hatch — the prompt
- * request is `{requestId, sessionId, mode, content, clientTimeZone}` only. The
- * plugin therefore renders this context into the prompt text itself (see
- * `AppController.sendPrompt`), which keeps the KV cache deterministic because
- * the block is a stable prefix.
+ * Structured editor context attached to a prompt. The prompt request is
+ * `{requestId, sessionId, mode, content, clientTimeZone}` only; the plugin
+ * renders this context into the prompt text itself (see `AppController.sendPrompt`),
+ * which keeps the KV cache deterministic because the block is a stable prefix.
  */
 export interface PromptContext {
   files?: FileReference[]
@@ -503,22 +415,6 @@ export interface AssistantChunkData {
   step: number
   chunk: StreamChunk
 }
-
-// ─── Legacy-shaped frames the UI layers consume ──────────────────────────────
-/**
- * The conversation model and approval store were written against the pre-0.1.6
- * `events.mux` frame union. `HarnessClient` synthesizes these shapes from
- * `session/follow` items and forwarded Remote events, so no UI code has to
- * learn the new transport. Unknown frame types are still ignored.
- */
-export type MuxFrame =
-  | { type: 'session/event'; sessionId: SessionId; event: SessionEvent; view?: ToolEventView }
-  | { type: 'session/subscribed'; sessionId: SessionId; lastSeq: number }
-  | { type: 'session/projection'; sessionId: SessionId; key: string; value: unknown; seq: number }
-  | { type: 'approval/requested'; sessionId: SessionId; approvalId: string; toolName: string; callId?: CallId; reason?: string }
-  | { type: 'approval/resolved'; sessionId: SessionId; approvalId: string; outcome: string }
-  | { type: 'stream/error'; error: RpcError }
-  | { type: string; [k: string]: unknown }
 
 // ─── narrowing guards (the only runtime code in this file) ───────────────────
 export function isSessionEventFrame(f: MuxFrame): f is { type: 'session/event'; sessionId: SessionId; event: SessionEvent; view?: ToolEventView } {

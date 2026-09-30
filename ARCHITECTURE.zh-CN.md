@@ -22,7 +22,7 @@
 │ view/toolPresentation.ts  — 工具名 → 人类可读标题               │
 ├──────────────────────────────────────────────────────────────────┤
 │ harness/client.ts         — HarnessClient: 唯一的网络边界        │
-│ harness/events.ts         — RemoteStreamMux + EventBuffer (30ms) │
+│ harness/events.ts         — DownlinkSocket（events.mux WS）+ EventBuffer（30ms） │
 │ harness/ws.ts             — 最小 RFC6455 客户端（可带 Cookie）   │
 │ harness/auth.ts           — 浏览器会话 cookie（token 换 cookie） │
 │ harness/http.ts           — node:http 封装（可控 Cookie/Set-Cookie）│
@@ -30,7 +30,7 @@
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-- `harness/protocol.ts` **只有类型**——零运行时、零依赖。它镜像 DSH 0.1.6-alpha 的 Remote（Typert Gateway）契约：`packages/client/connection/src/rpc-host.ts`、`packages/api/gateway/src/stream-protocol.ts`、`packages/api/session-controller/src/types.ts`、`packages/api/workspace-controller/src/types.ts`、`packages/api/remotes/src/remote-events.ts`。
+- `harness/protocol.ts` **只有类型**——零运行时、零依赖。它镜像 DSH **`0.1.0-rc.6`** 的 Remote 契约（即已安装的 `@deepseek-ai/dsh-client-connection` 运行时）：`packages/client/connection/src/client.js`（信封 + `/api/<method>`）、`api-path.js`（`/api/events.mux`）以及 `muxFrameSchema` / `hostFrameSchema`。
 - `harness/client.ts` 是**唯一**允许发起 HTTP 或打开 socket 的模块。其上层所有代码都通过 `HarnessClient` 访问网络。
 - `harness/ws.ts` 自己实现握手与帧编解码，**不用**平台 `WebSocket`：浏览器形状的 WebSocket API 无法设置任意请求头，而 mux 升级现在必须带 `Cookie`。
 - `harness/auth.ts` 是唯一的凭据来源。它读取 `dsh web` 启动 URL 里的进程 token，用 `GET /?token=…` 换回 `Set-Cookie`，并把 cookie 存进 VS Code SecretStorage（`context.secrets`），不写进 settings.json。
@@ -64,7 +64,7 @@ type ConversationItem =
 | --- | --- |
 | `user/message` | → `user` 或 `system` 项（`source.kind !== 'user'` 时为 system）；乐观回声已对账 |
 | `assistant/chunk`（`text-delta` / `reasoning-delta`） | 累积到尾部的流式 `assistant` 项 |
-| `assistant/stream`（帧，非持久事件） | 同上，但走 `applyStreamChunk()`（见下） |
+| （无独立的 `assistant/stream` 帧） | rc.6 的流式增量即 `session/event`（`event.type==='assistant/chunk'`），走普通 `applyEvent` 折叠 |
 | `assistant/message` | 定稿 `assistant` 项（权威——替换流式文本） |
 | `tool/call` | → 创建 `ToolItem`（state: `running`） |
 | `tool/result` | → **更新**已有 `ToolItem`（按 `callId`，state: `completed`/`error`） |
@@ -74,10 +74,9 @@ type ConversationItem =
 
 重放是幂等的（`seq` 守卫），所以断线重连 → 重新获取历史是安全的。
 
-> **0.1.6 起流式增量不再进持久日志。** 助手增量改由进程内的 assistant stream 下发，
-> 它们没有真实 `seq`，因此**绕过** `applyEvent` 的单调 seq 守卫，走
-> `ConversationModel.applyStreamChunk(turn, step, chunk)`。若硬塞进 `applyEvent`，
-> 合成的 `seq` 会互相压制，只剩第一个 delta 生效。
+> **助手流式增量就是普通的持久 `session/event` 帧。** 在 rc.6 中流式文本以
+> `session/event` 且 `event.type === 'assistant/chunk'` 的形式下发，携带真实 `seq`，
+> 因此走 `applyEvent` 的普通折叠——没有独立的 `assistant/stream` 帧，也不存在合成 seq 绕过。
 
 ## 线缆契约（连接时协商；由 `scripts/protocol-test.ts` 验证）
 
@@ -117,85 +116,72 @@ GET /?token=<token>            → 303 See Other + Set-Cookie
   由 `deepseekHarness.autoSession`（默认 `true`）控制；关闭后回退到 URL 粘贴流程。
 - 实现见 `harness/auth.ts`；cookie 存在 `context.secrets`，不进 settings.json。
 
-### 一元 RPC — `POST /api/<namespace>/<method>`
+### 一元 RPC — `POST /api/<namespace>.<method>`
 
 ```jsonc
 // 请求头
-Cookie: dsh-auth-…=v1.…
+Cookie: dsh-auth-…=v1.…          // 仅 cookie 受限的 host 需要；rc.6 的 /api/* 不鉴权
 Content-Type: application/json
-// 请求体：payload 必须恰好只有一个 args 字段，且是纯对象
-{ "type": "client-request", "rpcId": "<uuid>", "method": "session/prompt",
-  "payload": { "args": { "request": { "requestId": "…", "sessionId": "…", "mode": "queue",
-                                     "content": [{ "type": "text", "text": "…" }] } } } }
+// 请求体：payload 就是参数对象本身——绝不包在 {args}/{request} 里
+{ "type": "client-request", "rpcId": "<uuid>", "method": "session.prompt",
+  "payload": { "sessionId": "…", "mode": "queue",
+               "content": [{ "type": "text", "text": "…" }] } }
 // 响应体
 { "type": "server-response", "rpcId": "<相同>", "result": { "ok": true, "value": { … } } }
 ```
 
-**`args` 的字段名就是上游方法声明的形参名**，多一个少一个都会被
-`assertExactArguments` 拒绝（`gateway/arguments-invalid`）。两个易错点：
-
-- `session/list` 的形参**字面就叫 `_request`**，所以是 `{ "_request": {} }`。
-- 返回 `AbortSignal` 的取消位是**传输层参数**（形参名必须是 `signal`），**不是** JSON 字段。
+端点在 rc.6 上是 **点分** `namespace.method`（`POST /api/session.prompt`）；`harness/wire.ts`
+协商 slash 与 dot 两种风格，所有调用都经 `HarnessClient.ep()` 渲染，没有任何模块写端点字面量。
+`payload` 就是声明的参数对象本身——这正是已安装运行时的 `callUnary(method, payload)`。
+唯一遗留的坑：`session/list` 的参数名在历史上出现过三种写法（`_request`、`request`、无），
+`negotiateWire` 会逐个尝试并缓存 host 接受的那种。
 
 业务错误返回 `200` + `{ ok: false, error: { code, message, details } }`；
 HTTP 状态码只表示传输层（`401` 未认证 / `404` 端点不存在 / `415` 非 JSON）。
 
-### 事件通道 — `WS /api/remote.mux`（*协商得到*）
+### 事件通道 — `WS /api/events.mux`（*下行单向，路径协商得到*）
 
-`remote.mux` 是较新版本提供的名字，更老的版本提供的是 `events.mux`。实际使用的路径来自
-`WireProfile.muxPath`，此处不写死。在需要 cookie 的 host 上，WebSocket 升级同样要求 cookie；
-`401` 时服务端直接写 HTTP 响应，不发 `101`。
+rc.6 只暴露**一条下行单向**的 WebSocket。浏览器打开 `ws://<host>:<port>/api/events.mux`
+（实际路径来自 `WireProfile.muxPath`，不写死）；Host 推送 `server-request` 信封，
+**每帧即 `envelope.payload`**。这里**没有 `ready` 帧**，客户端也从不向该套接字发送任何东西——
+连接成功（open）即就绪信号，`HarnessClient.awaitMuxOpen()` 在首次 `open` 状态即 resolve。
 
 ```jsonc
-// 客户端 → 服务端
-{ "type": "open", "streamId": "s1", "endpoint": "session/follow", "payload": { "args": { … } } }
-{ "type": "cancel", "streamId": "s1" }
-// 服务端 → 客户端
-{ "type": "item",  "streamId": "s1", "value": { … } }
-{ "type": "end",   "streamId": "s1" }
-{ "type": "error", "streamId": "s1", "error": { "code": "…", "message": "…", "details": {} } }
+// 服务端 → 客户端，每帧一个（包在 server-request 信封内）
+{ "type": "server-request",
+  "payload": { "type": "session/event", "sessionId": "…",
+    "event": { "type": "assistant/chunk", "seq": 1, "time": 2,
+               "data": { "chunk": { "type": "text-delta", "index": 0, "text": "po" } } } } }
 ```
 
-本插件用两条逻辑流：
+助手流式增量**以 `session/event` 帧且 `event.type === 'assistant/chunk'` 的形式到达**——
+没有独立的 `assistant/stream` 帧，因此 `conversation/model.ts` 已有的 `assistant/chunk` 折叠
+无需改动即可处理流式。持久历史**不**在此通道下发：`getHistory()` 改为调用一元 RPC
+`session.history`（`{ sessionId, maxMessages? }`）。
 
-| endpoint | args | 用途 |
-| --- | --- | --- |
-| `$events` | `{}` | 转发的主机事件（含审批瀑布）；首个 item 是 `ready`，带 `clientId` 与 `host.home` |
-| `session/follow` | `{ request: { address: { kind:'session', sessionId }, maxMessages, assistantStream: true } }` | 会话日志快照 + 后续持久事件 + 助手流帧 |
-| `workspace/follow` | `{}` | 首个 item 是 `baseline`，替代已删除的 `workspace/list` |
+**审批应答**：`POST /api/respond`，带 `client-response` 信封：
 
-`session/follow` 的 item 形态：`{ type:'snapshot', header, cursor, records, hasMore, projections }`、
-`{ type:'event', event: SessionEvent }`、`{ type:'assistant-stream', frame }`。
+```jsonc
+{ "type": "client-response", "rpcId": "<uuid>",
+  "result": { "sessionId": "…", "approvalId": "…", "outcome": "allowed-once" | "rejected" } }
+```
 
-### 客户端如何把新传输翻译回旧帧
-
-`HarnessClient` 把新传输**翻译成 UI 层已经在读的旧帧形状**，因此 `conversation/model.ts`
-与 `approval/store.ts` 无需改动：
-
-| 新传输 | 交给 UI 的帧 |
-| --- | --- |
-| `session/follow` snapshot 的 records | `{ type:'session/event', sessionId, event }`（重放幂等） |
-| `session/follow` 的 `event` item | 同上 |
-| `assistant-stream` 的 `chunk` | `{ type:'assistant/stream', turn, step, chunk }` |
-| `$events` 的 `waterfall`（`approval/request`） | `{ type:'approval/requested', sessionId: agentId, approvalId: eventId, toolName, callId, reason }` |
-
-**审批应答**：`POST /api/$events/result`，`args` 为
-`{ clientId, eventId, outcome: { kind:'result', value: 'allowed-once' | 'rejected' } }`。
-`agentId` 就是 SessionId（上游 `agent.id`），所以能直接做会话过滤。
+`approval/requested` 帧携带 `sessionId` + `approvalId`；`respondApproval()` 据此查帧
+（它已在 mux 上被观察到）并 POST 这一对。上游 `agentId` 就是 SessionId，所以能做会话级过滤。
 
 `user-questions/request` 也是瀑布，但侧边栏渲染不了问答表单，因此**故意不答**——
 Host 以第一个应答为准，随便回 `next` 反而会抢在 Web UI 之前把事情结掉。
 
 **信任围栏**（上游 `api-request-trust.ts` / `browser-auth.ts`）：`Host` 必须是回环地址或
-在 `--trusted-host` 中，且必须通过 cookie 校验。我们只连回环，因此天然通过前者。
+在 `--trusted-host` 中，且（在 cookie 受限的 host 上）必须通过 cookie 校验。我们只连回环，
+因此天然通过前者。
 
 ## 方法白名单
 
 传输与消息——总是会调用：
 
 `session/list`、`session/create`、`session/prompt`、`session/cancel`、
-`session/follow`、`session/modelCatalog`、`workspace/create`、`workspace/follow`、
-`$events`、`$events/result`。
+`session/history`、`host/describe`、`workspace/list`、`workspace/create`。
 
 控制面——**仅在能力探测确认该 host 提供时**才调用（见 `harness/wire.ts` 的
 `probeCapabilities`），因此面对旧版 host 保持开启也是安全的：
@@ -211,8 +197,7 @@ Host 以第一个应答为准，随便回 `next` 反而会抢在 Web UI 之前�
 
 harness 把各种旋钮以持久会话事件的形式下发，而且都是**全量值**：后写的覆盖先写的，
 重放时必须仅凭日志还原状态，不依赖任何 catch-up 通道。这让 `ControlSurface` 成为一个
-纯折叠——按序 apply 每个事件就是真相，无论它来自 `session/page` 历史还是实时的
-`session/follow` 帧。
+纯折叠——按序 apply 每个事件就是真相，无论它来自 `session.history` 还是实时的 events.mux 帧。
 
 | 事件 | 载荷 | 面板展示 |
 | --- | --- | --- |
@@ -325,4 +310,4 @@ test/fixtures/                # 脱敏协议快照
 
 ## KV-cache / 稳定性说明
 
-扩展自身不跨重连持有任何模型状态——每次重连都从 `session/follow` 快照重新派生，它是 Harness 的真相源（`session.history` 在当前版本已不存在，适用哪些名字由协商出的 profile 决定）。唯一的长期客户端状态是事件套接字下行链路与两个内存折叠 `ConversationModel` 和 `ControlSurface`，三者都在恢复时从快照重建。这使得缓存一致性不言自明：只有一个缓存（Harness 会话日志），VS Code 只是它的一个视图。
+扩展自身不跨重连持有任何模型状态——每次重连都从 `session.history`（一元 RPC，返回 `{ events, hasMore }` 形式的会话日志）重新派生，它就是 Harness 的真相源；协商出的 `WireProfile` 决定适用哪些端点名与参数写法。唯一的长期客户端状态是事件套接字下行链路与两个内存折叠 `ConversationModel` 和 `ControlSurface`，二者都在恢复时从 `session.history` 重建。这使得缓存一致性不言自明：只有一个缓存（Harness 会话日志），VS Code 只是它的一个视图。

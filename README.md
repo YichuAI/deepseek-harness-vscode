@@ -256,10 +256,10 @@ Press `F5` in VS Code to launch an Extension Development Host with the extension
 
 - Default `dsh web` port `3080`; the host must be on loopback.
 - **The wire is negotiated, not assumed.** Endpoint style (`session/list` vs
-  `session.list`), cookie gating, and the event socket (`/api/remote.mux` vs
-  `/api/events.mux`) are all discovered at connect time, so one build works
-  across host releases. Run `npm run protocol-probe` to see what your host
-  actually serves.
+  `session.list`), cookie gating, and the event socket (`/api/events.mux` on rc.6,
+  `/api/remote.mux` on older hosts) are all discovered at connect time, so one
+  build works across host releases. Run `npm run protocol-probe` to see what your
+  host actually serves.
 
 ## Limitations
 

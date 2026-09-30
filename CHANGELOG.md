@@ -5,6 +5,39 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.7] — 2026-09-30
+
+Tagline: **握手成功——连上真实的 `dsh web`（rc.6）。**
+
+插件此前按一个并不存在的线缆契约（`0.1.6-alpha`）实现，而本机真正安装的运行时是
+`0.1.0-rc.6`，两者并不兼容：rc.6 没有 `ready` 帧、没有 `$events` 逻辑流 mux、没有
+`session/follow` 流、也没有 `$events/result` RPC。于是 v0.0.6 在 **Windows 和 Ubuntu**
+上都卡在死等一个永远不会到达的 `ready` 帧（10 秒超时）。本版本用真实的 rc.6 传输模型
+替换掉那套虚构模型。
+
+### Fixed
+
+- **握手不再超时。** 事件套接字改为下行单向 WebSocket（`ws://…/api/events.mux`）；连接打开即就绪信号，
+  因此 `connect()` 在套接字一打开就继续，而不再死等某个帧。
+- **正确的 RPC 信封。** 一元调用发送 `POST /api/<ns>.<method>`，`payload` 就是参数对象本身
+  （`callUnary` 的契约）——绝不再包一层 `{args}` / `{request}`。整套 `RemoteStreamMux` /
+  `session/follow` / `$events/result` 机制已删除。
+- **历史改回一元 RPC。** `getHistory()` 调用 `session.history`（`{ sessionId, maxMessages? }`）
+  并折叠返回的事件；已删除的 `session/follow` 快照路径被移除。
+- **审批改走 `POST /api/respond`。** `approval/requested` 帧携带 `sessionId` + `approvalId`；
+  `respondApproval()` 用这对信息 POST 一个 `client-response` 信封。
+- **恢复 `host.describe`。** 该端点在 rc.6 中存在，连接时调用一次以获知 host 身份
+  （version/cwd/provider/model）。
+
+### Changed
+
+- **`harness/client.ts` 按 rc.6 契约重写**；`events.ts` / `protocol.ts` / `wire.ts` 修正为真实的帧形状
+  （`server-request` 信封、`session/event` 以 `assistant/chunk` 承载流式）。UI 层
+  （`controller` / `view` / `control`）未改动——它们消费的本来就是正确的 `MuxFrame` 联合类型。
+- **回归门已更新。** `scripts/protocol-test.ts` 现在用真实的 rc.6 假 harness 驱动真实传输
+  （86 项断言：协商、mux 下行、host.describe、session.history、/api/respond、控制面，以及对受限
+  host 跑 autoSession cookie 机制）。
+
 ## [0.0.6] — 2026-09-19
 
 Tagline: **the control surface — the knobs the harness has always shipped.**

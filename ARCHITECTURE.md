@@ -22,7 +22,7 @@ One page. Three stable boundaries: **wiring** (`extension.ts`), **orchestration*
 │ view/toolPresentation.ts  — tool name → human title             │
 ├──────────────────────────────────────────────────────────────────┤
 │ harness/client.ts         — HarnessClient: the ONLY network edge │
-│ harness/events.ts         — RemoteStreamMux + EventBuffer (30ms) │
+│ harness/events.ts         — DownlinkSocket (events.mux WS) + EventBuffer (30ms) │
 │ harness/ws.ts             — minimal RFC6455 client (Cookie-capable)│
 │ harness/auth.ts           — browser session cookie (token → cookie)│
 │ harness/http.ts           — node:http wrapper (exact Cookie/Set-Cookie)│
@@ -30,7 +30,7 @@ One page. Three stable boundaries: **wiring** (`extension.ts`), **orchestration*
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-- `harness/protocol.ts` is **types only** — zero runtime, zero dependencies. It mirrors the DSH 0.1.6-alpha Remote (Typert Gateway) contract: `packages/client/connection/src/rpc-host.ts`, `packages/api/gateway/src/stream-protocol.ts`, `packages/api/session-controller/src/types.ts`, `packages/api/workspace-controller/src/types.ts`, `packages/api/remotes/src/remote-events.ts`.
+- `harness/protocol.ts` is **types only** — zero runtime, zero dependencies. It mirrors the DSH **`0.1.0-rc.6`** Remote contract as implemented by the installed `@deepseek-ai/dsh-client-connection` runtime: `packages/client/connection/src/client.js` (envelope + `/api/<method>`), `api-path.js` (`/api/events.mux`) and `muxFrameSchema` / `hostFrameSchema`.
 - `harness/client.ts` is the **single** module allowed to make HTTP requests or open sockets. Everything above it goes through `HarnessClient`.
 - `harness/ws.ts` implements the handshake and frame codec itself rather than using the platform `WebSocket`: a browser-shaped WebSocket cannot set arbitrary request headers, and the mux upgrade now requires a `Cookie`.
 - `harness/auth.ts` is the only credential source. It takes the process token out of the `dsh web` launch URL, exchanges it via `GET /?token=…` for a `Set-Cookie`, and keeps the cookie in VS Code SecretStorage (`context.secrets`) — never in settings.json.
@@ -73,12 +73,10 @@ Key changes:
 
 Replays are idempotent (`seq`-guarded), so reconnect → refetch history is safe.
 
-> **Assistant deltas left the durable log in 0.1.6.** They now arrive on the
-> process-local assistant stream and carry no real `seq`, so they **bypass** the
-> monotonic-seq guard in `applyEvent` and go through
-> `ConversationModel.applyStreamChunk(turn, step, chunk)`. Folding them into
-> `applyEvent` with synthetic seqs makes each delta suppress the previous one,
-> leaving only the first visible.
+> **Assistant deltas are ordinary durable `session/event` frames.** In rc.6 the
+> streaming text arrives as `session/event` whose `event.type === 'assistant/chunk'`,
+> carrying a real `seq`, so it flows through the normal `applyEvent` fold — there is
+> no separate `assistant/stream` frame and no synthetic-seq bypass.
 
 ## Wire contract (negotiated at connect; validated by `scripts/protocol-test.ts`)
 
@@ -122,81 +120,76 @@ every later request:          Cookie: dsh-auth-<b64url(sha256("<host>:<port>"))>
   and self-signing would bypass the gate rather than satisfy it.
 - See `harness/auth.ts`; the cookie lives in `context.secrets`, not settings.json.
 
-### Unary RPC — `POST /api/<namespace>/<method>`
+### Unary RPC — `POST /api/<namespace>.<method>`
 
 ```jsonc
 // headers
-Cookie: dsh-auth-…=v1.…
+Cookie: dsh-auth-…=v1.…          // only on cookie-gated hosts; rc.6 serves /api/* unauthenticated
 Content-Type: application/json
-// body: payload must be exactly one `args` field, holding a plain object
-{ "type": "client-request", "rpcId": "<uuid>", "method": "session/prompt",
-  "payload": { "args": { "request": { "requestId": "…", "sessionId": "…", "mode": "queue",
-                                     "content": [{ "type": "text", "text": "…" }] } } } }
+// body: `payload` is the args object DIRECTLY — never wrapped in {args}/{request}
+{ "type": "client-request", "rpcId": "<uuid>", "method": "session.prompt",
+  "payload": { "sessionId": "…", "mode": "queue",
+               "content": [{ "type": "text", "text": "…" }] } }
 // response
 { "type": "server-response", "rpcId": "<same>", "result": { "ok": true, "value": { … } } }
 ```
 
-**`args` field names are the declared parameter names upstream**, and one extra or
-missing field is rejected by `assertExactArguments` (`gateway/arguments-invalid`).
-Two traps:
-
-- `session/list`'s parameter is literally named `_request`, so the payload is
-  `{ "_request": {} }`.
-- A cancellation `AbortSignal` is a **transport** parameter (its name must be
-  exactly `signal`) and is **not** a JSON field.
+The endpoint is `namespace.method` **dot-style** on rc.6 (`POST /api/session.prompt`);
+`harness/wire.ts` negotiates slash vs dot and renders every call through
+`HarnessClient.ep()`, so no module writes an endpoint literal. `payload` is the
+declared-parameter object *directly* — this is exactly `callUnary(method, payload)`
+from the installed runtime. One trap remains: `session/list` has shipped with three
+declared-parameter spellings (`_request`, `request`, none), so `negotiateWire`
+tries each and caches the one the host accepts.
 
 Business errors are `200` + `{ ok: false, error: { code, message, details } }`;
 HTTP status expresses only the carrier (`401` unauthenticated / `404` no such
 endpoint / `415` not JSON).
 
-### Event channel — `WS /api/remote.mux` *(negotiated)*
+### Event channel — `WS /api/events.mux` *(downlink-only, negotiated path)*
 
-`remote.mux` is what recent builds serve; older ones served `events.mux`. The
-path actually used comes from `WireProfile.muxPath`, never from a literal here.
-On a cookie-gated host the upgrade requires the cookie too; on `401` the server
-writes a plain HTTP response and never sends `101`.
+rc.6 exposes a single **downlink-only** WebSocket. The browser opens
+`ws://<host>:<port>/api/events.mux` (the path comes from `WireProfile.muxPath`,
+never a literal); the Host pushes `server-request` envelopes and **each frame is
+`envelope.payload`**. There is **no `ready` frame** and the client never sends
+anything on this socket — connection-open *is* the ready signal, and
+`HarnessClient.awaitMuxOpen()` resolves on the first `open` status.
 
 ```jsonc
-// client → host
-{ "type": "open", "streamId": "s1", "endpoint": "session/follow", "payload": { "args": { … } } }
-{ "type": "cancel", "streamId": "s1" }
-// host → client
-{ "type": "item",  "streamId": "s1", "value": { … } }
-{ "type": "end",   "streamId": "s1" }
-{ "type": "error", "streamId": "s1", "error": { "code": "…", "message": "…", "details": {} } }
+// host → client, one per frame (inside a server-request envelope)
+{ "type": "server-request",
+  "payload": { "type": "session/event", "sessionId": "…",
+    "event": { "type": "assistant/chunk", "seq": 1, "time": 2,
+               "data": { "chunk": { "type": "text-delta", "index": 0, "text": "po" } } } } }
 ```
 
-This plugin uses three logical streams:
+Assistant streaming arrives **as `session/event` frames whose `event.type ===
+'assistant/chunk'`** — there is no separate `assistant/stream` frame, so
+`conversation/model.ts`'s existing `assistant/chunk` fold handles streaming with no
+change. Durable history is **not** delivered on this socket: `getHistory()` calls
+the `session.history` unary RPC (`{ sessionId, maxMessages? }`) instead.
 
-| endpoint | args | Purpose |
-| --- | --- | --- |
-| `$events` | `{}` | Forwarded host events (including approval waterfalls); the first item is `ready`, carrying `clientId` and `host.home` |
-| `session/follow` | `{ request: { address: { kind:'session', sessionId }, maxMessages, assistantStream: true } }` | Journal snapshot + later durable events + assistant-stream frames |
-| `workspace/follow` | `{}` | First item is `baseline`; replaces the deleted `workspace/list` |
+**Answering an approval** is `POST /api/respond` with a `client-response`
+envelope:
 
-`session/follow` items are `{ type:'snapshot', header, cursor, records, hasMore, projections }`,
-`{ type:'event', event: SessionEvent }` and `{ type:'assistant-stream', frame }`.
+```jsonc
+{ "type": "client-response", "rpcId": "<uuid>",
+  "result": { "sessionId": "…", "approvalId": "…", "outcome": "allowed-once" | "rejected" } }
+```
 
-### How the client translates the new transport back
-
-`HarnessClient` projects the new transport into the legacy frame shapes the UI
-already consumes, so `conversation/model.ts` and `approval/store.ts` are unchanged:
-
-| New transport | Frame handed to the UI |
-| --- | --- |
-| `session/follow` snapshot records | `{ type:'session/event', sessionId, event }` (idempotent replay) |
-| `session/follow` `event` item | same |
-| `assistant-stream` `chunk` | `{ type:'assistant/stream', turn, step, chunk }` |
-| `$events` `waterfall` (`approval/request`) | `{ type:'approval/requested', sessionId: agentId, approvalId: eventId, toolName, callId, reason }` |
-
-**Answering an approval** is `POST /api/$events/result` with `args`
-`{ clientId, eventId, outcome: { kind:'result', value: 'allowed-once' | 'rejected' } }`.
-`agentId` *is* the SessionId upstream (`agent.id`), which is what makes the
-per-session filtering work.
+The `approval/requested` frame carries `sessionId` + `approvalId`;
+`respondApproval()` looks the frame up (it was observed on the mux) and POSTs that
+pair. `agentId` *is* the SessionId upstream, which is what makes per-session
+filtering work.
 
 `user-questions/request` is a waterfall too, but the sidebar cannot render a
 question form, so we **deliberately do not answer it** — the host settles on the
-first answer, and replying `next` would pre-empt the web UI.
+first answer, and replying would pre-empt the web UI.
+
+**Trust fence** (`api-request-trust.ts` / `browser-auth.ts` upstream): the `Host`
+header must be loopback or in `--trusted-host`, and — on cookie-gated hosts — the
+cookie must verify. We only ever connect to loopback, so the first half passes
+naturally.
 
 **Trust fence** (`api-request-trust.ts` / `browser-auth.ts` upstream): the `Host`
 header must be loopback or in `--trusted-host`, and the cookie must verify. We
@@ -207,8 +200,7 @@ only ever connect to loopback, so the first half passes naturally.
 Transport and messaging — always called:
 
 `session/list`, `session/create`, `session/prompt`, `session/cancel`,
-`session/follow`, `session/modelCatalog`, `workspace/create`,
-`workspace/follow`, `$events`, `$events/result`.
+`session/history`, `host/describe`, `workspace/list`, `workspace/create`.
 
 Control surface — called only when capability probing confirmed the host serves
 them (see {@link probeCapabilities} in `harness/wire.ts`), and therefore safe to
@@ -336,4 +328,4 @@ test/fixtures/                # sanitized protocol captures
 
 ## KV-cache / stability note
 
-The extension holds no model state of its own across reconnects — every reconnect re-derives from the `session/follow` snapshot, which is the Harness source of truth (`session.history` no longer exists on current builds, and the negotiated profile is what tells us which names apply). The only long-lived client state is the event-socket downlink plus the two in-memory folds, `ConversationModel` and `ControlSurface`, all three rebuilt from the snapshot on resume. This keeps cache consistency trivial: there is one cache (the Harness session log), and VS Code is a view onto it.
+The extension holds no model state of its own across reconnects — every reconnect re-derives from `session.history` (a unary RPC returning the journal as `{ events, hasMore }`), which is the Harness source of truth; the negotiated `WireProfile` is what tells us which endpoint names and args shapes apply. The only long-lived client state is the event-socket downlink plus the two in-memory folds, `ConversationModel` and `ControlSurface`, both rebuilt from `session.history` on resume. This keeps cache consistency trivial: there is one cache (the Harness session log), and VS Code is a view onto it.

@@ -209,7 +209,8 @@ them (see {@link probeCapabilities} in `harness/wire.ts`), and therefore safe to
 leave enabled against an older host. On 0.2.0-rc.2 the **present** set is:
 
 `session/fork`, `session/rename`, `session/selectModel`, `session/updateQueue`,
-`workspace/archiveSession`, `commands/execute`, `commands/list`.
+`workspace/archiveSession`, `commands/execute`, `commands/list`,
+`session/search`, `session/attachment`.
 
 (`agentPreset/*`, `subagent/*`, `host/describe`,
 `workspace/list`, `llm/models` and `goal/*` are likewise absent and gated off.)
@@ -264,6 +265,54 @@ Usage is a two-channel fold, like the control surface:
 Cache-hit percentage follows the official Web UI formula:
 `cacheReadTokens / (uncachedInput + cacheRead + cacheWrite)` — rendered in the
 sidebar's usage panel.
+
+## Session tooling (v0.1.0: search / inspector / attachments)
+
+Three sidebar panels extend the session beyond the conversation itself. All
+three are capability-gated like the control surface: the UI offers a control
+only when `probeCapabilities()` saw the host serve it, and a refusal degrades
+to a readable notice, never a dead button.
+
+### F6 — session search (`session/search`)
+
+A unary read: `{ request: { query } }` → `{ results: [{ sessionId, title?,
+snippet?, … }] }`. The shape was pinned against a live rc.2 host (bare fields
+answer `arguments-invalid: missing "request"`; the wrapped shape passes arg
+validation and reaches the search service). One deployment nuance is surfaced
+honestly: the host may have search **disabled** — the local `dsh web` does,
+answering `gateway/internal: session search is disabled`. The controller
+recognizes that class of message and the panel renders "Search is disabled on
+this host deployment" instead of a stack-trace-style error.
+
+### F7 — live event inspector (zero protocol)
+
+`AppController.captureFrame()` hooks the mux subscribe callback **before** any
+folding, so the inspector sees exactly what the wire delivered: every
+`session/event`, `assistant/stream`, `stream/error` frame, with seq / arrival
+time / type / one-line summary. Frames live in a 300-entry ring buffer
+(each `raw` JSON truncated to 2 KB) held in extension-host memory only —
+nothing is written to disk or sent anywhere. Clicking a row copies the raw
+JSON to the clipboard. Because it rides the existing subscribe path, it costs
+zero extra host requests and cannot desynchronize from what the conversation
+model actually saw.
+
+### F8 — file attachments (`session/attachment`)
+
+Multi-select file picker (extension host — the webview cannot read local
+disk) → base64 → `{ request: { sessionId, attachments: [{ name, content }] } }`.
+What is confirmed vs. best-known:
+
+- **Confirmed empirically**: the endpoint is JSON-only (multipart answers 415
+  `content type must be application/json`) and takes the `{ request }` wrapper
+  (bare fields answer `arguments-invalid: missing "request"`).
+- **Not yet pinned**: the inner descriptor of `request`. Every guessed inner
+  shape answered `boundary validation failed` against the local host, so the
+  shipped shape is the best inference from the surrounding rc.2 schemas, and
+  host errors pass through verbatim to the user. Fixing it once upstream
+  schema is readable is a one-constant change in `innerCandidates`/`client.ts`.
+
+This mirrors the honesty policy used elsewhere: an unconfirmed wire never
+fails silently.
 
 ## Workspace lifecycle (v0.0.2: lazy create)
 

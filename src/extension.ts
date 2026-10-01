@@ -15,6 +15,7 @@
  */
 
 import * as vscode from 'vscode'
+import { readFileSync } from 'node:fs'
 import { HarnessClient } from './harness/client.ts'
 import { BrowserSessionAuth, type AuthStore } from './harness/auth.ts'
 import { AppController } from './app/controller.ts'
@@ -251,6 +252,24 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('deepseekHarness.sendSelectionToChat', () => {
       void controller.sendSelection()
+    }),
+    vscode.commands.registerCommand('deepseekHarness.attachFile', async () => {
+      const picks = await vscode.window.showOpenDialog({
+        canSelectMany: true,
+        openLabel: 'Attach to session',
+        title: 'Attach file(s) to the active Harness session',
+      })
+      if (!picks || picks.length === 0) return
+      const attachments: Array<{ name: string; content: string }> = []
+      for (const uri of picks) {
+        try {
+          const data = readFileSync(uri.fsPath)
+          attachments.push({ name: uri.path.split('/').pop() ?? uri.fsPath, content: data.toString('base64') })
+        } catch (e) {
+          vscode.window.showErrorMessage('Could not read ' + uri.fsPath + ': ' + (e instanceof Error ? e.message : String(e)))
+        }
+      }
+      await controller.uploadAttachment(attachments)
     }),
   )
 

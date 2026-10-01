@@ -6,12 +6,37 @@
  */
 
 import type { MuxStatus } from '../harness/events.ts'
-import type { CommandDescriptor, ModelCatalog, QueueItemView, SessionSummary, WorkspaceView } from '../harness/protocol.ts'
+import type { CommandDescriptor, ModelCatalog, QueueItemView, SessionSearchResult, SessionSummary, WorkspaceView } from '../harness/protocol.ts'
 import type { SessionSnapshot } from '../conversation/types.ts'
 import type { ControlState } from '../conversation/control.ts'
 import type { SessionUsageState } from '../conversation/usage.ts'
 import type { ReviewSummary } from '../review/types.ts'
 import type { ApprovalSummary } from '../approval/types.ts'
+
+/** One raw frame captured for the live event inspector (F7). */
+export interface InspectorFrame {
+  /** Monotonic sequence for display. */
+  seq: number
+  /** Wall-clock time the frame arrived at the client. */
+  at: number
+  /** Frame type (`session/event`, `assistant/stream`, `stream/error`, …). */
+  kind: string
+  /** For `session/event` frames: the inner event type. */
+  eventType?: string
+  /** One-line human summary (title/tool/usage delta…). */
+  summary: string
+  /** Truncated JSON of the frame for copy/inspect. */
+  raw: string
+}
+
+/** Search results from `session/search` plus the UI state for the F6 panel. */
+export interface SearchState {
+  query: string
+  results: NonNullable<SessionSearchResult['results']>
+  error?: string
+  /** Host reported search as disabled for this deployment. */
+  disabled?: boolean
+}
 
 export type ConnectionKind = 'disconnected' | 'connecting' | 'connected' | 'error'
 
@@ -52,6 +77,10 @@ export interface UiState {
   queue?: QueueItemView[]
   /** Session token/usage totals (folded events + host projections). */
   sessionUsage?: SessionUsageState
+  /** F6: session search panel state. */
+  search?: SearchState | null
+  /** F7: ring buffer of recently observed mux frames (newest last). */
+  eventLog?: InspectorFrame[]
   /** Auto-approve incoming approval requests (setting mirror). */
   autoApprove: boolean
   /** Monotonically increasing. Bumps whenever any UiState field changes,

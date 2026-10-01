@@ -88,6 +88,8 @@ export const CONTROL_METHODS = [
   'session/modelCatalog',
   'commands/execute',
   'commands/list',
+  'session/search',
+  'session/attachment',
 ] as const
 
 export type ControlMethod = (typeof CONTROL_METHODS)[number]

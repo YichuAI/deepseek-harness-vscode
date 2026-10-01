@@ -137,7 +137,7 @@ type AuthMode = 'none' | 'cookie'
 const PRESENT_CONTROLS = new Set<string>([
   'session/fork', 'session/rename', 'session/selectModel', 'session/updateQueue',
   'workspace/archiveSession', 'session/page', 'workspace/create', 'session/modelCatalog',
-  'commands/execute', 'commands/list',
+  'commands/execute', 'commands/list', 'session/search', 'session/attachment',
 ])
 
 function okBody(value: unknown): string {
@@ -258,6 +258,14 @@ function makeHarness(auth: AuthMode, controls: Set<string>): {
           ? { status: 200, body: okBody([
               { definitionId: 'd1', name: 'permission', description: 'Switch the permission preset' },
             ]) }
+          : missing()
+      case 'session/search':
+        return controls.has('session/search')
+          ? { status: 200, body: okBody({ results: [{ sessionId: 'session-1', title: 'Session 1', snippet: '…hello…' }], total: 1 }) }
+          : missing()
+      case 'session/attachment':
+        return controls.has('session/attachment')
+          ? { status: 200, body: okBody({ accepted: true, attachments: [{ id: 'att-1', name: 'x.txt' }] }) }
           : missing()
       // rc.2 does NOT serve any of these — they must be reported as absent.
       case 'session/command':
@@ -517,6 +525,20 @@ async function main(): Promise<void> {
     commands.map((c) => c.name), ['permission'])
   check('session/command is never called (rc.2 has no such RPC)',
     !harness.seen.rpc.some((r) => r.endpoint === 'session/command'))
+
+  // 12. F6/F8: session/search + session/attachment ride the {request:{...}} wrapper.
+  const found = await client.searchSessions('hello')
+  eq('session/search returns results', found.results?.[0]?.sessionId, 'session-1')
+  const searchRpc = harness.seen.rpc.filter((r) => r.endpoint === 'session/search').at(-1)
+  eq('session/search inner is {request:{query}}', searchRpc?.inner as Record<string, unknown>,
+    { request: { query: 'hello' } })
+
+  const att = await client.uploadAttachment('session-1', [{ name: 'x.txt', content: 'aGVsbG8=' }])
+  eq('session/attachment accepts the upload', att.accepted, true)
+  const attRpc = harness.seen.rpc.filter((r) => r.endpoint === 'session/attachment').at(-1)
+  eq('session/attachment inner is {request:{sessionId,attachments:[{name,content}]}}',
+    attRpc?.inner as Record<string, unknown>,
+    { request: { sessionId: 'session-1', attachments: [{ name: 'x.txt', content: 'aGVsbG8=' }] } })
 
   client.dispose()
   await harness.stop()

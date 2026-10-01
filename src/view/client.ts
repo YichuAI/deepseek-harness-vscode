@@ -23,6 +23,9 @@ export const CLIENT_SCRIPT = /* js */ `
   let currentCommands = [];
   let currentQueue = [];
   let currentCatalog = null;
+  let currentSearch = null;
+  let currentEventLog = [];
+  let currentState = null;
   let lastControlSig = '';
   // Slash completion state
   let slashItems = [];
@@ -70,6 +73,9 @@ export const CLIENT_SCRIPT = /* js */ `
 
   // ─── main render entry point ────────────────────────────────────────────────
   function render(state) {
+    currentState = state;
+    currentSearch = state.search || null;
+    currentEventLog = state.eventLog || [];
     // Store reviews/approvals for lookup in renderTool
     currentReviews = state.reviews || [];
     currentApprovals = state.approvals || [];
@@ -192,6 +198,71 @@ export const CLIENT_SCRIPT = /* js */ `
     $('steer-wrap').style.display = running ? '' : 'none';
     if (!running) $('steer').checked = false;
     renderQueueBar(state);
+    renderSearch(state);
+    renderInspector(state);
+  }
+
+  // ─── F6: session search panel ──────────────────────────────────────────────
+  let lastSearchSig = '';
+  function renderSearch(state) {
+    const panel = $('search-panel');
+    if (!panel || panel.style.display === 'none') return
+    const s = state.search
+    const sig = s ? (s.query + '|' + s.results.length + '|' + (s.error ? 'e' : '') + (s.disabled ? 'd' : '')) : 'none'
+    if (sig === lastSearchSig) return
+    lastSearchSig = sig
+    const status = $('search-status')
+    const results = $('search-results')
+    if (!s) { status.textContent = ''; results.innerHTML = ''; return }
+    if (s.disabled) {
+      status.textContent = '⚠️ Search is disabled on this host deployment.'
+      status.className = 'muted warn'
+    } else if (s.error) {
+      status.textContent = '⚠️ ' + s.error
+      status.className = 'muted warn'
+    } else {
+      status.textContent = s.results.length === 0 ? 'No matches.' : (s.results.length + ' result(s).')
+      status.className = 'muted'
+    }
+    results.innerHTML = ''
+    for (const r of s.results) {
+      const row = document.createElement('div')
+      row.className = 'search-row'
+      row.innerHTML = '<div class="search-title">' + escapeText(r.title || r.sessionId) + '</div>'
+        + (r.snippet ? '<div class="search-snippet">' + escapeText(r.snippet) + '</div>' : '')
+      row.addEventListener('click', () => post({ type: 'selectSession', sessionId: r.sessionId }))
+      results.appendChild(row)
+    }
+  }
+
+  // ─── F7: live event inspector ───────────────────────────────────────────────
+  let lastInspectorSeq = -1
+  function renderInspector(state) {
+    const panel = $('inspector-panel')
+    if (!panel || panel.style.display === 'none') return
+    const log = state.eventLog || []
+    if (log.length === 0 || log[log.length - 1].seq === lastInspectorSeq) return
+    lastInspectorSeq = log[log.length - 1].seq
+    const list = $('inspector-list')
+    const frag = document.createDocumentFragment()
+    for (const f of log) {
+      const row = document.createElement('div')
+      row.className = 'insp-row'
+      const time = new Date(f.at).toLocaleTimeString()
+      row.innerHTML = '<span class="insp-seq">' + f.seq + '</span>'
+        + '<span class="insp-time">' + time + '</span>'
+        + '<span class="insp-kind">' + escapeText(f.kind) + (f.eventType ? ':' + escapeText(f.eventType) : '') + '</span>'
+        + '<span class="insp-summary">' + escapeText(f.summary) + '</span>'
+      row.title = f.raw
+      row.addEventListener('click', () => {
+        navigator.clipboard?.writeText(f.raw)
+        row.classList.add('copied')
+        setTimeout(() => row.classList.remove('copied'), 400)
+      })
+      frag.appendChild(row)
+    }
+    list.appendChild(frag)
+    list.scrollTop = list.scrollHeight
   }
 
   // ─── queued messages (rc.2 session/updateQueue) ──────────────────────────
@@ -979,6 +1050,26 @@ export const CLIENT_SCRIPT = /* js */ `
   $('toggle-sys').addEventListener('click', () => post({ type: 'toggleSystemMessages' }));
   $('move-right').addEventListener('click', () => post({ type: 'moveToSecondarySideBar' }));
   $('ctl-head').addEventListener('click', () => $('control').classList.toggle('open'));
+
+  // ─── F6/F7/F8 toolbar ────────────────────────────────────────────────────────
+  $('btn-search').addEventListener('click', () => {
+    const p = $('search-panel');
+    const open = p.style.display === 'none';
+    p.style.display = open ? '' : 'none';
+    if (open) { lastSearchSig = ''; renderSearch(currentState); $('search-input').focus(); }
+  });
+  $('search-close').addEventListener('click', () => { $('search-panel').style.display = 'none'; });
+  $('search-go').addEventListener('click', () => { const q = $('search-input').value; if (q.trim()) post({ type: 'searchSessions', query: q }); });
+  $('search-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') { const q = e.target.value; if (q.trim()) post({ type: 'searchSessions', query: q }); } });
+  $('btn-inspector').addEventListener('click', () => {
+    const p = $('inspector-panel');
+    const open = p.style.display === 'none';
+    p.style.display = open ? '' : 'none';
+    if (open) { lastInspectorSeq = -1; renderInspector(currentState); }
+  });
+  $('inspector-close').addEventListener('click', () => { $('inspector-panel').style.display = 'none'; });
+  $('inspector-clear').addEventListener('click', () => { lastInspectorSeq = -1; post({ type: 'inspectorClear' }); $('inspector-list').innerHTML = ''; });
+  $('btn-attach').addEventListener('click', () => post({ type: 'attachFile' }));
   $('input').addEventListener('keydown', (e) => {
     // Slash completion keyboard navigation first.
     if (slashItems.length > 0) {

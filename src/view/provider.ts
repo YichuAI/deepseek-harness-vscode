@@ -50,6 +50,10 @@ export interface UiState {
   queue?: import('../harness/protocol.ts').QueueItemView[]
   /** Session token/usage totals (folded events + host projections). */
   sessionUsage?: import('../conversation/usage.ts').SessionUsageState
+  /** F6: session search panel state. */
+  search?: import('../app/state.ts').SearchState | null
+  /** F7: ring buffer of recently observed mux frames. */
+  eventLog?: import('../app/state.ts').InspectorFrame[]
   /** Auto-approve incoming approval requests (setting mirror). */
   autoApprove: boolean
   renderVersion: number
@@ -86,6 +90,13 @@ export type WebviewAction =
   // ─── queued messages (rc.2 session/updateQueue) ─────────────
   | { type: 'queueSteer'; itemId: string }
   | { type: 'queueRemove'; itemId: string }
+  // ─── F6 session search ──────────────────────────────────────
+  | { type: 'searchSessions'; query: string }
+  | { type: 'searchClear' }
+  // ─── F7 live event inspector ───────────────────────────────
+  | { type: 'inspectorClear' }
+  // ─── F8 attach files (routes to the extension-host file picker) ──
+  | { type: 'attachFile' }
 
 export interface ProviderDeps {
   client: HarnessClient
@@ -114,6 +125,12 @@ export class HarnessWebviewViewProvider implements vscode.WebviewViewProvider {
     this.brandIconUri = view.webview.asWebviewUri(iconUri).toString()
     view.webview.html = this.html(view.webview)
     view.webview.onDidReceiveMessage((msg: WebviewAction) => {
+      // F8: attaching files needs an extension-host file picker (webview cannot
+      // read local disk); route the button to the registered command.
+      if (msg.type === 'attachFile') {
+        void vscode.commands.executeCommand('deepseekHarness.attachFile')
+        return
+      }
       this.deps.dispatch(msg)
     })
     view.onDidDispose(() => { this.view = undefined })

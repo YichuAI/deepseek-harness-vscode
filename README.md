@@ -42,6 +42,15 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full diff.
 - **v0.0.2** — Conversation UX & Architecture Baseline: Assistant Markdown rendering, tool card merging, system message collapsing, lazy workspace/session creation, streaming render fix, architecture hardening.
 - **v0.0.1** — First public release: prove VS Code and the browser share the same Harness session.
 
+## What v0.1.0 adds
+
+- **Session search (F6, `session/search`)** — a 🔍 panel in the sidebar: type a full-text query, get matching sessions with title + hit snippet, click one to jump straight into it. Request shape `{ request: { query } }`, empirically confirmed against a live host.
+  - **Deployment honesty**: some `dsh web` deployments ship with search **disabled** (the local one does — the host answers `gateway/internal: session search is disabled`). There the panel shows a clear notice instead of an error; on a search-enabled deployment it just works.
+- **Live event inspector (F7, zero new protocol)** — a 📡 panel that lists **every mux frame** the plugin receives (`session/event`, `assistant/stream`, `stream/error`, …) with seq / time / type / one-line summary. Click any row to copy the full raw JSON (truncated to 2 KB). A 300-frame ring buffer with a Clear button. Data comes entirely from the event stream the plugin already consumes — no extra host traffic — so debugging "why did the agent do X" no longer requires the Web UI.
+- **File attachments (F8, `session/attachment`)** — a 📎 toolbar button and the command `DeepSeek Harness: Attach File to Session`: pick local files (multi-select) and they are sent base64-encoded via `{ request: { sessionId, attachments: [{ name, content }] } }` for the agent to consume in later turns.
+  - **Shape honesty**: the `{request}` wrapper is empirically confirmed, but the inner descriptor could **not** be pinned by blind probing (every guessed shape answered `boundary validation failed`; multipart was rejected 415, so it is JSON-only). The plugin ships the best-known shape and passes host errors through verbatim — a shape mismatch is a visible, actionable error, never a silent one.
+- All three are capability-gated: a host that does not serve the endpoint shows the why, never a dead button.
+
 ## What v0.0.9 adds
 
 - **Model + reasoning-effort picker** — the sidebar fetches `session/modelCatalog` and switches via `session/selectModel`; the effective model renders from `request/header`.
@@ -109,7 +118,7 @@ For your safety, the following remain out of scope:
    Or install the VSIX from [GitHub Releases](https://github.com/liangwythu/deepseek-harness-vscode/releases):
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.0.9.vsix
+   code --install-extension harness-connector-deepseek-0.1.0.vsix
    ```
 
 3. Nothing to configure. The extension auto-connects: it reads the browser-session
@@ -190,6 +199,7 @@ command to run instead of just reporting `401`.
 - `DeepSeek Harness: Fork Session` — branch off the current session and switch to the fork
 - `DeepSeek Harness: Rename Session` — pin a title (stops automatic regeneration)
 - `DeepSeek Harness: Archive Session` — archive it out of the active workspace list
+- `DeepSeek Harness: Attach File to Session` — pick local files and upload them to the active session (`session/attachment`) — also available via the 📎 button
 - `DeepSeek Harness: Open Web UI`
 - `DeepSeek Harness: Show Logs` (the `DeepSeek Harness` output channel)
 
@@ -255,8 +265,8 @@ npm install
 npm run build        # esbuild → dist/extension.js
 npm run watch        # rebuild on change
 npm run typecheck
-npm run package      # → harness-connector-deepseek-0.0.9.vsix
-npm run protocol-test      # 91 protocol assertions against a fake harness
+npm run package      # → harness-connector-deepseek-0.1.0.vsix
+npm run protocol-test      # 95 protocol assertions against a fake harness
 npm run protocol-probe     # report what your real dsh web exposes
 ```
 
@@ -280,11 +290,11 @@ Press `F5` in VS Code to launch an Extension Development Host with the extension
 - Unknown harness event types are ignored (the protocol is merge-extensible); they do not crash the client but also do not render.
 - Diff review revert uses `git checkout` — uncommitted changes to the target file will be lost on Reject.
 
-## Roadmap (v0.1.0+)
+## Roadmap (v0.1.1+)
 
-- Session search (`session/search`) and attachment upload (`session/attachment`)
-- Live event inspector / agent-debug panel
-- "Load older" history pagination
+- Pin the `session/attachment` inner descriptor once upstream schema is readable (single-constant fix)
+- Inspector: filter box / type highlight / export as JSONL
+- Search: scope to workspace, pagination, highlight rendering
 - Inline Completion
 - VS Code filesystem provider
 - Terminal integration

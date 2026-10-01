@@ -25,7 +25,7 @@ import {
   findHarnessWorkspace, ensureHarnessWorkspace, pickVsCodeFolder,
   type WorkspaceBinding,
 } from '../workspace/binding.ts'
-import type { UiState } from './state.ts'
+import type { UiState, InspectorFrame, SearchState } from './state.ts'
 import { connectionToUi, sessionsToUi, workspaceToUi } from './state.ts'
 import type { WebviewAction } from '../view/provider.ts'
 import type { HarnessWebviewViewProvider } from '../view/provider.ts'
@@ -68,6 +68,11 @@ export class AppController {
   private control = new ControlSurface()
   /** Session token/usage accumulator (event fold + host projections). */
   private usage = new SessionUsage()
+  /** F6: last session-search result (held so the panel re-renders). */
+  private search: SearchState | null = null
+  /** F7: ring buffer of every mux frame seen (newest last). */
+  private eventLog: InspectorFrame[] = []
+  private eventLogSeq = 0
   /** Tracks which sessions have already received their first prompt (with context). */
   private firstPromptSent = new Set<SessionId>()
 
@@ -138,6 +143,9 @@ export class AppController {
       case 'controlModel': await this.setModel(action.provider, action.model, action.reasoningEffort); break
       case 'queueSteer': await this.queueAction(action.itemId, { kind: 'steer' }); break
       case 'queueRemove': await this.queueAction(action.itemId, { kind: 'remove' }); break
+      case 'searchSessions': await this.doSearch(action.query); break
+      case 'searchClear': this.search = null; this.d.setState({ search: null }); break
+      case 'inspectorClear': this.eventLog = []; this.eventLogSeq = 0; this.d.setState({ eventLog: [] }); break
     }
   }
 
@@ -230,7 +238,7 @@ export class AppController {
     try {
       await this.refetchHistory(sessionId)
       this.disposables.add(this.d.client.subscribe(sessionId, (frames) => {
-        for (const f of frames) this.applyMuxFrame(f)
+        for (const f of frames) { this.captureFrame(f); this.applyMuxFrame(f) }
         this.d.pushState()
       }))
     } catch (e) {
@@ -303,6 +311,32 @@ export class AppController {
       const err = f.error as { message?: string }
       this.d.notifyError('Harness stream error: ' + (err.message ?? 'unknown'))
     }
+  }
+
+  /** F7: append a raw frame to the live inspector ring buffer (cap 300). */
+  private captureFrame(frame: unknown): void {
+    const f = frame as { type?: string; event?: { type?: string; data?: unknown }; turn?: number; step?: number }
+    const kind = f.type ?? 'unknown'
+    let eventType: string | undefined
+    let summary = kind
+    if (kind === 'session/event' && f.event) {
+      eventType = f.event.type
+      const data = f.event.data as { content?: unknown; chunk?: unknown; usage?: unknown; toolName?: string; message?: unknown } | undefined
+      summary = `event:${eventType}`
+      if (eventType === 'assistant/message' && data?.usage) summary += ' usage'
+      else if (eventType === 'tool/call' && typeof data?.toolName === 'string') summary += ` ${data.toolName}`
+      else if (eventType === 'user/message') summary += ' (user input)'
+    } else if (kind === 'assistant/stream') {
+      summary = `stream t${String(f.turn)}.${String(f.step)}`
+    } else if (kind === 'stream/error') {
+      summary = 'stream error'
+    }
+    let raw = ''
+    try { raw = JSON.stringify(frame) } catch { raw = String(frame) }
+    if (raw.length > 2000) raw = raw.slice(0, 1997) + '…'
+    this.eventLog.push({ seq: ++this.eventLogSeq, at: Date.now(), kind, eventType, summary, raw })
+    if (this.eventLog.length > 300) this.eventLog = this.eventLog.slice(-300)
+    this.d.setState({ eventLog: this.eventLog })
   }
 
   /** Handle approval frames from the dedicated approval listener (has the waterfall eventId). */
@@ -743,6 +777,46 @@ export class AppController {
     await this.refreshSessions()
     await this.selectSession(child)
     this.d.notifyInfo('DeepSeek Harness: forked into a new session.')
+  }
+
+  // ─── F6: session search ──────────────────────────────────────────────────────
+  async doSearch(query: string): Promise<void> {
+    const q = query.trim()
+    if (q.length === 0) { this.search = null; this.d.setState({ search: null }); return }
+    if (!this.d.client.supports('session/search')) {
+      this.search = { query: q, results: [], disabled: false, error: 'This host does not serve session/search.' }
+      this.d.setState({ search: this.search })
+      return
+    }
+    try {
+      const res = await this.d.client.searchSessions(q)
+      this.search = { query: q, results: res.results ?? [] }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      // Host deployment may have search disabled (local dsh web does).
+      const disabled = /search is disabled|not (enabled|available)|search.*off/i.test(msg)
+      this.search = { query: q, results: [], error: msg, disabled }
+    }
+    this.d.setState({ search: this.search })
+  }
+
+  /** F8: attach local files (base64 payloads) to the active session. */
+  async uploadAttachment(attachments: Array<{ name: string; content: string }>): Promise<void> {
+    const sid = this.activeSessionId
+    if (sid === undefined) return
+    if (attachments.length === 0) return
+    if (!this.d.client.supports('session/attachment')) {
+      this.d.notifyError('This host does not serve session/attachment.')
+      return
+    }
+    try {
+      const res = await this.d.client.uploadAttachment(sid, attachments)
+      this.d.notifyInfo(`DeepSeek Harness: attached ${String(attachments.length)} file(s).`)
+      this.d.log.info('attachment result: ' + JSON.stringify(res))
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      this.d.notifyError('Attachment failed: ' + msg)
+    }
   }
 
   /** Ask the host to compact the session's context. */

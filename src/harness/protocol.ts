@@ -291,6 +291,24 @@ export interface QueueItemView {
   text: string
 }
 
+/** Result of `session/search` (`{ request: { query } }`). */
+export interface SessionSearchResult {
+  results?: Array<{
+    sessionId: string
+    title?: string
+    snippet?: string
+    updatedAt?: number
+    workspaceId?: string
+  }>
+  total?: number
+}
+
+/** Result of `session/attachment` (`{ request: { sessionId, attachments:[{name,content}] } }`). */
+export interface SessionAttachmentResult {
+  accepted?: boolean
+  attachments?: Array<{ id?: string; name: string }>
+}
+
 /** Session-level token/usage projection (`projections.values`). */
 export interface SessionUsageProjection {
   tokenUsage?: {

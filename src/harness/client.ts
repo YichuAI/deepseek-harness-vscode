@@ -72,6 +72,8 @@ import {
   type SessionPageValue,
   type SessionPromptValue,
   type SessionRenameValue,
+  type SessionSearchResult,
+  type SessionAttachmentResult,
   type WorkspaceCreateValue,
   type WorkspaceId,
   type WorkspaceListValue,
@@ -146,6 +148,7 @@ function innerCandidates(method: string, req: Record<string, unknown>): Record<s
   // rc.2 (official bundle, empirically pinned): these take the {request:{...}}
   // wrapper; commands/execute takes the bare {agentId,line,submittedAttachments}.
   if (method === 'session/selectModel' || method === 'session/updateQueue') return [{ request: req }, req]
+  if (method === 'session/search' || method === 'session/attachment') return [{ request: req }, req]
   if (method === 'commands/execute' || method === 'commands/list') return [req]
   return [{ request: req }, { _request: req }, req]
 }
@@ -464,6 +467,33 @@ export class HarnessClient implements Disposable {
   /** The slash-command registry this host serves for the session's agent. */
   listCommands(sessionId: SessionId): Promise<CommandDescriptor[]> {
     return this.rpc<CommandDescriptor[]>('commands/list', { agentId: sessionId })
+  }
+
+  /**
+   * Full-text session search (rc.2 `session/search`, `{ request: { query } }`).
+   *
+   * NOTE: this endpoint may be disabled by the host deployment (the local
+   * `dsh web` answers `gateway/internal: session search is disabled`). When that
+   * happens the call rejects with the host's error; the caller surfaces it as an
+   * "search unavailable here" notice rather than a hard failure.
+   */
+  searchSessions(query: string): Promise<SessionSearchResult> {
+    return this.rpc<SessionSearchResult>('session/search', { query })
+  }
+
+  /**
+   * Attach local files to a session (rc.2 `session/attachment`,
+   * `{ request: { sessionId, attachments: [{ name, content }] } }`, `content` is
+   * base64 of the file bytes). The host's inner descriptor could not be pinned by
+   * blind probing against the local deployment, so this is the best-known shape;
+   * errors are surfaced verbatim to the caller.
+   */
+  uploadAttachment(
+    sessionId: SessionId,
+    attachments: Array<{ name: string; content: string }>,
+  ): Promise<SessionAttachmentResult> {
+    this.requireControl('session/attachment')
+    return this.rpc<SessionAttachmentResult>('session/attachment', { sessionId, attachments })
   }
 
   /** Archive the session out of the active workspace list. */

@@ -5,6 +5,65 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0] — 2026-10-01
+
+Tagline: **会话级工具链 — 全文搜索、实时事件检查器、附件上传。**
+Tagline (EN): **session tooling — full-text search, live event inspector, file attachments.**
+
+v0.0.9 补齐了交互闭环；v0.1.0 把三类"会话级工具"接入侧栏：搜回旧会话、看清线上
+每一帧、把本地文件交给 agent。三个功能都走 rc.2 已证实存在的端点，且全部由能力
+探测门控——宿主不提供时按钮照常显示但动作给出明确解释，绝不渲染死按钮。
+
+### Added
+
+- **F6 会话搜索（`session/search`）。** 侧栏新增 🔍 面板：输入全文关键词，返回
+  会话标题 + 命中摘要，点击直接跳转到该会话。请求形状为
+  `{ request: { query } }`（真机实证）。
+  ⚠️ **部署开关**：本机 `dsh web` 当前**禁用**了 session search（宿主回答
+  `gateway/internal: session search is disabled`）。此时面板显示
+  "Search is disabled on this host deployment" 而非报错崩溃；在启用搜索的
+  部署上开箱即用。
+  *EN:* full-text session search panel (query → title + snippet → click to
+  jump). Gated by capability probing; a deployment with search disabled shows
+  a clear notice instead of an error.
+- **F7 实时事件检查器。** 侧栏新增 📡 面板：把插件收到的**每一帧** mux 消息
+  （`session/event`、`assistant/stream`、`stream/error`…）按序号/时间/类型/
+  摘要流水展示，点击任意一行复制该帧的完整 JSON（截断至 2 KB）。环形缓冲
+  保留最近 300 帧，可一键清空。**零新协议**——数据完全来自插件已在消费的
+  事件流，对宿主零额外请求；排查"为什么 agent 做了这件事"时不必再开 Web UI。
+  *EN:* live event inspector — every mux frame the plugin sees, listed with
+  seq/time/type/summary; click a row to copy its raw JSON. 300-frame ring
+  buffer, one-click clear, zero extra host traffic.
+- **F8 附件上传（`session/attachment`）。** 侧栏新增 📎 按钮与命令
+  `DeepSeek Harness: Attach File to Session`：选择本地文件（可多选）后以
+  base64 经 `{ request: { sessionId, attachments: [{ name, content }] } }`
+  发给宿主，由 agent 在后续回合消费。
+  ⚠️ **形状坦白**：宿主确认该端点为 JSON + `{request}` 包裹，但**内部
+  descriptor 未能通过盲探钉死**（所有猜测形状均答 `boundary validation
+  failed`，multipart 被 415 拒绝即排除）。本实现采用最可能的内部形状并在
+  错误时把宿主原文透传；在本部署上若形状不符会得到明确报错而非静默失败，
+  待上游 schema 可读后一处常量即可修正。
+  *EN:* attach local files (multi-select, base64) to the active session.
+  The `{request}` wrapper is empirically confirmed; the inner descriptor could
+  not be pinned by blind probing and is documented as best-known-shape with
+  verbatim error passthrough.
+
+### Changed
+
+- **能力探测集合扩容。** `session/search`、`session/attachment` 加入
+  `CONTROL_METHODS`，连接时与其它控制面方法一起探测；侧栏据此门控。
+  *EN:* both endpoints join the probed control set and gate the new UI.
+- **回归门扩到 95 项断言。** 假 harness 新增 `session/search`、
+  `session/attachment` 端点；覆盖两方法的返回值解析与 `{request}` 信封形状。
+  *EN:* regression gate grown to **95 assertions**.
+
+### Notes
+
+- F7 的检查器帧缓冲在扩展宿主内存中（每帧截断 2 KB、上限 300 帧），不落盘、
+  不外发；重启侧栏即清空。
+- F6/F8 在不提供端点的旧宿主上自动隐藏为不可用提示——与 fork/rename 等
+  既有控制面的门控策略一致。
+
 ## [0.0.9] — 2026-10-01
 
 Tagline: **交互闭环 — 模型选择器、审批自动通过、排队/转向、Slash 命令、Token 用量面板。**

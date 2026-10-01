@@ -259,4 +259,29 @@ textarea { resize: none; min-height: 60px; max-height: 200px; width: 100%; }
 .usage-grid .usage-cell { background: var(--vscode-editor-background, rgba(128,128,128,.08)); border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.2)); border-radius: 4px; padding: 4px 6px; text-align: center; }
 .usage-grid .usage-cell b { display: block; font-size: 12px; }
 .usage-grid .usage-cell span { font-size: 9.5px; color: var(--vscode-descriptionForeground); text-transform: uppercase; letter-spacing: .3px; }
+
+/* ── v0.1.0: session search / event inspector subpanels ─────────────────── */
+.subpanel { border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.25)); border-radius: 5px; margin: 6px 0; padding: 7px 8px; background: var(--vscode-editorWidget-background, transparent); }
+.subpanel-head { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; margin-bottom: 6px; }
+.subpanel-head button { margin-left: 0; flex: 0 0 auto; }
+.subpanel-head button + button { margin-left: auto; }
+.subpanel-head span:first-child { flex: 1; }
+.subpanel .row { display: flex; gap: 6px; margin-bottom: 5px; }
+.subpanel .row input { flex: 1; }
+.muted.warn { color: var(--vscode-charts-yellow, #ca9c2e); }
+
+#search-results { max-height: 180px; overflow-y: auto; }
+.search-row { padding: 4px 6px; border-radius: 4px; cursor: pointer; }
+.search-row:hover { background: var(--vscode-list-hoverBackground, rgba(128,128,128,.15)); }
+.search-row .search-title { font-size: 11.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-row .search-snippet { font-size: 10.5px; color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.inspector-list { max-height: 220px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 10.5px; }
+.insp-row { display: flex; gap: 6px; padding: 1.5px 4px; cursor: copy; border-radius: 3px; align-items: baseline; }
+.insp-row:hover { background: var(--vscode-list-hoverBackground, rgba(128,128,128,.15)); }
+.insp-row.copied { background: var(--vscode-list-activeSelectionBackground, rgba(90,160,255,.25)); }
+.insp-seq { color: var(--vscode-descriptionForeground); flex: 0 0 26px; text-align: right; }
+.insp-time { color: var(--vscode-descriptionForeground); flex: 0 0 62px; }
+.insp-kind { color: var(--vscode-charts-blue, #4aa3ff); flex: 0 0 auto; }
+.insp-summary { color: var(--vscode-foreground, inherit); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 `

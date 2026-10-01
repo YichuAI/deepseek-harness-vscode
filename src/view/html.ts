@@ -6,6 +6,9 @@ export const HTML_SKELETON = /* html */ `
     <img id="brand-icon" alt="" style="display:none;" />
     <span class="brand-name">DeepSeek Harness</span>
     <div class="toolbar">
+      <button id="btn-search" class="secondary icon" title="Search sessions (F6)">🔍</button>
+      <button id="btn-inspector" class="secondary icon" title="Live event inspector (F7)">📡</button>
+      <button id="btn-attach" class="secondary icon" title="Attach files to session (F8)">📎</button>
       <button id="toggle-sys" class="secondary icon" title="Show/hide system messages (runtime context, plugin injections)" style="display:none;">SYS</button>
       <button id="move-right" class="secondary icon" title="Move to right side bar">⇲</button>
     </div>
@@ -38,6 +41,28 @@ export const HTML_SKELETON = /* html */ `
       <span id="ctl-summary" class="ctl-summary"></span>
     </div>
     <div id="ctl-body" class="ctl-body"></div>
+  </div>
+
+  <div id="search-panel" class="subpanel" style="display:none;">
+    <div class="subpanel-head">
+      <span>🔍 Search sessions</span>
+      <button id="search-close" class="secondary icon" title="Close">✕</button>
+    </div>
+    <div class="row">
+      <input id="search-input" type="text" placeholder="Full-text query…" />
+      <button id="search-go" class="secondary">Search</button>
+    </div>
+    <div id="search-status" class="muted"></div>
+    <div id="search-results"></div>
+  </div>
+
+  <div id="inspector-panel" class="subpanel" style="display:none;">
+    <div class="subpanel-head">
+      <span>📡 Event inspector</span>
+      <button id="inspector-clear" class="secondary" title="Clear buffer">Clear</button>
+      <button id="inspector-close" class="secondary icon" title="Close">✕</button>
+    </div>
+    <div id="inspector-list" class="inspector-list"></div>
   </div>
 
   <div id="messages"></div>

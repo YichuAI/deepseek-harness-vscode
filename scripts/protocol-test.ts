@@ -1,24 +1,29 @@
 /**
  * protocol-test.ts — drives the REAL transport code against a fake harness.
  *
- * The runtime we actually target is DSH `0.1.0-rc.6` (the version installed
- * locally; the earlier `0.1.6-alpha` the plugin was written against does not
- * exist anywhere). The script implements the *server half* of that contract
- * exactly and points the production client at it, so the handshake is exercised
- * end to end without a real `dsh web`.
+ * The runtime we actually target is DSH `0.2.0-rc.2` (the version installed
+ * locally; verified against the bundled `@deepseek-ai/dsh-*` source and a live
+ * `dsh web` on this machine). The script implements the *server half* of that
+ * contract exactly and points the production client at it, so the handshake is
+ * exercised end to end without a real `dsh web`.
  *
- * What rc.6 looks like (and therefore what this file proves):
- *   • endpoints are `POST /api/<ns>.<method>` (dot style), payload is the args
- *     object *directly* — never wrapped in `{args}` / `{request}`.
- *   • the event socket is a downlink-only WebSocket `ws://…/api/events.mux`;
- *     there is NO `ready` frame — connection-open IS the ready signal, and the
- *     client never sends anything on it. Each WS message is a `server-request`
- *     envelope; the frame is `envelope.payload`.
- *   • `host.describe` (called once at connect) returns version/cwd/provider/model.
- *   • `session.history` is a unary RPC, not a `session/follow` stream.
- *   • approvals are settled via `POST /api/respond` with a `client-response`.
- *   • rc.6 has NO cookie auth, so connect succeeds with no pasted session; a
- *     sibling cookie-gated fake (step E) still exercises the autoSession path.
+ * What rc.2 looks like (and therefore what this file proves):
+ *   • endpoints are `POST /api/<ns>/<method>` (slash style), payload is wrapped:
+ *     `{ args: <inner> }`. The `<inner>` field is the Typert parameter wire name —
+ *     `session/list` uses `_request`, almost everything else uses `request`, and a
+ *     few arg-less methods take `{}`.
+ *   • the event socket is a multiplexed Remote-stream WebSocket
+ *     `ws://…/api/remote.mux`. The client opens it, sends ONE `open` frame
+ *     `{ type:'open', streamId, endpoint:'$events', payload:{args:{}} }`, and the
+ *     Host replies with frames `{ type:'item'|'end'|'error', streamId, value }`.
+ *     The FIRST item's value is `{ type:'ready', clientId, host:{home} }` — that
+ *     is the only host-identity frame; there is NO `host.describe` in rc.2.
+ *   • history is `session/page` (unary), not `session/history`.
+ *   • approvals arrive as `approval/request` (a "waterfall" event) and are settled
+ *     via `POST /api/$events/result` with `{ clientId, eventId, outcome }` —
+ *     NOT `/api/respond`.
+ *   • rc.2 REQUIRES a browser-session cookie (401 without one); the autoSession /
+ *     token-exchange auth machinery is exercised in step E.
  *
  * Run:  npx tsx scripts/protocol-test.ts
  */
@@ -32,12 +37,17 @@ import { join } from 'node:path'
 import type { Duplex } from 'node:stream'
 import { BrowserSessionAuth } from '../src/harness/auth.ts'
 import { HarnessClient } from '../src/harness/client.ts'
-import type { MuxFrame } from '../src/harness/protocol.ts'
+import type { MuxFrame, ReadyFrame, RemoteEventResult } from '../src/harness/protocol.ts'
 import { ControlSurface } from '../src/conversation/control.ts'
 import { cookieNameForAuthority } from '../src/harness/auth.ts'
 import { negotiateWire, wireEndpoint } from '../src/harness/wire.ts'
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+
+/** Host home advertised in the `ready` frame. */
+const HOME = '/home/tester'
+/** clientId advertised in the `ready` frame. */
+const READY_CLIENT_ID = 'fake-client-0001'
 
 /** One durable session event, as the fold receives it. */
 function ev(type: string, data: unknown, seq = 0): { type: string; seq: number; time: number; data: unknown } {
@@ -63,11 +73,70 @@ function lastOf<T>(a: T[]): T | undefined {
   return a.length > 0 ? a[a.length - 1] : undefined
 }
 
+// ─── WebSocket helpers (minimal RFC 6455 server side) ─────────────────────────
+function wsAccept(socket: Duplex, key: string | undefined): void {
+  const accept = createHash('sha1').update((key ?? '') + WS_GUID).digest('base64')
+  socket.write([
+    'HTTP/1.1 101 Switching Protocols',
+    'Upgrade: websocket',
+    'Connection: Upgrade',
+    `Sec-WebSocket-Accept: ${accept}`,
+    '', '',
+  ].join('\r\n'))
+}
+function wsFrame(opcode: number, payload: Buffer): Buffer {
+  const header: number[] = [0x80 | opcode]
+  if (payload.length < 126) header.push(payload.length)
+  else { header.push(126, (payload.length >> 8) & 0xff, payload.length & 0xff) }
+  return Buffer.concat([Buffer.from(header), payload])
+}
+function wsSend(socket: Duplex, value: unknown): void {
+  try { socket.write(wsFrame(0x1, Buffer.from(JSON.stringify(value), 'utf8'))) } catch { /* closed */ }
+}
+function wsReadFrames(socket: Duplex, onText: (text: string) => void): void {
+  let buffer = Buffer.alloc(0)
+  socket.on('data', (chunk: Buffer) => {
+    buffer = Buffer.concat([buffer, chunk])
+    for (;;) {
+      if (buffer.length < 2) return
+      const opcode = (buffer[0] as number) & 0x0f
+      const b1 = buffer[1] as number
+      let length = b1 & 0x7f
+      let offset = 2
+      if (length === 126) {
+        if (buffer.length < 4) return
+        length = buffer.readUInt16BE(2)
+        offset = 4
+      }
+      const masked = (b1 & 0x80) !== 0
+      let key: Buffer | undefined
+      if (masked) {
+        if (buffer.length < offset + 4) return
+        key = buffer.subarray(offset, offset + 4)
+        offset += 4
+      }
+      if (buffer.length < offset + length) return
+      const payload = Buffer.from(buffer.subarray(offset, offset + length))
+      if (key !== undefined) {
+        for (let i = 0; i < payload.length; i++) payload[i] = (payload[i] as number) ^ (key[i % 4] as number)
+      }
+      buffer = buffer.subarray(offset + length)
+      if (opcode === 0x8) { try { socket.end() } catch { /* already gone */ } return }
+      if (opcode !== 0x1) continue
+      onText(payload.toString('utf8'))
+    }
+  })
+}
+
 // ─── fake harness ─────────────────────────────────────────────────────────────
 type AuthMode = 'none' | 'cookie'
+/**
+ * Control-surface methods that exist in 0.2.0-rc.2 (the exact `CONTROL_METHODS`
+ * set the client probes). Everything else is reported absent.
+ */
 const PRESENT_CONTROLS = new Set<string>([
-  'session/command', 'session/fork', 'session/rename', 'session/selectModel',
-  'workspace/archiveSession', 'agentPreset/list', 'llm/models', 'subagent/list',
+  'session/fork', 'session/rename', 'session/selectModel', 'session/updateQueue',
+  'workspace/archiveSession', 'session/page', 'workspace/create', 'session/modelCatalog',
 ])
 
 function okBody(value: unknown): string {
@@ -77,17 +146,34 @@ function failBody(code: string, message: string): string {
   return JSON.stringify({ type: 'server-response', rpcId: 'x', result: { ok: false, error: { code, message, details: {} } } })
 }
 
-/** One fake harness. `auth:'none'` = rc.6 (no cookie); `'cookie'` = gated host. */
+interface FakeMuxState {
+  open: boolean
+  streamId?: string
+  readySent: boolean
+  pending: Record<string, unknown>[]
+}
+
+/** One fake harness. `auth:'none'` = no cookie needed; `'cookie'` = gated host. */
 function makeHarness(auth: AuthMode, controls: Set<string>): {
   secret: Buffer
-  seen: { rpc: { endpoint: string; args: Record<string, unknown> }[]; responses: unknown[] }
+  seen: {
+    rpc: { endpoint: string; payload: Record<string, unknown>; inner: Record<string, unknown> }[]
+    responses: RemoteEventResult[]
+    muxOpened: boolean
+    muxPath: string | undefined
+  }
   pushFrame: (frame: Record<string, unknown>) => void
   start: () => Promise<number>
   stop: () => Promise<void>
 } {
   const secret = randomBytes(32)
-  const seen = { rpc: [] as { endpoint: string; args: Record<string, unknown> }[], responses: [] as unknown[] }
-  const muxSockets = new Set<Duplex>()
+  const seen = {
+    rpc: [] as { endpoint: string; payload: Record<string, unknown>; inner: Record<string, unknown> }[],
+    responses: [] as RemoteEventResult[],
+    muxOpened: false,
+    muxPath: undefined as string | undefined,
+  }
+  const muxSockets = new Map<Duplex, FakeMuxState>()
 
   const cookieName = (authority: string): string => cookieNameForAuthority(authority)
   function mintCookie(authority: string): string {
@@ -116,52 +202,54 @@ function makeHarness(auth: AuthMode, controls: Set<string>): {
   }
 
   function dispatch(endpoint: string, args: Record<string, unknown>): { status: number; body: string } {
+    const missing = (): { status: number; body: string } => ({ status: 404, body: 'not found' })
     switch (endpoint) {
-      case 'session.list':
+      case 'session/list':
         return { status: 200, body: okBody({ items: [{ sessionId: 'session-1', updatedAt: 2, running: false, blank: false }] }) }
-      case 'host.describe':
-        return { status: 200, body: okBody({ version: '0.1.0-rc.6', cwd: '/home/tester', provider: 'deepseek-official', model: 'deepseek-v4-pro' }) }
-      case 'session.history':
-        return { status: 200, body: okBody({ events: [{ event: { type: 'user/message', seq: 0, time: 1, data: { content: [{ type: 'text', text: 'hi' }] } } }], hasMore: false }) }
-      case 'workspace.list':
-        return { status: 200, body: okBody({ items: [{ workspaceId: 'ws-1', path: '/tmp/ws', title: 'ws', sessionIds: ['session-1'], createdAt: 'x', updatedAt: 'y' }], archivedSessionIds: [] }) }
-      case 'workspace.create': {
-        const path = typeof args['path'] === 'string' ? args['path'] : '/tmp/new'
+      case 'session/page':
+        return controls.has('session/page') ? { status: 200, body: okBody({ records: [{ type: 'event', event: { type: 'user/message', seq: 0, time: 1, data: { content: [{ type: 'text', text: 'hi' }] } } }], hasMore: false }) } : missing()
+      case 'workspace/create': {
+        if (!controls.has('workspace/create')) return missing()
+        const inner = (args['request'] as Record<string, unknown> | undefined) ?? args
+        const path = typeof inner['path'] === 'string' ? (inner['path'] as string) : '/tmp/new'
         return { status: 200, body: okBody({ workspace: { workspaceId: 'ws-new', path, title: 'new', sessionIds: [], createdAt: 'x', updatedAt: 'y' }, created: true }) }
       }
-      case 'session.prompt':
+      case 'session/prompt':
         return { status: 200, body: okBody({ accepted: true }) }
-      case 'session.cancel':
+      case 'session/cancel':
         return { status: 200, body: okBody({ accepted: true }) }
-      case 'session.command':
-        return controls.has('session/command') ? { status: 200, body: okBody({ matched: true }) } : { status: 404, body: 'not found' }
-      case 'session.fork':
-        return controls.has('session/fork') ? { status: 200, body: okBody({ sessionId: 'session-2' }) } : { status: 404, body: 'not found' }
-      case 'session.rename': {
-        if (!controls.has('session/rename')) return { status: 404, body: 'not found' }
-        const title = String((args['request'] as Record<string, unknown> | undefined)?.['title'] ?? args['title'] ?? 'untitled')
+      case 'session/fork':
+        return controls.has('session/fork') ? { status: 200, body: okBody({ sessionId: 'session-2' }) } : missing()
+      case 'session/rename': {
+        if (!controls.has('session/rename')) return missing()
+        const inner = (args['request'] as Record<string, unknown> | undefined) ?? {}
+        const title = String(inner['title'] ?? 'untitled')
         return { status: 200, body: okBody({ title, seq: 12 }) }
       }
-      case 'session.selectModel':
-        return controls.has('session/selectModel') ? { status: 200, body: okBody({ accepted: true }) } : { status: 404, body: 'not found' }
-      case 'workspace.archiveSession':
-        return controls.has('workspace/archiveSession') ? { status: 200, body: okBody({ accepted: true }) } : { status: 404, body: 'not found' }
-      case 'agentPreset.list':
-        return controls.has('agentPreset/list') ? { status: 200, body: okBody({ items: [] }) } : { status: 404, body: 'not found' }
-      case 'llm.models':
-        return controls.has('llm/models') ? { status: 200, body: okBody({ models: [] }) } : { status: 404, body: 'not found' }
-      case 'subagent.list': {
-        if (!controls.has('subagent/list')) return { status: 404, body: 'not found' }
-        // Empty args = a capability probe: a shape rejection proves existence.
-        if (Object.keys(args).length === 0) return { status: 200, body: failBody('invalid_argument', 'missing declared parameter `agentId`') }
-        return { status: 200, body: okBody({ items: [] }) }
-      }
-      case 'session.updateQueue':
-      case 'agentPreset.select':
-      case 'subagent.interrupt':
-        return { status: 404, body: 'not found' }
+      case 'session/selectModel':
+        return controls.has('session/selectModel') ? { status: 200, body: okBody({ accepted: true }) } : missing()
+      case 'session/updateQueue':
+        return controls.has('session/updateQueue') ? { status: 200, body: okBody({ accepted: true }) } : missing()
+      case 'workspace/archiveSession':
+        return controls.has('workspace/archiveSession') ? { status: 200, body: okBody({ accepted: true }) } : missing()
+      case 'session/modelCatalog':
+        return controls.has('session/modelCatalog')
+          ? { status: 200, body: okBody({ models: [{ id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' }] }) }
+          : missing()
+      // rc.2 does NOT serve any of these — they must be reported as absent.
+      case 'session/command':
+      case 'agentPreset/list':
+      case 'agentPreset/select':
+      case 'llm/models':
+      case 'subagent/list':
+      case 'subagent/interrupt':
+      case 'host/describe':
+      case 'workspace/list':
+      case 'session/history':
+      case 'goal/create':
+        return missing()
       default:
-        return { status: 404, body: 'not found' }
+        return missing()
     }
   }
 
@@ -185,7 +273,7 @@ function makeHarness(auth: AuthMode, controls: Set<string>): {
         res.end()
         return
       }
-      // rc.6 has no token exchange at all.
+      // rc.2 auth-less host: root is a health ping.
       res.writeHead(200)
       res.end()
       return
@@ -198,7 +286,7 @@ function makeHarness(auth: AuthMode, controls: Set<string>): {
     }
 
     if (req.method !== 'POST') {
-      if (url.pathname === '/api/events.mux') { res.writeHead(200); res.end(); return }
+      // `/api/remote.mux` etc. are WebSocket upgrades, not GET routes.
       res.writeHead(404)
       res.end()
       return
@@ -208,73 +296,28 @@ function makeHarness(auth: AuthMode, controls: Set<string>): {
     req.on('data', (c: Buffer) => { chunks.push(c) })
     req.on('end', () => {
       const raw = Buffer.concat(chunks).toString('utf8')
-      if (url.pathname === '/api/respond') {
-        const body = JSON.parse(raw) as { result?: unknown }
-        seen.responses.push(body.result)
+      const body = JSON.parse(raw) as { rpcId?: string; method?: string; payload?: Record<string, unknown> }
+      const endpoint = url.pathname.replace(/^\/api\//, '')
+      if (endpoint === '$events/result') {
+        const a = (body.payload as { args?: RemoteEventResult } | undefined)?.args
+        if (a !== undefined) seen.responses.push(a)
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(okBody(null))
         return
       }
-      const body = JSON.parse(raw) as { rpcId?: string; method?: string; payload?: Record<string, unknown> }
-      const endpoint = url.pathname.replace(/^\/api\//, '')
-      const args = body.payload ?? {}
-      seen.rpc.push({ endpoint, args })
+      const args = (body.payload as { args?: Record<string, unknown> } | undefined)?.args ?? {}
+      seen.rpc.push({ endpoint, payload: body.payload ?? {}, inner: args })
       const out = dispatch(endpoint, args)
       res.writeHead(out.status, { 'content-type': 'application/json' })
       res.end(out.body)
     })
   })
 
-  // ─── minimal server-side WebSocket (RFC 6455, unmasked downlink) ────────────
-  function frame(opcode: number, payload: Buffer): Buffer {
-    const header: number[] = [0x80 | opcode]
-    if (payload.length < 126) header.push(payload.length)
-    else header.push(126, (payload.length >> 8) & 0xff, payload.length & 0xff)
-    return Buffer.concat([Buffer.from(header), payload])
-  }
-  function sendText(socket: Duplex, value: unknown): void {
-    socket.write(frame(0x1, Buffer.from(JSON.stringify(value), 'utf8')))
-  }
-  function readFrames(socket: Duplex, onText: (text: string) => void): void {
-    let buffer = Buffer.alloc(0)
-    socket.on('data', (chunk: Buffer) => {
-      buffer = Buffer.concat([buffer, chunk])
-      for (;;) {
-        if (buffer.length < 2) return
-        const opcode = (buffer[0] as number) & 0x0f
-        const b1 = buffer[1] as number
-        let length = b1 & 0x7f
-        let offset = 2
-        if (length === 126) {
-          if (buffer.length < 4) return
-          length = buffer.readUInt16BE(2)
-          offset = 4
-        }
-        const masked = (b1 & 0x80) !== 0
-        let key: Buffer | undefined
-        if (masked) {
-          if (buffer.length < offset + 4) return
-          key = buffer.subarray(offset, offset + 4)
-          offset += 4
-        }
-        if (buffer.length < offset + length) return
-        const payload = Buffer.from(buffer.subarray(offset, offset + length))
-        if (key !== undefined) {
-          for (let i = 0; i < payload.length; i++) payload[i] = (payload[i] as number) ^ (key[i % 4] as number)
-        }
-        buffer = buffer.subarray(offset + length)
-        if (opcode === 0x8) { try { socket.end() } catch { /* already gone */ } return }
-        if (opcode !== 0x1) continue
-        onText(payload.toString('utf8'))
-      }
-    })
-  }
-
   server.on('upgrade', (req, socket, _head) => {
     const pathname = new URL(req.url ?? '/', 'http://dsh.invalid').pathname
-    if (pathname !== '/api/events.mux') {
-      socket.write('HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n')
-      void socket.destroy()
+    if (pathname !== '/api/remote.mux') {
+      socket.write('HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+      socket.end()
       return
     }
     if (auth === 'cookie' && !authenticated(req)) {
@@ -282,19 +325,25 @@ function makeHarness(auth: AuthMode, controls: Set<string>): {
       void socket.destroy()
       return
     }
-    const accept = createHash('sha1')
-      .update((req.headers['sec-websocket-key'] ?? '') + WS_GUID)
-      .digest('base64')
-    socket.write([
-      'HTTP/1.1 101 Switching Protocols',
-      'Upgrade: websocket',
-      'Connection: Upgrade',
-      `Sec-WebSocket-Accept: ${accept}`,
-      '', '',
-    ].join('\r\n'))
-    muxSockets.add(socket)
-    readFrames(socket, () => {})
-    const drop = (): void => { muxSockets.delete(socket) }
+    wsAccept(socket, req.headers['sec-websocket-key'] as string | undefined)
+    seen.muxOpened = true
+    seen.muxPath = pathname
+    const st: FakeMuxState = { open: true, readySent: false, pending: [] }
+    muxSockets.set(socket, st)
+    wsReadFrames(socket, (text) => {
+      let msg: { type?: unknown; streamId?: unknown }
+      try { msg = JSON.parse(text) as { type?: unknown; streamId?: unknown } } catch { return }
+      if (msg.type === 'open' && typeof msg.streamId === 'string') {
+        st.streamId = msg.streamId
+        if (!st.readySent) {
+          st.readySent = true
+          wsSend(socket, { type: 'item', streamId: msg.streamId, value: { type: 'ready', clientId: READY_CLIENT_ID, host: { home: HOME } } as ReadyFrame })
+        }
+        for (const f of st.pending) wsSend(socket, { type: 'item', streamId: msg.streamId, value: f })
+        st.pending = []
+      }
+    })
+    const drop = (): void => { st.open = false }
     socket.on('close', drop)
     socket.on('error', drop)
   })
@@ -303,12 +352,14 @@ function makeHarness(auth: AuthMode, controls: Set<string>): {
     secret,
     seen,
     pushFrame: (frameObj: Record<string, unknown>) => {
-      for (const s of muxSockets) sendText(s, { type: 'server-request', payload: frameObj })
+      for (const [socket, st] of muxSockets) {
+        if (!st.open) continue
+        if (st.streamId === undefined) { st.pending.push(frameObj); continue }
+        wsSend(socket, { type: 'item', streamId: st.streamId, value: frameObj })
+      }
     },
     start: () => new Promise<number>((resolve) => {
-      server.listen(0, '127.0.0.1', () => {
-        resolve((server.address() as { port: number }).port)
-      })
+      server.listen(0, '127.0.0.1', () => { resolve((server.address() as { port: number }).port) })
     }),
     stop: () => new Promise<void>((resolve) => { server.close(() => { resolve() }) }),
   }
@@ -316,56 +367,56 @@ function makeHarness(auth: AuthMode, controls: Set<string>): {
 
 // ─── the actual test ─────────────────────────────────────────────────────────
 async function main(): Promise<void> {
-  // A. rc.6 harness — no cookie auth, full control surface.
+  // A. rc.2 harness — full control surface, no cookie needed for the probe.
   const harness = makeHarness('none', PRESENT_CONTROLS)
   const port = await harness.start()
-  console.log(`\nfake rc.6 harness listening on 127.0.0.1:${String(port)}\n`)
+  console.log(`\nfake rc.2 harness listening on 127.0.0.1:${String(port)}\n`)
 
   const noopAuth = new BrowserSessionAuth({
     host: '127.0.0.1', port, store: { load: async () => undefined, save: async () => {} }, log: () => {},
   })
   const client = new HarnessClient({ host: '127.0.0.1', port, auth: noopAuth, log: () => {} })
 
-  // 01. rc.6 has no cookie auth: connect succeeds with no pasted session.
+  // 01. rc.2 connect: no pasted session required, identity from the `ready` frame.
   await client.connect()
   const conn = client.getState()
-  check('rc.6 connect succeeds without a pasted session', conn.kind === 'connected', conn.kind)
-  check('host identity comes from host.describe cwd', conn.kind === 'connected' && conn.info.home === '/home/tester', conn.kind === 'connected' ? conn.info.home : '')
-  eq('host.describe version is reported', conn.kind === 'connected' ? conn.info.version : '', '0.1.0-rc.6')
+  check('rc.2 connect succeeds without a pasted session', conn.kind === 'connected', conn.kind)
+  check('host identity comes from the ready frame (home)', conn.kind === 'connected' && conn.info.home === HOME, conn.kind === 'connected' ? conn.info.home : '')
+  check('rc.2 has no host.describe: version is not transmitted', conn.kind === 'connected' && conn.info.version === undefined, conn.kind === 'connected' ? String(conn.info.version) : '')
 
-  // 02. Unary RPCs speak the rc.6 contract: dot endpoint, payload is args directly.
-  const listRpcs = harness.seen.rpc.filter((r) => r.endpoint === 'session.list')
-  check('session.list is called dot-style (POST /api/session.list)', listRpcs.length > 0)
-  check('unary payload is the args object directly (no `{args}` wrapper)',
-    listRpcs.every((r) => !('args' in r.args)))
-  check('the mux socket was opened (downlink-only, no `ready` frame expected)',
-    harness.seen.rpc.some((r) => r.endpoint === 'host.describe'))
+  // 02. Unary RPCs speak the rc.2 contract: slash endpoint, payload wrapped in {args}.
+  const listRpcs = harness.seen.rpc.filter((r) => r.endpoint === 'session/list')
+  check('session/list is called slash-style (POST /api/session/list)', listRpcs.length > 0)
+  check('unary payload is wrapped in {args:{...}} (never the args directly)',
+    listRpcs.every((r) => 'args' in (r.payload as Record<string, unknown>)))
+  check('the mux socket was opened at /api/remote.mux', harness.seen.muxOpened && harness.seen.muxPath === '/api/remote.mux', String(harness.seen.muxPath))
 
   // 03. Listing works.
   const sessions = await client.listSessions()
   eq('session/list returns the host list', sessions.items.length, 1)
   const workspaces = await client.listWorkspaces()
-  eq('workspace/list returns items', workspaces.items[0]?.workspaceId, 'ws-1')
+  eq('rc.2 has no workspace/list: listWorkspaces is empty', workspaces.items.length, 0)
 
   // 04. createWorkspace.
   const created = await client.createWorkspace('/tmp/new')
   check('workspace/create resolves with a workspace view', created.workspace.workspaceId === 'ws-new' && created.created === true)
 
-  // 05. prompt / cancel — payload is flat, not nested under `request`.
+  // 05. prompt / cancel — inner args wrapped under `request`.
   await client.prompt('session-1', 'hello', 'UTC')
   await client.cancel('session-1')
-  const promptRpc = harness.seen.rpc.find((r) => r.endpoint === 'session.prompt')
-  eq('session/prompt payload is flat (sessionId/mode/content)',
-    promptRpc?.args,
-    { sessionId: 'session-1', mode: 'queue', content: [{ type: 'text', text: 'hello' }], clientTimeZone: 'UTC' })
+  const promptRpc = harness.seen.rpc.find((r) => r.endpoint === 'session/prompt')
+  eq('session/prompt inner is {request:{...}}', promptRpc?.inner as Record<string, unknown>,
+    { request: { sessionId: 'session-1', mode: 'queue', content: [{ type: 'text', text: 'hello' }], clientTimeZone: 'UTC' } })
 
-  // 06. history arrives from a unary RPC, not a follow stream.
+  // 06. history arrives from session/page (a unary RPC), not session/history.
   const history = await client.getHistory('session-1', { maxMessages: 50 })
-  eq('session.history returns the events', history.events[0]?.event.type, 'user/message')
-  eq('session.history reports hasMore', history.hasMore, false)
+  eq('session/page returns the events (no session/history)', history.events[0]?.event.type, 'user/message')
+  eq('session/page reports hasMore', history.hasMore, false)
+  check('the history RPC is session/page, not session/history',
+    harness.seen.rpc.some((r) => r.endpoint === 'session/page') && !harness.seen.rpc.some((r) => r.endpoint === 'session/history'))
 
-  // 07. The event stream: downlink-only, no `ready`, assistant deltas ride
-  //     `session/event` frames with event.type === 'assistant/chunk'.
+  // 07. The event stream: multiplexed Remote stream; the client opens `$events`
+  //     and receives `session/event` frames (assistant chunks ride them too).
   const frames: MuxFrame[] = []
   client.subscribe('session-1', (batch) => { frames.push(...batch) })
   harness.pushFrame({ type: 'session/subscribed', sessionId: 'session-1', lastSeq: 2 })
@@ -379,47 +430,43 @@ async function main(): Promise<void> {
   const chunks = frames.filter((f) => f.type === 'session/event' && (f as { event?: { type?: string } }).event?.type === 'assistant/chunk')
   check('assistant deltas arrive as session/event assistant/chunk (no separate assistant/stream)', chunks.length === 2, `${String(chunks.length)} chunk frame(s)`)
 
-  // 08. Approvals: server pushes approval/requested; client answers via /api/respond.
+  // 08. Approvals: server pushes the WIRE event `approval/request`; the client
+  //     translates it to `approval/requested` and the answer goes to
+  //     POST /api/$events/result (not /api/respond).
   const approvals: { frame: MuxFrame; eventId: string }[] = []
   client.onApprovalFrame((frame, eventId) => approvals.push({ frame, eventId }))
-  harness.pushFrame({ type: 'approval/requested', sessionId: 'session-1', approvalId: 'evt-2', toolName: 'write', callId: 'call-2', reason: 'outside workspace' })
+  harness.pushFrame({ type: 'approval/request', eventId: 'evt-2', request: { sessionId: 'session-1', toolName: 'write', callId: 'call-2', reason: 'outside workspace' } })
   await wait(80)
   const approval = approvals.find((a) => a.eventId === 'evt-2')
-  check('the approval reaches the approval listener', approval !== undefined)
-  check('the approval frame carries the session id', approval?.frame.type === 'approval/requested' && (approval.frame as { sessionId?: string }).sessionId === 'session-1')
+  check('the wire approval/request reaches the listener as approval/requested', approval?.frame.type === 'approval/requested')
+  check('the translated frame carries the session id', (approval?.frame as { sessionId?: string } | undefined)?.sessionId === 'session-1')
   await client.respondApproval('evt-2', 'allowed-once')
   await wait(80)
-  eq('the /api/respond body carries sessionId/approvalId/outcome',
-    lastOf(harness.seen.responses) as Record<string, unknown>,
-    { sessionId: 'session-1', approvalId: 'evt-2', outcome: 'allowed-once' })
+  eq('the /api/$events/result body carries clientId/eventId/outcome{kind:result}',
+    lastOf(harness.seen.responses) as unknown as Record<string, unknown>,
+    { clientId: READY_CLIENT_ID, eventId: 'evt-2', outcome: { kind: 'result' } })
 
   // 09. Control surface: discovered by probing, only offered when served.
   const caps = client.capabilities()
-  check('served control methods are recorded as present',
-    caps['session/command'] === true && caps['session/fork'] === true && caps['session/rename'] === true)
-  check('a method answering HTTP 404 is recorded as absent', caps['session/updateQueue'] !== true)
-  check('a not-found business error is recorded as absent', caps['agentPreset/select'] !== true)
-  check('a shape-rejection still proves the method exists', caps['subagent/list'] === true)
+  check('all rc.2 control methods are recorded as present',
+    caps['session/fork'] === true && caps['session/rename'] === true && caps['session/selectModel'] === true
+    && caps['session/updateQueue'] === true && caps['workspace/archiveSession'] === true && caps['session/page'] === true
+    && caps['workspace/create'] === true && caps['session/modelCatalog'] === true)
+  check('session/command is NOT served in rc.2 (capability gate), so it reads absent',
+    caps['session/command'] !== true)
+  check('a 404 (not-found) method probe records absence', caps['agentPreset/list'] !== true)
 
-  await client.setPermissionPreset('session-1', 'workspace-write')
-  // (The capability probe also POSTs session/command with `{}`; match by the line.)
-  const permCmd = harness.seen.rpc.find(
-    (r) => r.endpoint === 'session.command'
-      && (r.args as { request?: { line?: string } }).request?.line === '/permission workspace-write',
-  )
-  check('a preset switch goes out as session/command', permCmd !== undefined)
-  eq('setPermissionPreset sends the /permission line',
-    (permCmd?.args as { request?: { line?: string } }).request?.line, '/permission workspace-write')
-  await client.togglePlanMode('session-1')
-  check('plan mode toggles through /plan',
-    harness.seen.rpc.some((r) => r.endpoint === 'session.command' && (r.args as { request?: { line?: string } }).request?.line === '/plan'))
-  await client.compactSession('session-1')
-  check('compaction requests /compact',
-    harness.seen.rpc.some((r) => r.endpoint === 'session.command' && (r.args as { request?: { line?: string } }).request?.line === '/compact'))
+  // 10. Control methods that DO exist are callable.
   eq('fork returns the child session id', await client.forkSession('session-1'), 'session-2')
   eq('rename returns the accepted title', (await client.renameSession('session-1', 'My title')).title, 'My title')
   check('archive answers without throwing', (await client.archiveSession('session-1')) !== undefined)
   check('selectModel answers without throwing', (await client.selectModel('session-1', 'deepseek-v4-pro')) !== undefined)
+
+  // 11. Control methods that DON'T exist degrade to a clear, actionable error.
+  let cmdMsg = ''
+  try { await client.runCommand('session-1', '/permission workspace-write') } catch (e) { cmdMsg = (e as Error).message }
+  check('a non-served control (session/command) is refused with a clear message',
+    /session\/command/.test(cmdMsg) && /does not serve/.test(cmdMsg), cmdMsg.slice(0, 120))
 
   client.dispose()
   await harness.stop()
@@ -435,13 +482,9 @@ async function main(): Promise<void> {
     const bareClient = new HarnessClient({ host: '127.0.0.1', port: barePort, auth: bareAuth, log: () => {} })
     await bareClient.connect()
     check('a host with no control surface still connects', bareClient.getState().kind === 'connected')
-    check('a host without a control surface is probed as having none',
+    check('every control method is probed as absent',
       Object.values(bareClient.capabilities()).every((v) => v !== true),
       JSON.stringify(bareClient.capabilities()))
-    let bareMsg = ''
-    try { await bareClient.runCommand('session-1', '/plan') } catch (e) { bareMsg = (e as Error).message }
-    check('an unserved control names the missing endpoint',
-      /session\/command/.test(bareMsg) && /does not serve/.test(bareMsg), bareMsg.slice(0, 110))
     bareClient.dispose()
     await bare.stop()
   }
@@ -451,14 +494,26 @@ async function main(): Promise<void> {
     // A dot-style (legacy) host: dot endpoints, /api/events.mux, no cookie.
     const legacy = http.createServer((req, res) => {
       const url = new URL(req.url ?? '/', 'http://dsh.invalid')
-      if (req.method !== 'POST') {
-        res.writeHead(url.pathname === '/api/events.mux' ? 200 : 404)
-        res.end()
-        return
-      }
+      if (req.method !== 'POST') { res.writeHead(404); res.end(); return }
       if (url.pathname !== '/api/session.list') { res.writeHead(404); res.end(); return }
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(okBody({ items: [] }))
+    })
+    legacy.on('upgrade', (req, socket, _head) => {
+      const pathname = new URL(req.url ?? '/', 'http://dsh.invalid').pathname
+      if (pathname !== '/api/events.mux') {
+        // A clean 404 + end (NOT socket.destroy()) so the shared HTTP server is
+        // not corrupted for the next probe on this connection.
+        socket.write('HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+        socket.end()
+        return
+      }
+      wsAccept(socket, req.headers['sec-websocket-key'] as string | undefined)
+      // Read the socket so the client's close frame is consumed and the HTTP
+      // server can finish closing (otherwise `legacy.close()` never fires).
+      wsReadFrames(socket, () => {})
+      socket.on('close', () => {})
+      socket.on('error', () => {})
     })
     await new Promise<void>((resolve) => { legacy.listen(0, '127.0.0.1', () => { resolve() }) })
     const legacyPort = (legacy.address() as { port: number }).port
@@ -530,11 +585,12 @@ async function main(): Promise<void> {
     check('the cookie is persisted', typeof persisted === 'string' && persisted.includes('dsh-auth-'))
     check('the auth reports itself ready', auth.isReady())
 
-    // E4. Connect now succeeds (cookie accepted) and discovers the host identity.
+    // E4. Connect now succeeds (cookie accepted) and learns the host identity from the `ready` frame.
     await gatedClient.connect()
     const gconn = gatedClient.getState()
     check('connect succeeds with a session', gconn.kind === 'connected', gconn.kind)
-    eq('home comes from host.describe', gconn.kind === 'connected' ? gconn.info.home : '', '/home/tester')
+    eq('home comes from the ready frame', gconn.kind === 'connected' ? gconn.info.home : '', HOME)
+    check('no version is transmitted in rc.2', gconn.kind === 'connected' && gconn.info.version === undefined)
     gatedClient.dispose()
 
     // E5. The cookie survives a restart (signing secret persists) without a new token.

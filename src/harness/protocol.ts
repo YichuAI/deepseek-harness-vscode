@@ -1,30 +1,39 @@
 /**
  * Wire protocol types — a faithful, dependency-free mirror of the DeepSeek
  * Harness Remote contract as implemented by the installed `dsh web` runtime
- * (observed against the bundled `@deepseek-ai/dsh-client-connection` 0.1.0-rc.6).
+ * (observed against the bundled `@deepseek-ai/dsh-*` 0.2.0-rc.2 packages).
  *
  * This file is the single source of truth for everything that crosses the
  * network. Authoritative shapes (read from the installed runtime, not guessed):
  *
- *   packages/client/connection/src/client.js        envelope + `/api/<method>`
- *   packages/client/connection/src/client.js        `api.events.mux`  (downlink)
- *   packages/client/connection/src/client.js        `api.events.host` (downlink)
- *   packages/client/connection/src/client.js        `muxFrameSchema` / `hostFrameSchema`
+ *   dsh-api-gateway/lib/types/stream-protocol.js   REMOTE_STREAM_MUX_PATH,
+ *                                                   remote stream frame shapes
+ *   dsh-api-gateway/lib/client.js                  remoteStreamUrl(), openStream
+ *   dsh-client-connection/lib/client.js            createWebConnectionRpc.call
+ *   dsh-api-remotes/lib/client.js                 per-method arg `wire` names
  *
- * Three shape rules are load-bearing and were wrong in earlier plugin versions:
+ * Load-bearing facts that differ from the earlier (broken) rc.6 model:
  *
- *   1. Endpoints are `namespace/method` rendered dot-style on the wire:
- *      `POST /api/session.list` (never `session/list`). The Host splits the
- *      path after `/api/` and the gateway resolves `namespace` + `method`.
- *   2. Request payloads are the *args object directly* — NOT wrapped in
- *      `{ args: … }`. `callUnary(method, payload)` posts
- *      `{ type:'client-request', rpcId, method, payload }` where `payload` is
- *      the declared-parameter object (e.g. `{ request: { sessionId } }`).
- *   3. The event socket is a **downlink-only WebSocket**. The browser opens
- *      `ws://host:port/api/events.mux` (or `/api/events.host`) and the Host
- *      pushes `server-request` envelopes; each frame is `envelope.payload`.
- *      There is NO `ready` frame and the client never sends anything on it —
- *      connection-open IS the ready signal.
+ *   1. Endpoints are `namespace/method` rendered **slash-style** on the wire:
+ *      `POST /api/session/list` (never `session.list`). The Host maps the path
+ *      `/api/<endpoint>` to a Typert service+method.
+ *   2. Request payloads are wrapped: `payload: { args: <inner> }`. The `<inner>`
+ *      object's field name is the Typert parameter wire name — `session/list`
+ *      uses `_request`, almost every other method uses `request`, and a few
+ *      (modelCatalog, listProviders) take no args at all (`{ args: {} }`).
+ *   3. The event socket is a **multiplexed Remote stream WebSocket**. The client
+ *      opens `ws://host:port/api/remote.mux`, then sends one `open` frame
+ *      `{ type:'open', streamId, endpoint:'$events', payload:{args:{}} }`. The
+ *      Host pushes frames `{ type:'item'|'end'|'error', streamId, value }`; for
+ *      the `$events` stream each `item.value` is a MuxFrame. The FIRST item's
+ *      value is `{ type:'ready', clientId, host:{ home } }` — that is the only
+ *      host-identity frame; there is NO `host.describe` in 0.2.0-rc.2.
+ *   4. Approvals arrive as `approval/request` (a "waterfall" event) and are
+ *      answered by the unary RPC `POST /api/$events/result` with
+ *      `{ clientId, eventId, outcome }` — NOT by `POST /api/respond`.
+ *   5. History is `session/page` (unary), not `session/history`:
+ *      `{ address:{kind:'session',sessionId}, throughSeq, beforeSeq?, maxMessages? }`
+ *      → `{ records:[{type:'event',event}], hasMore }`.
  *
  * The harness protocol is merge-extensible: unknown event/frame types MUST be
  * ignored by callers, so every union here is treated as open.
@@ -53,19 +62,12 @@ export interface ServerResponse<V = unknown> {
   result: { ok: true; value: V } | { ok: false; error: RpcError }
 }
 
-/** Server-initiated message — delivered on the downlink event WebSockets. */
+/** Server-initiated message — delivered on the downlink event WebSocket. */
 export interface ServerRequest<P = unknown> {
   type: 'server-request'
   rpcId: RpcId
   method: string
   payload: P
-}
-
-/** Client answer to a ServerRequest (used by `POST /api/respond`). */
-export interface ClientResponse<V = unknown> {
-  type: 'client-response'
-  rpcId: RpcId
-  result: V
 }
 
 export interface RpcError {
@@ -76,36 +78,72 @@ export interface RpcError {
 
 // ─── harness identity ────────────────────────────────────────────────────────
 /**
- * What the plugin knows about the host. rc.6 serves `host.describe` (called once
- * at connect) which returns version/cwd/provider/model. The event stream has no
- * `ready` frame — connection-open is the ready signal.
+ * What the plugin knows about the host. 0.2.0-rc.2 supplies this from the
+ * `ready` frame only (`host.home` + `clientId`). `version` is a build-time
+ * constant the host never transmits; `provider`/`model` are per-session and are
+ * best-effort populated from `session/list` projections when present.
  */
 export interface HarnessInfo {
   /** Host account home, used only to abbreviate displayed paths. */
   home: string
-  /** Opaque id of this client event generation (from `host.describe`, if any). */
+  /** Opaque id of this client event generation (from the `ready` frame). */
   clientId?: string
+  /** Unavailable in 0.2.0-rc.2 (host never sends it); kept optional. */
   version?: string
   provider?: string
   model?: string
 }
 
-// ─── event socket routes (from the runtime's `api-path.js`) ───────────────────
-/** Browser mux-frame WebSocket pathname (downlink-only). */
-export const EVENTS_MUX_PATH = '/api/events.mux'
-/** Browser host-frame WebSocket pathname (downlink-only). */
-export const EVENTS_HOST_PATH = '/api/events.host'
+// ─── Remote stream (multiplexed event WebSocket) ─────────────────────────────
+/** Browser Remote-stream WebSocket pathname. */
+export const REMOTE_MUX_PATH = '/api/remote.mux'
+/** Logical stream the client opens to receive forwarded harness events. */
+export const REMOTE_EVENT_STREAM_ENDPOINT = '$events'
 
-// ─── mux frames (the runtime's `muxFrameSchema`) ─────────────────────────────
+/** Client→Host: open a logical stream. */
+export interface RemoteStreamOpen {
+  type: 'open'
+  streamId: string
+  endpoint: string
+  payload: { args: Record<string, unknown> }
+}
+
+/** Host→Client: a frame on a logical stream. */
+export type RemoteStreamServerMessage =
+  | { type: 'item'; streamId: string; value?: unknown }
+  | { type: 'end'; streamId: string }
+  | { type: 'error'; streamId: string; error: RpcError }
+
+/** The `ready` item — the only host-identity frame (always first on `$events`). */
+export interface ReadyFrame {
+  type: 'ready'
+  clientId: string
+  host: { home: string }
+}
+
+/** Body of `POST /api/$events/result` — the approval/question answer. */
+export interface RemoteEventResult {
+  clientId: string
+  eventId: string
+  outcome:
+    | { kind: 'next' }
+    | { kind: 'result'; value?: unknown }
+    | { kind: 'rejected'; error: { name: string; message: string; code?: string; details?: unknown } }
+}
+
+// ─── mux frames (the runtime's forwarded event union) ────────────────────────
 /**
- * One frame on `/api/events.mux`. Each is the `payload` of a `server-request`
- * envelope pushed by the Host. `sessionId` scopes the per-session frames; the
- * conversation model and control surface consume these directly.
+ * One event on the `$events` stream. Each is the `value` of a Remote stream
+ * `item`. `sessionId` scopes the per-session frames; the conversation model and
+ * control surface consume these directly. This is the plugin's INTERNAL
+ * vocabulary: the harness client translates the wire event names
+ * (`approval/request`, `user-questions/request`, …) into these before they
+ * reach the UI, so the rest of the extension never sees the raw wire names.
  */
 export type MuxFrame =
   | { type: 'session/event'; sessionId: SessionId; event: SessionEvent; view?: ToolEventView }
   | { type: 'session/subscribed'; sessionId: SessionId; lastSeq: number }
-  | { type: 'approval/requested'; sessionId: SessionId; approvalId: string; toolName: string; callId?: string; reason?: string }
+  | { type: 'approval/requested'; sessionId: SessionId; approvalId: string; toolName?: string; callId?: string; reason?: string }
   | { type: 'approval/resolved'; sessionId: SessionId; approvalId: string; outcome: 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable' }
   | { type: 'question/requested'; sessionId: SessionId; questions: unknown[] }
   | { type: 'question/resolved'; sessionId: SessionId; questionRpcId: RpcId; outcome: 'answered' | 'cancelled' }
@@ -115,42 +153,14 @@ export type MuxFrame =
   | { type: 'stream/error'; error: RpcError }
   | { type: string; [k: string]: unknown }
 
-// ─── host frames (the runtime's `hostFrameSchema`) ───────────────────────────
-/** One frame on `/api/events.host` — host-wide, not session-scoped. */
-export type HostFrame =
-  | { type: 'host/session-added'; sessionId: SessionId; blank: boolean; parentSessionId?: SessionId; origin?: 'subagent'; cwd?: string; agentPreset?: string }
-  | { type: 'host/session-removed'; sessionId: SessionId }
-  | { type: 'host/session-status'; sessionId: SessionId; running: boolean }
-  | { type: 'host/agent-error'; sessionId: SessionId; message: string }
-  | { type: 'host/workspace-changed'; workspace: WorkspaceView }
-  | { type: 'host/workspace-removed'; workspaceId: WorkspaceId }
-  | { type: 'host/workspace-order-changed'; workspaceIds: WorkspaceId[] }
-  | { type: 'host/archived-sessions-changed'; archivedSessionIds: SessionId[] }
-  | { type: 'host/remote-event'; event: string; args: unknown[] }
-  | { type: 'stream/error'; error: RpcError }
-  | { type: string; [k: string]: unknown }
-
 // ─── approvals ───────────────────────────────────────────────────────────────
 /** Host-side outcome of one approval waterfall (mirrors the runtime union). */
 export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
 
-/** Body POSTed to `/api/respond` to settle an approval (a `client-response`). */
-export interface ApprovalRespondRequest {
-  sessionId: SessionId
-  approvalId: string
-  outcome: 'allowed-once' | 'rejected'
-}
-
-// ─── host.describe ──────────────────────────────────────────────────────────
-/** Response of `host.describe` (called once at connect). */
-export interface HostDescribeValue {
-  version: string
-  cwd: string
-  provider?: string
-  model?: string
-  reasoningEffort?: string
-  [k: string]: unknown
-}
+/** Wire outcome sent to `POST /api/$events/result`. */
+export type RemoteEventOutcome =
+  | { kind: 'result' }
+  | { kind: 'rejected'; error: { name: string; message: string; code?: string; details?: unknown } }
 
 // ─── session domain ──────────────────────────────────────────────────────────
 /** Durable identity selecting an ordinary Session or one direct subagent child. */
@@ -173,18 +183,14 @@ export interface SessionSummary {
   updatedAt: number
   running: boolean
   blank: boolean
-  parentSessionId?: SessionId
-  origin?: 'subagent'
+  agentAvailable?: boolean
   cwd?: string
   agentPreset?: string
-  /** Server-side projections (title, stats, …) — the same view the web UI renders. */
+  /** Server-side projections (title, stats, plan, todos, permissions, model…). */
   projections?: {
+    kind: string
     asOfSeq: number
-    values: {
-      /** AI-generated session title. null for blank sessions. */
-      title?: string | null
-      [k: string]: unknown
-    }
+    values: Record<string, unknown>
   }
 }
 
@@ -224,21 +230,23 @@ export interface SessionForkValue {
   sessionId: SessionId
 }
 
-export interface SessionHistoryRequest {
-  sessionId: SessionId
+/** Request of `session/page` (unary RPC in 0.2.0-rc.2). */
+export interface SessionPageRequest {
+  address: SessionAddress
+  throughSeq: number
   beforeSeq?: number
   maxMessages?: number
 }
 
-/** One session.history item: the session event plus its optional host-computed tool view. */
-export interface SessionHistoryEntry {
+/** One `session.page` record: the session event (the same shape the web UI renders). */
+export interface SessionPageRecord {
+  type: 'event'
   event: SessionEvent
-  view?: ToolEventView
 }
 
-/** `session.history` response value (unary RPC in rc.6). */
-export interface SessionHistoryValue {
-  events: SessionHistoryEntry[]
+/** `session.page` response value (unary RPC in 0.2.0-rc.2). */
+export interface SessionPageValue {
+  records: readonly SessionPageRecord[]
   hasMore: boolean
   projections?: { asOfSeq: number; values: Record<string, unknown> }
 }
@@ -249,14 +257,6 @@ export interface ModelCatalog {
   routableProviders: readonly string[]
   groups: readonly { id: string; name: string; models: readonly { id: string; name: string }[] }[]
   failures: readonly { id: string; name: string; message: string }[]
-}
-
-/** `session.models` response value (current selection + catalog). */
-export interface SessionModelsValue {
-  current: { provider: string; model: string; reasoningEffort?: string }
-  routable: boolean
-  groups: ModelCatalog['groups']
-  failures: ModelCatalog['failures']
 }
 
 // ─── workspace domain ────────────────────────────────────────────────────────
@@ -275,7 +275,7 @@ export interface WorkspaceListValue {
   archivedSessionIds: readonly SessionId[]
 }
 
-/** `workspace.create` response value (rc.6: `{ workspace, created }`). */
+/** `workspace.create` response value (rc.2: `{ workspace, created }`). */
 export interface WorkspaceCreateValue {
   workspace: WorkspaceView
   created: boolean

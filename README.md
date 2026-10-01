@@ -100,7 +100,7 @@ For your safety, the following remain out of scope:
    Or install the VSIX from [GitHub Releases](https://github.com/liangwythu/deepseek-harness-vscode/releases):
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.0.4.vsix
+   code --install-extension harness-connector-deepseek-0.0.8.vsix
    ```
 
 3. Nothing to configure. The extension auto-connects: it reads the browser-session
@@ -216,7 +216,7 @@ A standalone Node script drives the real client code against a **fake** harness
 `dsh web` is needed:
 
 ```bash
-npm run protocol-test    # 98 assertions: wire negotiation (dot/slash, cookie
+npm run protocol-test    # 83 assertions: wire negotiation (dot/slash, cookie
                          # gating, event socket), auth, cookie derivation,
                          # {args} payloads, approval waterfall, assistant
                          # stream, removed-endpoint 404 handling, control-surface
@@ -245,8 +245,8 @@ npm install
 npm run build        # esbuild → dist/extension.js
 npm run watch        # rebuild on change
 npm run typecheck
-npm run package      # → harness-connector-deepseek-0.0.4.vsix
-npm run protocol-test      # 98 protocol assertions against a fake harness
+npm run package      # → harness-connector-deepseek-0.0.8.vsix
+npm run protocol-test      # 83 protocol assertions against a fake harness
 npm run protocol-probe     # report what your real dsh web exposes
 ```
 
@@ -256,8 +256,8 @@ Press `F5` in VS Code to launch an Extension Development Host with the extension
 
 - Default `dsh web` port `3080`; the host must be on loopback.
 - **The wire is negotiated, not assumed.** Endpoint style (`session/list` vs
-  `session.list`), cookie gating, and the event socket (`/api/events.mux` on rc.6,
-  `/api/remote.mux` on older hosts) are all discovered at connect time, so one
+  `session.list`), cookie gating, and the event socket (`/api/remote.mux` on 0.2.0-rc.2,
+  `/api/events.mux` on older hosts) are all discovered at connect time, so one
   build works across host releases. Run `npm run protocol-probe` to see what your
   host actually serves.
 

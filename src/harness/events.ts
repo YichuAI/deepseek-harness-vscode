@@ -1,29 +1,35 @@
 /**
- * events.ts — the Remote downlink event layer.
+ * events.ts — the Remote event downlink layer (0.2.0-rc.2 Typert Remote Stream).
  *
- * rc.6 `dsh web` exposes two **downlink-only** WebSockets:
+ * `dsh web` 0.2.0-rc.2 exposes ONE multiplexed WebSocket:
  *
- *   ws://host:port/api/events.mux    → `MuxFrame` stream (per-session events)
- *   ws://host:port/api/events.host   → `HostFrame` stream (host-wide events)
+ *   ws://host:port/api/remote.mux
  *
- * The browser opens each socket and the Host pushes `server-request` envelopes;
- * the frame is `envelope.payload`. There is NO `ready` frame and the client
- * never sends anything on the socket — connection-open IS the ready signal.
+ * The client opens it, then sends a single `open` frame to subscribe to the
+ * `$events` logical stream:
  *
- * This is a deliberate break from the pre-rc.6 "logical-stream mux" mental
- * model (`{type:'open', streamId, …}` / `{type:'item', streamId, …}`): that
- * protocol does not exist in the runtime we target, and implementing it is what
- * made every connect time out waiting for a `ready` frame that never arrives.
+ *   { type:'open', streamId:'<id>', endpoint:'$events', payload:{args:{}} }
+ *
+ * The Host pushes frames of the shape `{ type:'item'|'end'|'error', streamId, value }`.
+ * For the `$events` stream, `value` is a MuxFrame — except the FIRST item, whose
+ * `value` is the `ready` frame `{ type:'ready', clientId, host:{ home } }`. That
+ * `ready` frame is the only host-identity message; there is no `host.describe`.
+ *
+ * This is a deliberate break from the pre-0.2 "downlink-only server-request
+ * envelope" mental model that the rc.6 rewrite implemented and that made the
+ * connect hang waiting for a `ready` frame that never arrived.
  */
 
+import { randomUUID } from 'node:crypto'
 import type { Disposable } from '../disposable.ts'
 import { openWebSocket, WebSocketUpgradeError, type WebSocketHandle } from './ws.ts'
-import type { HostFrame, MuxFrame } from './protocol.ts'
+import type { MuxFrame, ReadyFrame, RemoteStreamServerMessage } from './protocol.ts'
 
 export type MuxStatus =
   | { kind: 'idle' }
   | { kind: 'connecting' }
   | { kind: 'open' }
+  | { kind: 'ready' }
   | { kind: 'closed'; reason: string }
   /** `status` is present when the WebSocket *upgrade* was answered with that HTTP code. */
   | { kind: 'error'; message: string; status?: number }
@@ -36,16 +42,18 @@ export interface DownlinkSocketOptions<Frame> {
   url: () => string
   /** Handshake headers (the browser-session cookie). Called per attempt. */
   headers: () => Record<string, string>
-  /** One decoded frame from the Host. */
+  /** The `ready` frame (host identity) — delivered once, before any MuxFrame. */
+  onReady: (ready: ReadyFrame) => void
+  /** One decoded MuxFrame (everything after `ready`) from the Host. */
   onFrame: (frame: Frame) => void
   onStatus: (status: MuxStatus) => void
   log: (msg: string) => void
 }
 
 /**
- * One downlink-only WebSocket carrying a stream of Host-pushed frames, with
- * automatic reconnect. Callers consume frames through `onFrame` and never touch
- * the socket — there is no request/response on this transport.
+ * One multiplexed Remote-stream WebSocket carrying the `$events` logical stream,
+ * with automatic reconnect. Callers consume frames through `onReady`/`onFrame`
+ * and never touch the socket.
  */
 export class DownlinkSocket<Frame> implements Disposable {
   private ws: WebSocketHandle | undefined
@@ -53,6 +61,9 @@ export class DownlinkSocket<Frame> implements Disposable {
   private backoff = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
   private status: MuxStatus = { kind: 'idle' }
+  /** Stable id for the single `$events` stream we open on this socket. */
+  private readonly streamId = `harness-connector-${randomUUID()}`
+  private readySeen = false
 
   constructor(private readonly opts: DownlinkSocketOptions<Frame>) {}
 
@@ -63,11 +74,19 @@ export class DownlinkSocket<Frame> implements Disposable {
     if (this.disposed) return
     if (this.ws !== undefined && this.ws.readyState !== 'closed') return
     this.setStatus({ kind: 'connecting' })
+    this.readySeen = false
     const ws = openWebSocket(this.opts.url(), this.opts.headers(), {
       onOpen: () => {
         this.backoff = 0
         this.setStatus({ kind: 'open' })
-        this.opts.log('downlink: open')
+        this.opts.log('downlink: socket open; subscribing to $events')
+        // Subscribe to the $events stream immediately.
+        ws.send(JSON.stringify({
+          type: 'open',
+          streamId: this.streamId,
+          endpoint: '$events',
+          payload: { args: {} },
+        }))
       },
       onText: (text) => { this.onMessage(text) },
       onClose: (code, reason) => {
@@ -114,15 +133,33 @@ export class DownlinkSocket<Frame> implements Disposable {
       return
     }
     if (typeof message !== 'object' || message === null) return
-    const envelope = message as { type?: unknown; payload?: unknown }
-    // rc.6 pushes `server-request` envelopes; the frame is `payload`.
-    if (envelope.type !== 'server-request') return
-    if (typeof envelope.payload !== 'object' || envelope.payload === null) return
-    try {
-      this.opts.onFrame(envelope.payload as Frame)
-    } catch (e) {
-      this.opts.log(`downlink: frame handler error — ${e instanceof Error ? e.message : String(e)}`)
+    const msg = message as Partial<RemoteStreamServerMessage> & { type?: unknown }
+    if (msg.type === 'item' && (msg as { streamId?: unknown }).streamId === this.streamId) {
+      const value = (msg as { value?: unknown }).value
+      if (value === undefined || typeof value !== 'object') return
+      const v = value as { type?: unknown }
+      if (!this.readySeen && v.type === 'ready') {
+        this.readySeen = true
+        const ready = value as ReadyFrame
+        this.setStatus({ kind: 'ready' })
+        try { this.opts.onReady(ready) } catch (e) {
+          this.opts.log(`downlink: ready handler error — ${e instanceof Error ? e.message : String(e)}`)
+        }
+        return
+      }
+      try {
+        this.opts.onFrame(value as Frame)
+      } catch (e) {
+        this.opts.log(`downlink: frame handler error — ${e instanceof Error ? e.message : String(e)}`)
+      }
+      return
     }
+    if (msg.type === 'error' && (msg as { streamId?: unknown }).streamId === this.streamId) {
+      const err = (msg as { error?: unknown }).error
+      this.opts.log(`downlink: stream error — ${JSON.stringify(err)?.slice(0, 200)}`)
+      return
+    }
+    // 'end' or frames for other streams: ignore.
   }
 
   private scheduleReconnect(): void {
@@ -142,15 +179,15 @@ export class DownlinkSocket<Frame> implements Disposable {
   }
 }
 
-/** Convenience aliases for the two downlink streams. */
+/** Convenience alias for the $events stream frame type. */
 export type MuxSocket = DownlinkSocket<MuxFrame>
-export type HostSocket = DownlinkSocket<HostFrame>
+export type HostSocket = DownlinkSocket<MuxFrame>
 
 /**
- * The ws:// URL for one event socket on a loopback target.
+ * The ws:// URL for the Remote event socket on a loopback target.
  *
- * `path` comes from the negotiated WireProfile: it is `/api/events.mux` (or
- * `/api/events.host`) for the rc.6 runtime we target.
+ * `path` comes from the negotiated WireProfile: it is `/api/remote.mux` for the
+ * 0.2.0-rc.2 runtime we target.
  */
 export function muxUrl(host: string, port: number, path: string): string {
   const literal = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host

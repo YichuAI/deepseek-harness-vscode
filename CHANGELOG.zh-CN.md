@@ -5,7 +5,53 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.0.8] — 2026-09-19
+
+版本定位：**真实的线缆契约——DeepSeek Harness `0.2.0-rc.2`。**
+
+v0.0.7 是按推断出的 `0.1.0-rc.6` 模型发布的，但它仍然和本机真正在跑的宿主对不上（本机是
+**`0.2.0-rc.2`**）。握手已在该宿主上真机验证通过，传输层也据此重写为真实形状。本版本把文档
+描述的契约钉死到宿主实际提供的样子。
+
+### 修复（线缆契约更正为 0.2.0-rc.2）
+
+- **一元 RPC 信封。** 调用为 `POST /api/<ns>/<method>`（斜杠风格），body 是
+  `{ type:'client-request', rpcId, method, payload:{ args:<inner> } }`——`payload` **必须**包一层
+  `{args}`。内层字段名：`session/list` 用 `_request`，多数方法用 `request`，少数无参方法用 `{}`。
+- **响应信封。** `{ type:'server-response', rpcId, result:{ ok, value|error } }`。方法不存在时返回
+  **HTTP 404 + 纯文本 `not found`**（不是 JSON 错误），因此能力探测能区分"不存在"与"参数写法不对"。
+- **事件套接字。** `ws://host:port/api/remote.mux`——一条**双向**逻辑流 mux。客户端打开后发
+  `{ type:'open', streamId, endpoint:'$events', payload:{args:{}} }`；宿主首帧为
+  `{ type:'ready', clientId, host:{ home } }`。
+- **审批流程。** 线缆事件是 `approval/request`（渲染为 `approval/requested`），通过
+  `POST /api/$events/result` 带 body `{ clientId, eventId, outcome }` 来应答——而非旧的 `/api/respond`。
+- **历史。** 通过一元 RPC `session/page` 拉取，**不是** `session/history`。
+- **鉴权。** 宿主对每次 `/api/*` 调用都要求浏览器会话 cookie（无则 401）。autoSession 仍从
+  `$DSH_HOME/.credentials.yaml` 本地自签。
+
+### 变更
+
+- **传输层重写为 rc.2。** `harness/protocol.ts`（信封 + 参数写法）、`harness/events.ts`
+  （`RemoteMuxSocket` + `ready` 帧处理）、`harness/client.ts`（斜杠端点、`{args}` 载荷、`$events/result`
+  审批、`session/page` 历史）、`harness/wire.ts`（协商 + 能力探测）现在都面向 `0.2.0-rc.2`。
+- **控制面能力集（rc.2）。** 存在的：`session/fork`、`session/rename`、`session/selectModel`、
+  `session/updateQueue`、`workspace/archiveSession`、`session/page`、`workspace/create`、
+  `session/modelCatalog`。rc.2 中**不存在**：`session/command`、`agentPreset/*`、`subagent/*`、
+  `host/describe`、`workspace/list`、`llm/models`、`session/history`、`goal/*`。UI 对每个控件都做实时
+  探测门控，因此更老/更新的宿主只会显示更少的控件。
+- **回归门重写。** `scripts/protocol-test.ts` 现在驱动真实的 rc.2 假 harness（斜杠端点、`{args}`
+  包裹、`/api/remote.mux` + `ready` 帧、`$events/result` 审批、`session/page` 历史、404 not-found
+  探测、rc.2 控制面门控）——**83 项断言通过**，无需 `dsh web`。
+- `scripts/protocol-probe.ts` 打印协商出的 rc.2 控制面清单。
+
+### 说明
+
+- 端点字符串仍统一经过 `WireProfile`（协商斜杠/点分 + 参数写法），所以未来宿主若翻转任一维度，
+  代码无需改动即可继续工作。
+
 ## [0.0.7] — 2026-09-30
+
+> ⚠️ **协议更正。** 本版本基于一个**推断出的** `0.1.0-rc.6` 模型发布，但它仍然和本机真正在跑的宿主对不上。真实契约是 **`0.2.0-rc.2`**——见 [0.0.8] 的传输层更正。
 
 版本定位：**握手成功——连上真实的 `dsh web`（rc.6）。**
 

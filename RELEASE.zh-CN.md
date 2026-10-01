@@ -37,7 +37,7 @@ npm run typecheck          # → tsc --noEmit, 退出码 0
 npm run build              # → dist/extension.js
 
 # 1.3 协议测试（假 harness——不需要 dsh web）
-npm run protocol-test      # → 全部 98 项断言 ✓
+npm run protocol-test      # → 全部 83 项断言 ✓
 
 # 1.4 协议探测（可选但推荐——需要 dsh web 运行）
 #     打印该 host 的端点风格、是否 cookie 门禁、事件套接字，以及它实际提供哪些
@@ -62,7 +62,8 @@ npm run package            # → harness-connector-deepseek-<版本>.vsix
       `RELEASE.md` 的每一处修改，都已镜像到对应的 `*.zh-CN.md`。这是长期约定，
       不是每次发版再临时判断的事。
 - [ ] `CHANGELOG.md` 与 `ARCHITECTURE.md` 里的断言数与 `npm run protocol-test`
-      的**当前**输出一致（它已历经 50 → 64 → 98；此处数字过期是最常见的文档漂移）。
+      的**当前**输出一致（它已历经 50 → 64 → 98 → 83，其中 rc.2 重写用新假 harness 替换了
+      rc.6 假 harness；此处数字过期是最常见的文档漂移）。
 - [ ] `LICENSE` 存在（MIT）。
 - [ ] `test/fixtures/` 中无秘钥/API 密钥/真实提示内容
       （固件必须使用 `<redacted:...>` 占位符）。

@@ -1,20 +1,24 @@
 /**
  * wire.ts — protocol negotiation.
  *
- * The plugin must talk to whatever `dsh web` the user actually runs, and that
- * has already drifted once: pre-0.1 releases served `/api/<ns>.<method>`, later
- * ones `/api/<ns>/<method>`, and the event socket has been seen as both
- * `/api/events.mux` and `/api/remote.mux`. Guessing is what produced the
- * broken v0.0.4 assumptions, so the wire shape is now *discovered*, never
- * assumed:
+ * The plugin must talk to whatever `dsh web` the user actually runs, and that has
+ * already drifted once: early releases served `/api/<ns>.<method>` with a raw
+ * payload, later ones `/api/<ns>/<method>` with `{ args: … }`, and the event
+ * socket has been `/api/events.mux` then `/api/remote.mux`. Guessing is what
+ * produced the broken v0.0.4 assumptions, so the wire shape is *discovered*.
  *
- *   1. endpoint style — POST the list endpoint in both shapes; the one that
- *      answers with a `server-response` envelope wins. A 404 means "not this
- *      shape", a 401 means "real endpoint, but you need a session cookie".
- *   2. authentication  — if every probe answers 401 the host is cookie-gated.
- *   3. event socket    — HEAD each candidate path; anything but 404 exists.
- *   4. arg shape       — `session/list` has shipped with three different
- *      declared-parameter spellings, so each is tried until one returns ok.
+ * The reference runtime installed on this machine is **0.2.0-rc.2**, whose
+ * contract (read from `@deepseek-ai/dsh-*`, not guessed) is:
+ *
+ *   1. endpoint style — `POST /api/<ns>/<method>` (slash). `session/list` is the
+ *      probe; it takes `_request`, most other methods take `request`.
+ *   2. authentication  — every `/api/*` call and the mux upgrade need a
+ *      browser-session cookie (401 without one).
+ *   3. event socket    — `ws://host:port/api/remote.mux`; a HEAD/GET on the path
+ *      returns 404 (it is a WS upgrade, not a normal route), so we detect it by
+ *      attempting the upgrade itself.
+ *   4. arg shape       — `payload` is always `{ args: <inner> }`; the inner
+ *      field is the Typert parameter wire name (`_request`/`request`/none).
  *
  * Negotiation runs once per connect and the result is cached in a WireProfile.
  * Every other module asks the profile for endpoint strings instead of hardcoding
@@ -23,6 +27,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { httpRequest, httpStatus } from './http.ts'
+import { openWebSocket } from './ws.ts'
 
 /** `session/list` (slash) vs `session.list` (dot). */
 export type EndpointStyle = 'slash' | 'dot'
@@ -34,10 +39,8 @@ export interface WireProfile {
   auth: AuthMode
   /** Absolute path of the event socket, e.g. `/api/remote.mux`. */
   muxPath: string
-  /** The args object `session/list` accepted (or `{}` when none verified). */
+  /** The inner args object `session/list` accepted (always `{ _request: {} }`). */
   listArgs: Record<string, unknown>
-  /** Model-catalog endpoint that answered, if any. */
-  catalogEndpoint?: string
   /** Control-surface methods this host actually serves (`ns/method` → present). */
   capabilities: Record<string, boolean>
 }
@@ -62,40 +65,27 @@ const CONVERTIBLE_NAMESPACES = new Set([
   'session', 'workspace', 'host', 'agentPreset', 'goal', 'llm', 'subagent', 'skill', 'settings', 'credentials',
 ])
 
-/** Endpoint candidates for the event socket, rc.6 first (downlink-only). */
-const MUX_PATH_CANDIDATES = ['/api/events.mux', '/api/remote.mux'] as const
-
-/**
- * Declared-parameter spellings `session/list` has shipped with. `_request` is
- * the current upstream signature, so it is tried first — the gateway rejects an
- * args object whose fields do not match the descriptor, and we want the shape
- * the host actually prefers rather than the first one it tolerates.
- */
-const LIST_ARGS_CANDIDATES: readonly Record<string, unknown>[] = [{ _request: {} }, { request: {} }, {}]
-
-/** How long to wait for response headers when probing the event socket. */
-const PROBE_TIMEOUT_MS = 2_000
+/** Event-socket candidates, 0.2.0-rc.2 first (WS upgrade, not a GET route). */
+const MUX_PATH_CANDIDATES = ['/api/remote.mux', '/api/events.mux'] as const
 
 /**
  * Control-surface methods, canonical `ns/method`.
  *
- * Every one of these exists in *some* release and is absent in others, and the
- * other side of the line may not even be the release we think it is. Rather
- * than shipping buttons that 404, each is probed at connect time and the UI
- * only offers what answered.
+ * This is the superset the plugin *calls* and wants to gate the UI on. Every one
+ * below actually exists in 0.2.0-rc.2 (older names like `session/command`,
+ * `agentPreset/*`, `subagent/*`, `host/describe`, `workspace/list`, `llm/models`
+ * do NOT, and were removed). Each is probed at connect time and the UI only
+ * offers what answered.
  */
 export const CONTROL_METHODS = [
-  'session/command',
   'session/fork',
   'session/rename',
   'session/selectModel',
   'session/updateQueue',
-  'agentPreset/list',
-  'agentPreset/select',
-  'subagent/list',
-  'subagent/interrupt',
-  'llm/models',
   'workspace/archiveSession',
+  'session/page',
+  'workspace/create',
+  'session/modelCatalog',
 ] as const
 
 export type ControlMethod = (typeof CONTROL_METHODS)[number]
@@ -103,13 +93,13 @@ export type ControlMethod = (typeof CONTROL_METHODS)[number]
 /**
  * Business error codes meaning "I do not serve that method".
  *
- * A 404 answers this at the HTTP level; some builds answer 200 with a typed
- * error instead. The codes below are the ones observed upstream
- * (`not_found`, `unknown_method`, `unimplemented`); the match is deliberately
- * broad because a false positive only hides a control, while a false negative
- * would render a dead button.
+ * A 404 answers this at the HTTP level. Some builds answer 200 with a typed error
+ * instead. The codes below are the ones observed upstream
+ * (`gateway/method-unavailable`, `not_found`, `unknown_method`, `unimplemented`);
+ * the match is deliberately broad because a false positive only hides a control,
+ * while a false negative would render a dead button.
  */
-const MISSING_METHOD_CODE = /not[_-]?found|unknown|unimplemented|unsupported|no[_-]?such|method/i
+const MISSING_METHOD_CODE = /gateway\/(method|service|definition|invocation)-unavailable|not[_-]?found|unknown[_-]?method|unimplemented|unsupported|no[_-]?such|method[_-]?not[_-]?found/i
 
 /**
  * Business error codes meaning "the arguments do not match my declared
@@ -117,7 +107,7 @@ const MISSING_METHOD_CODE = /not[_-]?found|unknown|unimplemented|unsupported|no[
  * {@link MISSING_METHOD_CODE}: the distinction is what makes capability
  * probing possible without calling anything successfully.
  */
-const SHAPE_REJECTION_CODE = /invalid[_-]?arg|bad[_-]?request|schema|validation|missing|required|malformed|too[_-]?(few|many)|unexpected/i
+const SHAPE_REJECTION_CODE = /gateway\/(arguments|context|lookup|provider-mismatch|result)-invalid|invalid[_-]?arg|bad[_-]?request|schema|validation|missing|required|malformed|too[_-]?(few|many)|unexpected/i
 
 /** True when a typed RPC error means "no such method on this host". */
 export function isMissingMethodError(code: string): boolean {
@@ -193,7 +183,8 @@ async function postRpc(
 ): Promise<ProbeOutcome | undefined> {
   const cookie = opts.cookie()
   const rpcId = randomUUID()
-  const body = JSON.stringify({ type: 'client-request', rpcId, method, payload: args })
+  // 0.2.0-rc.2: payload is ALWAYS { args: <inner> }.
+  const body = JSON.stringify({ type: 'client-request', rpcId, method, payload: { args } })
   try {
     const res = await httpRequest({
       host: opts.host,
@@ -222,23 +213,20 @@ async function postRpc(
 export async function negotiateWire(opts: NegotiateOptions): Promise<NegotiationResult> {
   let sawUnauthorized = false
   let sawAnyResponse = false
+  const cookie = opts.cookie()
 
   for (const style of ['slash', 'dot'] as const) {
     const endpoint = wireEndpoint(style, 'session/list')
     const path = apiPath(style, 'session', 'list')
-    for (const args of LIST_ARGS_CANDIDATES) {
-      const outcome = await postRpc(opts, path, endpoint, args)
+    // session/list uniquely takes `_request`; most other methods take `request`.
+    for (const listArgs of [{ _request: {} }, { request: {} }] as Record<string, unknown>[]) {
+      const outcome = await postRpc(opts, path, endpoint, listArgs)
       if (outcome === undefined) continue
       sawAnyResponse = true
       if (outcome.status === 401) { sawUnauthorized = true; break }
       if (outcome.status === 404) break
       if (outcome.status !== 200) continue
       if (!isServerResponse(outcome.body, extractRpcId(outcome.body))) continue
-      // A 200 envelope with `result.ok === false` is NOT a confirmed endpoint: it
-      // may be an auth rejection (the same host that answers 401 elsewhere) or a
-      // parameter error. Treating it as success would mislabel this host as
-      // unauthenticated and skip the cookie flow. An auth-class error means
-      // "needs a cookie"; anything else means "keep probing this style".
       if (!isOk(outcome.body)) {
         const parsed = parseOutcome(outcome.body)
         if (parsed !== undefined && !parsed.ok && parsed.code !== undefined && isAuthError(parsed.code)) {
@@ -247,16 +235,14 @@ export async function negotiateWire(opts: NegotiateOptions): Promise<Negotiation
         continue
       }
       opts.log(`wire: endpoint style "${style}" confirmed via ${endpoint}`)
-      const listArgs = args
       const profile: WireProfile = {
         endpointStyle: style,
-        auth: 'none',
-        muxPath: await probeMuxPath(opts, opts.log),
+        // A cookie was used in the successful probe, so the host accepts one.
+        auth: cookie !== undefined ? 'cookie' : 'none',
+        muxPath: await probeMuxPath(opts),
         listArgs,
         capabilities: {},
       }
-      const catalog = await probeCatalog(opts, style)
-      if (catalog !== undefined) profile.catalogEndpoint = catalog
       profile.capabilities = await probeCapabilities(opts, style, opts.log)
       return { kind: 'ok', profile }
     }
@@ -283,35 +269,41 @@ function extractRpcId(body: string): string {
   }
 }
 
-/** HEAD each event-socket candidate; the first that is not 404 wins. */
-async function probeMuxPath(opts: NegotiateOptions, log: (m: string) => void): Promise<string> {
-  const cookie = opts.cookie()
+/**
+ * Discover the event-socket path. The routes are WebSocket upgrades, so a plain
+ * GET/HEAD returns 404 — we must attempt the upgrade itself and keep whichever
+ * one answers 101.
+ */
+async function probeMuxPath(opts: NegotiateOptions): Promise<string> {
   for (const path of MUX_PATH_CANDIDATES) {
-    const status = await httpStatus({
-      host: opts.host,
-      port: opts.port,
-      path,
-      headers: cookie === undefined ? {} : { cookie },
-      timeoutMs: PROBE_TIMEOUT_MS,
-    })
-    if (status === 404) continue
-    if (status === 0) continue
-    log(`wire: event socket ${path} (probe HTTP ${String(status)})`)
-    return path
+    if (await tryWsUpgrade(opts, path)) return path
   }
   return MUX_PATH_CANDIDATES[0]
 }
 
-/** Try both known model-catalog names, in the negotiated style. */
-async function probeCatalog(opts: NegotiateOptions, style: EndpointStyle): Promise<string | undefined> {
-  for (const method of ['session/modelCatalog', 'session/models'] as const) {
-    const endpoint = wireEndpoint(style, method)
-    const outcome = await postRpc(opts, `/api/${endpoint}`, endpoint, {})
-    if (outcome === undefined || outcome.status !== 200) continue
-    if (!isOk(outcome.body)) continue
-    return endpoint
-  }
-  return undefined
+/** Attempt a WS upgrade to `path`; resolve true on 101, false otherwise. */
+function tryWsUpgrade(opts: NegotiateOptions, path: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let settled = false
+    const finish = (v: boolean): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      try { ws.close() } catch { /* already gone */ }
+      resolve(v)
+    }
+    const timer = setTimeout(() => finish(false), 3000)
+    const cookie = opts.cookie()
+    const ws = openWebSocket(`ws://${opts.host}:${String(opts.port)}${path}`, {
+      origin: `http://${opts.host}:${String(opts.port)}`,
+      ...(cookie === undefined ? {} : { cookie }),
+    }, {
+      onOpen: () => finish(true),
+      onText: () => { /* not needed for probe */ },
+      onClose: () => finish(false),
+      onError: () => finish(false),
+    })
+  })
 }
 
 /** Parse a `server-response` envelope well enough to classify one probe. */
@@ -334,10 +326,12 @@ function parseOutcome(body: string): { ok: boolean; code?: string } | undefined 
 /**
  * Ask the host which control-surface methods it serves.
  *
- * Every probe sends EMPTY args on purpose. Declared-parameter validation runs
- * before any handler executes, so a malformed-argument response can never
- * mutate session state — and that same rejection is *proof* the method exists,
- * while a `not_found`-class code proves it does not.
+ * Every probe sends the standard `{ args: { request: {} } }` on purpose. For a
+ * method that exists this yields either `ok:true` or a shape-rejection
+ * (e.g. `gateway/arguments-invalid`) — both prove existence. A `not found` 404
+ * or a `gateway/*-unavailable` code proves absence. Declared-parameter
+ * validation runs before any handler executes, so the empty-args probe can never
+ * mutate session state.
  */
 export async function probeCapabilities(
   opts: NegotiateOptions,
@@ -347,12 +341,17 @@ export async function probeCapabilities(
   const found: Record<string, boolean> = {}
   await Promise.all(CONTROL_METHODS.map(async (method) => {
     const endpoint = wireEndpoint(style, method)
-    const outcome = await postRpc(opts, `/api/${endpoint}`, endpoint, {})
+    const outcome = await postRpc(opts, `/api/${endpoint}`, endpoint, { request: {} })
     if (outcome === undefined) return
-    if (outcome.status !== 200) return // 404 = no such route; 401 = not ours to ask
+    if (outcome.status === 404) return // route does not exist
+    if (outcome.status !== 200) return
     const parsed = parseOutcome(outcome.body)
     if (parsed === undefined) return
-    if (!parsed.ok && parsed.code !== undefined && isMissingMethodError(parsed.code)) return
+    if (!parsed.ok) {
+      if (parsed.code !== undefined && isMissingMethodError(parsed.code)) return
+      if (parsed.code !== undefined && isAuthError(parsed.code)) return
+    }
+    // ok:true OR a shape/other error => the endpoint exists.
     found[method] = true
   }))
   const present = Object.keys(found)
@@ -367,7 +366,7 @@ export function defaultWireProfile(): WireProfile {
     endpointStyle: 'slash',
     auth: 'cookie',
     muxPath: MUX_PATH_CANDIDATES[0],
-    listArgs: {},
+    listArgs: { _request: {} },
     capabilities: {},
   }
 }

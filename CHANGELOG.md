@@ -5,7 +5,62 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.8] — 2026-09-19
+
+Tagline: **the real wire contract — DeepSeek Harness `0.2.0-rc.2`.**
+
+v0.0.7 was released against an inferred `0.1.0-rc.6` model that still did not match
+the host actually running on the machine (which is **`0.2.0-rc.2`**). The handshake was
+verified live against that host, and the transport layer is now rewritten to its real
+shape. This release pins the documented contract to what the host truly serves.
+
+### Fixed (wire contract corrected to 0.2.0-rc.2)
+
+- **Unary RPC envelope.** Calls are `POST /api/<ns>/<method>` (slash style) with body
+  `{ type:'client-request', rpcId, method, payload:{ args:<inner> } }` — `payload` **must**
+  wrap `{args}`. The inner field is `_request` for `session/list`, `request` for most
+  methods, and `{}` for the few no-arg ones.
+- **Response envelope.** `{ type:'server-response', rpcId, result:{ ok, value|error } }`.
+  A missing method returns **HTTP 404 + plain-text `not found`** (not a JSON error), so
+  capability probing distinguishes "absent" from "wrong arg shape".
+- **Event socket.** `ws://host:port/api/remote.mux` — a **bidirectional** logical-stream
+  mux. The client opens it and sends `{ type:'open', streamId, endpoint:'$events',
+  payload:{args:{}} }`; the host's first frame is `{ type:'ready', clientId, host:{ home } }`.
+- **Approval flow.** The wire event is `approval/request` (rendered as
+  `approval/requested`); it is settled by `POST /api/$events/result` with body
+  `{ clientId, eventId, outcome }` — not the old `/api/respond`.
+- **History.** Fetched via the unary `session/page` RPC, **not** `session/history`.
+- **Auth.** The host requires the browser-session cookie on every `/api/*` call (401
+  without it). autoSession still mints it locally from `$DSH_HOME/.credentials.yaml`.
+
+### Changed
+
+- **Transport rewrite (rc.2).** `harness/protocol.ts` (envelope + arg spellings),
+  `harness/events.ts` (`RemoteMuxSocket` + `ready`-frame handling), `harness/client.ts`
+  (slash endpoints, `{args}` payload, `$events/result` approval, `session/page` history),
+  and `harness/wire.ts` (negotiation + capability probing) now target `0.2.0-rc.2`.
+- **Control-surface capability set (rc.2).** Present: `session/fork`,
+  `session/rename`, `session/selectModel`, `session/updateQueue`,
+  `workspace/archiveSession`, `session/page`, `workspace/create`, `session/modelCatalog`.
+  **Absent** in rc.2: `session/command`, `agentPreset/*`, `subagent/*`, `host/describe`,
+  `workspace/list`, `llm/models`, `session/history`, `goal/*`. The UI gates each control
+  on a live probe, so older/newer hosts simply show fewer controls.
+- **Regression gate rewritten.** `scripts/protocol-test.ts` now drives a real rc.2 fake
+  harness (slash endpoints, `{args}` wrapper, `/api/remote.mux` + `ready` frame,
+  `$events/result` approval, `session/page` history, 404-not-found probing, rc.2 control
+  gating) — **83 assertions pass**, no `dsh web` required.
+- `scripts/protocol-probe.ts` reports the negotiated rc.2 control surface.
+
+### Notes
+
+- Endpoint strings still go through `WireProfile` (negotiated slash/dot + arg spelling),
+  so a future host that flips any axis keeps working without a code change.
+
 ## [0.0.7] — 2026-09-30
+
+> ⚠️ **Protocol correction.** This release targeted an *inferred* `0.1.0-rc.6` model that
+> still did not match the host actually running on the machine. The real contract is
+> **`0.2.0-rc.2`** — see [0.0.8] for the corrected transport layer.
 
 Tagline: **握手成功——连上真实的 `dsh web`（rc.6）。**
 

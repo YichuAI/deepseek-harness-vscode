@@ -99,7 +99,7 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
    或从 [GitHub Releases](https://github.com/liangwythu/deepseek-harness-vscode/releases) 安装 VSIX：
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.0.4.vsix
+   code --install-extension harness-connector-deepseek-0.0.8.vsix
    ```
 
 3. **把浏览器会话交给扩展。** 在命令面板执行 **`DeepSeek Harness: Set Session Token from Launch URL`**，粘贴启动 URL（或裸 token）。扩展会用它换取 `dsh-auth-…` cookie，并存入 VS Code 的 secret storage（系统钥匙串，**不会**写入 `settings.json`）。
@@ -186,7 +186,7 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 一个独立的 Node 脚本用真实客户端代码驱动一个**假**的 harness（不预设具体版本——插件是协商的，这个假实现也是）—— 不需要 `dsh web`：
 
 ```bash
-npm run protocol-test    # 98 项断言：线缆协商（点分/斜杠、cookie 门禁、
+npm run protocol-test    # 83 项断言：线缆协商（点分/斜杠、cookie 门禁、
                          # 事件套接字）、认证、cookie 派生、{args} payload、
                          # 审批瀑布、assistant 流、已移除端点的 404 处理、
                          # 控制面能力探测与全量值状态折叠
@@ -213,8 +213,8 @@ npm install
 npm run build        # esbuild → dist/extension.js
 npm run watch        # 变更时自动重建
 npm run typecheck
-npm run package      # → harness-connector-deepseek-0.0.4.vsix
-npm run protocol-test      # 针对假 harness 的 98 项协议断言
+npm run package      # → harness-connector-deepseek-0.0.8.vsix
+npm run protocol-test      # 针对假 harness 的 83 项协议断言
 npm run protocol-probe     # 报告真实 dsh web 暴露了什么
 ```
 
@@ -224,7 +224,7 @@ npm run protocol-probe     # 报告真实 dsh web 暴露了什么
 
 - 默认 `dsh web` 端口 `3080`，且 host 必须位于回环地址。
 - **线缆是协商出来的，不是猜出来的。** 端点风格（`session/list` 还是 `session.list`）、
-  是否需要 cookie、事件套接字在 rc.6 上是 `/api/events.mux`、旧版上是 `/api/remote.mux`——都在连接时
+  是否需要 cookie、事件套接字在 0.2.0-rc.2 上是 `/api/remote.mux`、旧版上是 `/api/events.mux`——都在连接时
   自动探测，同一个构建因此能跨 host 版本工作。跑 `npm run protocol-probe` 可以看到
   你的 host 到底提供了什么。
 

@@ -58,8 +58,9 @@ Manual checks:
       `ARCHITECTURE.md` / `RELEASE.md` has been mirrored into its `*.zh-CN.md`
       twin. This is a standing rule, not a per-release judgement call.
 - [ ] `CHANGELOG.md` and `ARCHITECTURE.md` still quote the **current** assertion
-      count from `npm run protocol-test` (it has grown 50 → 64 → 98; stale
-      counts are the most common doc drift here).
+      count from `npm run protocol-test` (it has grown 50 → 64 → 98 → 83 as the
+      rc.2 rewrite replaced the rc.6 fake harness; stale counts are the most common
+      doc drift here).
 - [ ] `LICENSE` present (MIT).
 - [ ] No secrets / API keys / real prompt content in `test/fixtures/`
       (fixtures must use `<redacted:...>` placeholders).

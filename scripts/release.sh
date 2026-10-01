@@ -22,8 +22,8 @@ cd "$(dirname "$0")/.."   # 切到仓库根目录
 PAT="${1:-}"
 OWNER="${2:-YichuAI}"
 REPO="${3:-deepseek-harness-vscode}"
-TAG="${4:-v0.0.7}"
-VSIX="${5:-harness-connector-deepseek-0.0.7.vsix}"
+TAG="${4:-v0.0.8}"
+VSIX="${5:-harness-connector-deepseek-0.0.8.vsix}"
 
 if [ -z "$PAT" ]; then
   echo "用法: ./scripts/release.sh <PAT> [owner] [repo] [tag] [vsix-path]" >&2

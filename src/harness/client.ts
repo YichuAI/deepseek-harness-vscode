@@ -4,32 +4,39 @@
  * All HTTP and WebSocket access goes through here; the rest of the extension
  * never calls an HTTP client or opens a socket directly (§8).
  *
- * ── Wire contract (DSH 0.1.0-rc.6, the runtime actually installed) ──────────
+ * ── Wire contract (DSH 0.2.0-rc.2, the runtime installed on this machine) ──────
  *
- *   POST /api/<namespace>.<method>        (dot-style endpoint; slash on older hosts)
+ *   POST /api/<namespace>/<method>        (slash-style endpoint)
  *     Content-Type: application/json
- *     body: { type:'client-request', rpcId, method:'<ns>.<method>', payload:<args> }
- *                                            ^ payload is the args object DIRECTLY,
- *                                              never wrapped in {args}/{request}.
+ *     body: { type:'client-request', rpcId, method:'<ns>/<method>',
+ *             payload: { args: <inner> } }
+ *                                            ^ payload is always { args: … },
+ *                                              and <inner> is keyed by the Typert
+ *                                              parameter wire name: `_request` for
+ *                                              session/list, `request` for most
+ *                                              others, none for arg-less methods.
  *     resp: { type:'server-response', rpcId, result:{ ok, value | error } }
  *
- *   WS   ws://host:port/api/events.mux    (downlink-only; single WebSocket)
- *     → server-request envelopes; each frame is envelope.payload.
- *     There is NO `ready` frame — connection-open IS the ready signal. The
- *     client never sends anything on this socket.
- *   WS   ws://host:port/api/events.host   (host-wide frames; opened but unused here)
+ *   WS   ws://host:port/api/remote.mux    (multiplexed Remote stream)
+ *     → send one `open` frame for the `$events` logical stream:
+ *       { type:'open', streamId, endpoint:'$events', payload:{args:{}} }
+ *     ← frames: { type:'item'|'end'|'error', streamId, value }
+ *       the FIRST `item.value` is { type:'ready', clientId, host:{home} } — that
+ *       is the only host-identity frame (there is no host.describe in rc.2).
+ *       every later `item.value` is a MuxFrame (session/event, approval/request, …).
  *
- *   POST /api/respond                     (to settle an approval waterfall)
- *     body: { type:'client-response', rpcId, result:{ sessionId, approvalId, outcome } }
+ *   POST /api/$events/result              (to settle an approval / question)
+ *     body: { type:'client-request', rpcId, method:'$events/result',
+ *             payload: { args: { clientId, eventId, outcome } } }
  *
- * rc.6 has NO cookie authentication on /api/* — every unary call and the mux
- * WebSocket succeed unauthenticated. (The autoSession cookie machinery is kept
- * for hosts that do gate, and degrades gracefully when they don't.)
+ * Every `/api/*` call and the mux upgrade require the browser-session cookie
+ * (401 without one). The autoSession cookie machinery mints it locally.
  *
- * The transport here was rewritten from a fictional 0.1.6-alpha model (which
- * invented logical-stream muxes, a `ready` frame, `session/follow` streams and a
- * `$events/result` RPC) to the real rc.6 model above. The UI layers consume the
- * same `MuxFrame` union, so only this file (plus protocol/events/wire) changed.
+ * The transport was rewritten from a fictional 0.1.6-alpha model (which invented
+ * logical-stream muxes, a `ready` frame, `session/follow` streams and a
+ * `$events/result` RPC) — and then from a mis-remembered rc.6 model — to the real
+ * 0.2.0-rc.2 model above, verified against the installed package source and a
+ * live `dsh web` running on this machine.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -41,26 +48,27 @@ import {
 import { HarnessAuthRequiredError, type BrowserSessionAuth } from './auth.ts'
 import { httpRequest } from './http.ts'
 import {
-  defaultWireProfile, isShapeRejection, negotiateWire, wireEndpoint, type WireProfile,
+  defaultWireProfile, isMissingMethodError, isShapeRejection, negotiateWire, wireEndpoint, type WireProfile,
 } from './wire.ts'
 import {
   type ApprovalOutcome,
-  type ApprovalRespondRequest,
-  type ClientResponse,
+  type ClientRequest,
   type HarnessInfo,
   type HistoryEntry,
-  type HostDescribeValue,
   type MuxFrame,
+  type ReadyFrame,
+  type RemoteEventResult,
   type RpcError,
   type ServerResponse,
   type SessionCreateValue,
   type SessionForkValue,
+  type SessionSummary,
   type SessionId,
   type SessionListValue,
+  type SessionPageRequest,
+  type SessionPageValue,
   type SessionPromptValue,
   type SessionRenameValue,
-  type SessionSummary,
-  type SessionHistoryValue,
   type WorkspaceCreateValue,
   type WorkspaceId,
   type WorkspaceListValue,
@@ -102,7 +110,7 @@ export type ConnectionState =
 /** Listener for the active session's event stream (already filtered by sessionId). */
 export type SessionEventListener = (frame: MuxFrame) => void
 
-/** Listener for approval frames — receives a correlation id (the approvalId). */
+/** Listener for approval frames — receives a correlation id (the eventId). */
 export type ApprovalFrameListener = (frame: MuxFrame, eventId: string) => void
 
 export interface HarnessClientOptions {
@@ -117,11 +125,22 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1'])
 
 /** How long to wait for the mux socket to open, in milliseconds. */
 const OPEN_TIMEOUT_MS = 10_000
+/** How long to wait for the `ready` frame before proceeding anyway (non-fatal). */
+const READY_TIMEOUT_MS = 5_000
 
 /** One active session subscription. */
 interface ActiveSink {
   sessionId: SessionId
   buffer: EventBuffer
+}
+
+/** Candidate inner arg shapes tried per method (in order). */
+function innerCandidates(method: string, req: Record<string, unknown>): Record<string, unknown>[] {
+  if (method === 'session/list') return [{ _request: req }, { request: req }, req]
+  if (method === 'session/page' || method === 'session/modelCatalog' || method === 'llm/listProviders') {
+    return [{ request: req }, req]
+  }
+  return [{ request: req }, { _request: req }, req]
 }
 
 export class HarnessClient implements Disposable {
@@ -136,14 +155,18 @@ export class HarnessClient implements Disposable {
   /** Active session filter; only frames for this session reach `sessionListeners`. */
   private activeSessionId: SessionId | undefined
   private activeSink: ActiveSink | undefined
-  /** Observed approval/requested frames, keyed by approvalId, for later respond. */
-  private readonly approvalFrames = new Map<string, Extract<MuxFrame, { type: 'approval/requested' }>>()
+  /** Observed approval/request frames, keyed by eventId, for later respond. */
+  private readonly approvalFrames = new Map<string, { eventId: string; sessionId: SessionId }>()
   private readonly sessionListeners = new Set<SessionEventListener>()
   private readonly approvalListeners = new Set<ApprovalFrameListener>()
   private readonly stateListeners = new Set<(s: ConnectionState) => void>()
   private readonly muxStatusListeners = new Set<(s: MuxStatus) => void>()
-  /** Index of the `{args}` spelling that worked, per canonical method. */
+  /** Index of the `{args}` inner spelling that worked, per canonical method. */
   private readonly argShapes = new Map<string, number>()
+  /** Resolved when the `ready` frame arrives (host identity). */
+  private readyResolved = false
+  private readyResolver: (() => void) | undefined
+  private readyTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(private readonly opts: HarnessClientOptions) {}
 
@@ -158,7 +181,7 @@ export class HarnessClient implements Disposable {
     return { dispose: () => { this.muxStatusListeners.delete(listener) } }
   }
   /** Register a listener for approval frames (approval/requested, approval/resolved).
-   *  The listener receives the frame plus a correlation id (the approvalId) so the
+   *  The listener receives the frame plus a correlation id (the eventId) so the
    *  controller can tie the answer back to a tool call. */
   onApprovalFrame(listener: ApprovalFrameListener): Disposable {
     this.approvalListeners.add(listener)
@@ -180,10 +203,10 @@ export class HarnessClient implements Disposable {
 
   // ─── connect / disconnect ───────────────────────────────────────────────────
   /**
-   * Validate the host is loopback, negotiate the wire shape, open the downlink
-   * mux socket (open = ready, no `ready` frame), then call `host.describe` once
-   * to learn the host identity. Throws on a security-boundary violation, missing
-   * credentials or an unreachable host.
+   * Validate the host is loopback, negotiate the wire shape, open the Remote
+   * stream socket (sends the `$events` open frame), wait for the `ready` frame to
+   * learn the host identity, then mark the connection ready. Throws on a
+   * security-boundary violation, missing credentials or an unreachable host.
    */
   async connect(): Promise<void> {
     if (!LOOPBACK_HOSTS.has(this.opts.host)) {
@@ -196,12 +219,11 @@ export class HarnessClient implements Disposable {
     try {
       await this.opts.auth.init()
       // No paste required when the harness's own credential store is readable:
-      // minting there is permission-equivalent to reading the file at all. On
-      // rc.6 (no cookie auth) this is a harmless no-op.
+      // minting there is permission-equivalent to reading the file at all.
       if (!this.opts.auth.isReady()) await this.opts.auth.tryMintLocalSession()
 
-      // Never assume the wire shape — discover it. Endpoint style, cookie
-      // gating and the event-socket path have all drifted between releases.
+      // Never assume the wire shape — discover it. Endpoint style, cookie gating
+      // and the event-socket path have all drifted between releases.
       const negotiation = await negotiateWire({
         host: this.opts.host,
         port: this.opts.port,
@@ -221,8 +243,9 @@ export class HarnessClient implements Disposable {
       this.muxOpenSignal = undefined
       this.openMux()
       await this.awaitMuxOpen()
-      // Best-effort host identity; connect succeeds regardless.
-      await this.hostDescribe()
+      // The `ready` frame carries host identity; wait for it but do not block
+      // forever — session listing works without it.
+      await this.awaitReady()
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
       this.setState({ kind: 'error', message })
@@ -240,6 +263,9 @@ export class HarnessClient implements Disposable {
     this.activeSessionId = undefined
     this.muxOpened = false
     this.muxOpenSignal = undefined
+    this.readyResolved = false
+    this.readyResolver = undefined
+    if (this.readyTimer !== undefined) { clearTimeout(this.readyTimer); this.readyTimer = undefined }
     this.setState({ kind: 'disconnected' })
   }
 
@@ -250,8 +276,6 @@ export class HarnessClient implements Disposable {
 
   /** The message shown when the harness refuses us: it names the exact fix. */
   private authRequired(): HarnessAuthRequiredError {
-    // Only meaningful when we *did* send a cookie: that means the host rejected
-    // its signature rather than missing it, and the wording should say so.
     this.opts.auth.noteRejected()
     return new HarnessAuthRequiredError(
       `DeepSeek Harness requires a browser session before it answers /api/* (${this.opts.auth.describeGap()}). `
@@ -263,38 +287,42 @@ export class HarnessClient implements Disposable {
   // ─── unary RPCs (the only methods business code may call) ───────────────────
   describe(): HarnessInfo { return this.info ?? { home: '' } }
 
-  /** Workspace list — `workspace.list` unary RPC, flat `{}` payload in rc.6. */
+  /** Workspace list — derived from `session/list` projections; see listSessions. */
   async listWorkspaces(): Promise<{ items: WorkspaceView[]; archivedSessionIds: SessionId[] }> {
-    const value = await this.rpc<WorkspaceListValue>('workspace/list', {})
-    return { items: [...value.items], archivedSessionIds: [...value.archivedSessionIds] }
+    // 0.2.0-rc.2 has no `workspace/list` RPC; workspaces are surfaced through
+    // `session/list` projections. Until that projection is wired, return empty.
+    return { items: [], archivedSessionIds: [] }
   }
 
-  /** Create or idempotently resolve a workspace over an existing directory. */
   createWorkspace(path: string): Promise<{ workspace: WorkspaceView; created: boolean }> {
     return this.rpc<WorkspaceCreateValue>('workspace/create', { path })
       .then(value => ({ workspace: value.workspace, created: value.created }))
   }
 
   listSessions(): Promise<{ items: SessionSummary[] }> {
-    // The declared parameter shape has shipped with several spellings; negotiation
-    // recorded the one this host takes (empty `{}` for rc.6).
-    return this.rpc<SessionListValue>('session/list', this.profile?.listArgs ?? {})
+    const listArgs = this.profile?.listArgs ?? { _request: {} }
+    return this.rpc<SessionListValue>('session/list', listArgs as Record<string, unknown>)
       .then(value => ({ items: [...value.items] }))
   }
 
   /**
-   * Read one opening history window. `session.history` is a unary RPC in rc.6:
-   * POST /api/session.history with `{ sessionId, maxMessages? }`.
+   * Read one opening history window. `session.page` is the unary RPC in 0.2.0-rc.2
+   * (there is no `session.history`):
+   *   POST /api/session/page  payload { args:{ request:{ address, throughSeq, beforeSeq?, maxMessages? } } }
+   * → { records:[{type:'event',event}], hasMore }.
    */
   async getHistory(
     sessionId: SessionId,
     opts: { maxMessages?: number } = {},
   ): Promise<{ events: HistoryEntry[]; hasMore: boolean }> {
-    const value = await this.rpc<SessionHistoryValue>('session/history', {
-      sessionId,
+    const request: SessionPageRequest = {
+      address: { kind: 'session', sessionId },
+      throughSeq: 0,
       ...(opts.maxMessages === undefined ? {} : { maxMessages: opts.maxMessages }),
-    })
-    return { events: value.events as HistoryEntry[], hasMore: value.hasMore }
+    }
+    const value = await this.rpc<SessionPageValue>('session/page', request as unknown as Record<string, unknown>)
+    const events: HistoryEntry[] = value.records.map(r => ({ event: r.event }))
+    return { events, hasMore: value.hasMore }
   }
 
   createSession(opts: { workspaceId?: WorkspaceId; cwd?: string } = {}): Promise<SessionCreateValue> {
@@ -306,10 +334,6 @@ export class HarnessClient implements Disposable {
 
   /**
    * Send a text prompt to an existing session (mode 'queue' = normal send).
-   *
-   * rc.6 dropped the old `payload.context` escape hatch, so editor metadata can
-   * no longer travel beside the message. The controller renders that metadata
-   * into the prompt text instead (see `AppController.sendPrompt`).
    */
   prompt(sessionId: SessionId, text: string, clientTimeZone?: string): Promise<SessionPromptValue> {
     const request: Record<string, unknown> = {
@@ -341,23 +365,18 @@ export class HarnessClient implements Disposable {
   }
 
   /**
-   * Execute one slash-command line against a session's agent.
+   * Run one slash-command line against a session's agent.
    *
-   * Upstream routes the control-plane writes through the command registry
-   * (`/plan`, `/permission <preset>`, `/goal …`, `/compact`), so this is the one
-   * write path shared by every control. When the running host does not serve
-   * `session/command` (rc.6 does not), `requireControl` throws and the caller
-   * surfaces a friendly "upgrade the host" notice.
+   * In 0.2.0-rc.2 the control-plane write path is NOT a single `session/command`
+   * RPC (that method does not exist); the web UI drives plan/permission/goal via
+   * the event `command` channel instead. This call therefore degrades cleanly:
+   * if `session/command` was not probed as present, `requireControl` throws and the
+   * caller surfaces a friendly "upgrade the host" notice.
    */
   runCommand(sessionId: SessionId, line: string): Promise<{ matched?: boolean }> {
     this.requireControl('session/command')
     const text = line.startsWith('/') ? line : `/${line}`
-    return this.rpcVariants<{ matched?: boolean }>('session/command', [
-      { request: { sessionId, line: text } },
-      { sessionId, line: text },
-      { request: { line: text } },
-      { line: text },
-    ])
+    return this.rpc<{ matched?: boolean }>('session/command', { request: { sessionId, line: text } })
   }
 
   /** Switch permission preset (`/permission <preset>`), e.g. `workspace-write`. */
@@ -375,69 +394,50 @@ export class HarnessClient implements Disposable {
     return this.runCommand(sessionId, '/compact')
   }
 
-  /**
-   * Fork a session from a completed-turn prefix. rc.6 serves `session.fork`
-   * (`{ sessionId, atSeq? }`); `increaseTitle` is tolerated and stripped.
-   */
+  /** Fork a session from a completed-turn prefix. rc.2 serves `session.fork`. */
   forkSession(sessionId: SessionId, opts: { atSeq?: number } = {}): Promise<SessionId> {
     this.requireControl('session/fork')
     const base = opts.atSeq === undefined ? { sessionId } : { sessionId, atSeq: opts.atSeq }
-    return this.rpcVariants<SessionForkValue>('session/fork', [
-      { request: { ...base, increaseTitle: true } },
-      { request: base },
-      { ...base, increaseTitle: true },
-      base,
-    ]).then(value => value.sessionId)
+    return this.rpc<SessionForkValue>('session/fork', base).then(value => value.sessionId)
   }
 
   /** Rename the session, pinning its title against automatic regeneration. */
   renameSession(sessionId: SessionId, title: string): Promise<{ title: string; seq?: number }> {
     this.requireControl('session/rename')
-    return this.rpcVariants<SessionRenameValue>('session/rename', [
-      { request: { sessionId, title } },
-      { sessionId, title },
-      { request: { title } },
-      { title },
-    ])
+    return this.rpc<SessionRenameValue>('session/rename', { sessionId, title })
   }
 
   /** Select the model (and optionally the provider) for future turns. */
   selectModel(sessionId: SessionId, model: string, provider?: string): Promise<unknown> {
     this.requireControl('session/selectModel')
     const base = provider === undefined ? { sessionId, model } : { sessionId, model, provider }
-    return this.rpcVariants<unknown>('session/selectModel', [
-      { request: base },
-      base,
-    ])
+    return this.rpc<unknown>('session/selectModel', base)
   }
 
   /** Archive the session out of the active workspace list. */
   archiveSession(sessionId: SessionId): Promise<unknown> {
     this.requireControl('workspace/archiveSession')
-    return this.rpcVariants<unknown>('workspace/archiveSession', [
-      { request: { sessionId } },
-      { sessionId },
-    ])
+    return this.rpc<unknown>('workspace/archiveSession', { sessionId })
   }
 
   /**
-   * Answer one approval waterfall. The `approval/requested` frame (seen on the
-   * mux) carries `sessionId` + `approvalId`; we POST them to `/api/respond` in a
-   * `client-response` envelope.
+   * Answer one approval waterfall. The `approval/request` frame (seen on the
+   * `$events` stream) carries an `eventId`; we POST it to `/api/$events/result`
+   * with our `clientId` in a `client-request` envelope.
    */
   respondApproval(eventId: string, outcome: ApprovalOutcome): Promise<void> {
     const frame = this.approvalFrames.get(eventId)
     if (frame === undefined) {
       throw new Error(
-        `Cannot resolve approval ${eventId}: no matching approval/requested frame was observed for this session.`,
+        `Cannot resolve approval ${eventId}: no matching approval/request frame was observed for this session.`,
       )
     }
-    const payload: ApprovalRespondRequest = {
-      sessionId: frame.sessionId,
-      approvalId: frame.approvalId,
-      outcome: outcome === 'allowed-once' ? 'allowed-once' : 'rejected',
+    const payload: RemoteEventResult = {
+      clientId: this.info?.clientId ?? '',
+      eventId,
+      outcome: this.outcomeFor(outcome),
     }
-    return this.respond(payload)
+    return this.respondToRemoteEvent(payload)
   }
 
   // ─── event subscription ─────────────────────────────────────────────────────
@@ -473,7 +473,7 @@ export class HarnessClient implements Disposable {
   // ─── internals ──────────────────────────────────────────────────────────────
   /** Render one canonically-written `ns/method` in the negotiated style. */
   private ep(method: string): string {
-    return wireEndpoint(this.profile?.endpointStyle ?? 'dot', method)
+    return wireEndpoint(this.profile?.endpointStyle ?? 'slash', method)
   }
 
   /** Fail fast, with actionable wording, when the host lacks a control method. */
@@ -486,35 +486,46 @@ export class HarnessClient implements Disposable {
     }
   }
 
+  private outcomeFor(o: ApprovalOutcome): RemoteEventResult['outcome'] {
+    switch (o) {
+      case 'allowed-once': return { kind: 'result' }
+      case 'rejected': return { kind: 'rejected', error: { name: 'rejected', message: 'Rejected by user' } }
+      case 'cancelled': return { kind: 'rejected', error: { name: 'cancelled', message: 'Cancelled by user' } }
+      case 'unavailable': return { kind: 'rejected', error: { name: 'unavailable', message: 'Unavailable' } }
+    }
+  }
+
   /**
-   * Call a control-surface method, tolerating the several `{args}` spellings
-   * upstream has shipped (`request`, `_request`, bare fields, none).
-   *
-   * A business error whose code says "your arguments do not match my declared
-   * parameters" proves the endpoint EXISTS — so it advances to the next
-   * spelling instead of failing. Anything else is a real failure and throws.
-   * The winning SPELLING is remembered per method — never the argument VALUES:
-   * two calls to `session/command` carry different lines, so caching the object
-   * itself would silently replay the first call's payload forever. The follow-up
-   * call then costs exactly one round trip.
+   * Call one method. The request object `req` is wrapped as `{ args: <inner> }`,
+   * where `<inner>` is tried in the method-appropriate candidate set
+   * (`_request` for session/list, `request` for most, bare for arg-less). The
+   * winning spelling is remembered per method — never the argument VALUES: two
+   * calls to `session/command` carry different lines, so caching the object itself
+   * would silently replay the first call's payload forever. The follow-up call
+   * then costs exactly one round trip.
    */
-  private async rpcVariants<V>(
-    canonicalMethod: string,
-    variants: readonly Record<string, unknown>[],
-  ): Promise<V> {
-    const remembered = this.argShapes.get(canonicalMethod)
-    const indexed = variants.map((args, index) => ({ args, index }))
-    const winner = remembered === undefined ? undefined : indexed[remembered]
-    const order = winner === undefined
-      ? indexed
-      // Try remembered spelling first, then everything it is not — without
-      // excluding it, a warm call would attempt the same shape twice.
-      : [winner, ...indexed.filter(v => v.index !== remembered)]
+  private async rpc<V>(method: string, req: Record<string, unknown>): Promise<V> {
+    if (!LOOPBACK_HOSTS.has(this.opts.host)) {
+      throw new Error(`Refusing to talk to non-loopback host ${this.opts.host}: this plugin only drives a local DeepSeek Harness.`)
+    }
+    await this.opts.auth.init()
+    const cookie = this.opts.auth.cookieHeader()
+    // Only a cookie-gated host actually needs one; rc.2 serves /api/* unauthenticated? No —
+    // rc.2 REQUIRES the cookie. If we have no cookie and the host is gated, fail fast.
+    if (cookie === undefined && (this.profile?.auth ?? 'cookie') === 'cookie') throw this.authRequired()
+
+    const candidates = innerCandidates(method, req)
+    const all = candidates.map((c, i) => ({ c, i }))
+    const remembered = this.argShapes.get(method)
+    const order = remembered === undefined
+      ? all
+      : [...all.filter(x => x.i !== remembered), all[remembered]!]
+
     let last: unknown
-    for (const { args, index } of order) {
+    for (const { c, i } of order) {
       try {
-        const value = await this.rpc<V>(canonicalMethod, args)
-        this.argShapes.set(canonicalMethod, index)
+        const value = await this.postEnvelope<V>(method, c, cookie)
+        this.argShapes.set(method, i)
         return value
       } catch (e) {
         if (e instanceof HarnessRpcError && isShapeRejection(e.code)) { last = e; continue }
@@ -523,26 +534,19 @@ export class HarnessClient implements Disposable {
     }
     throw last instanceof Error
       ? last
-      : new Error(`${canonicalMethod}: the host accepted none of the known argument shapes.`)
+      : new Error(`${method}: the host accepted none of the known argument shapes.`)
   }
 
-  private async rpc<V>(method: string, args: Record<string, unknown>): Promise<V> {
-    if (!LOOPBACK_HOSTS.has(this.opts.host)) {
-      throw new Error(`Refusing to talk to non-loopback host ${this.opts.host}: this plugin only drives a local DeepSeek Harness.`)
-    }
-    await this.opts.auth.init()
-    const cookie = this.opts.auth.cookieHeader()
-    // Only a cookie-gated host actually needs one; rc.6 serves /api/* unauthenticated.
-    if (cookie === undefined && (this.profile?.auth ?? 'cookie') === 'cookie') throw this.authRequired()
+  /** POST one `{ args: inner }` envelope and decode the server-response. */
+  private async postEnvelope<V>(method: string, inner: Record<string, unknown>, cookie: string | undefined): Promise<V> {
     const endpoint = this.ep(method)
     const origin = `http://${this.opts.host}:${String(this.opts.port)}`
-    // rc.6: payload is the args object DIRECTLY — no {args}/{request} wrapper.
     const body = JSON.stringify({
       type: 'client-request',
       rpcId: randomUUID(),
       method: endpoint,
-      payload: args,
-    })
+      payload: { args: inner },
+    } as ClientRequest)
     let res
     try {
       res = await httpRequest({
@@ -559,10 +563,7 @@ export class HarnessClient implements Disposable {
     }
     if (res.status === 401) throw this.authRequired()
     if (res.status === 404) {
-      throw new Error(
-        `HTTP 404 on /api/${endpoint} — the running harness does not expose that endpoint. `
-        + `Negotiated wire style is "${this.profile?.endpointStyle ?? 'dot'}"; the host may be a different release.`,
-      )
+      throw new HarnessUnsupportedError(method, endpoint)
     }
     if (res.status !== 200) {
       throw new Error(`HTTP ${String(res.status)} on /api/${endpoint}: ${res.body.trim().slice(0, 200)}`)
@@ -575,27 +576,30 @@ export class HarnessClient implements Disposable {
     }
     if (!env.result.ok) {
       const err = env.result.error as RpcError
+      // Missing-method errors mean "this host doesn't serve it" → surface as unsupported.
+      if (isMissingMethodError(err.code)) throw new HarnessUnsupportedError(method, endpoint)
       throw new HarnessRpcError(err.code, err.message, err.details)
     }
     return env.result.value
   }
 
-  /** POST a `client-response` to /api/respond to settle an approval. */
-  private async respond(payload: ApprovalRespondRequest): Promise<void> {
+  /** POST a `client-request` to /api/$events/result to settle an approval. */
+  private async respondToRemoteEvent(payload: RemoteEventResult): Promise<void> {
     await this.opts.auth.init()
     const cookie = this.opts.auth.cookieHeader()
     const origin = `http://${this.opts.host}:${String(this.opts.port)}`
     const body = JSON.stringify({
-      type: 'client-response',
+      type: 'client-request',
       rpcId: randomUUID(),
-      result: payload,
-    } as ClientResponse<ApprovalRespondRequest>)
+      method: '$events/result',
+      payload: { args: payload },
+    } as ClientRequest)
     try {
       await httpRequest({
         host: this.opts.host,
         port: this.opts.port,
         method: 'POST',
-        path: '/api/respond',
+        path: '/api/$events/result',
         headers: { ...(cookie === undefined ? {} : { cookie }), origin },
         body,
       })
@@ -605,33 +609,69 @@ export class HarnessClient implements Disposable {
     }
   }
 
-  /** Learn host identity from `host.describe` (called once, after the mux opens). */
-  private async hostDescribe(): Promise<void> {
-    try {
-      const d = await this.rpc<HostDescribeValue>('host/describe', {})
-      this.info = {
-        home: d.cwd,
-        version: d.version,
-        provider: d.provider,
-        model: d.model,
-      }
-      this.opts.log(`host.describe: version=${d.version} cwd=${d.cwd} provider=${d.provider ?? '?'} model=${d.model ?? '?'}`)
-    } catch (e) {
-      this.opts.log(`host.describe: ${e instanceof Error ? e.message : String(e)}`)
-      this.info = this.info ?? { home: '' }
+  // ─── downlink mux frame dispatch ────────────────────────────────────────────
+  /** Host identity from the `ready` frame (carries home + clientId only). */
+  private onReady(ready: ReadyFrame): void {
+    this.info = { home: ready.host.home, clientId: ready.clientId }
+    this.opts.log(`ready: home=${ready.host.home} clientId=${ready.clientId.slice(0, 12)}…`)
+    // Re-emit connected with the now-known identity, if already connected.
+    if (this.state.kind === 'connected') {
+      this.setState({ kind: 'connected', info: this.info })
+    }
+    if (!this.readyResolved) {
+      this.readyResolved = true
+      clearTimeout(this.readyTimer)
+      this.readyResolver?.()
+      this.readyResolver = undefined
     }
   }
 
-  // ─── downlink mux frame dispatch ────────────────────────────────────────────
+  /**
+   * One decoded `$events` frame (the `value` of a Remote stream `item`). The wire
+   * names differ from this plugin's internal vocabulary, so translate the
+   * waterfall events before routing: `approval/request` → `approval/requested`,
+   * `user-questions/request` → `question/requested`. Everything else passes
+   * through to the existing routing unchanged.
+   */
+  private onMuxMessage(frame: MuxFrame): void {
+    const f = frame as { type: string; [k: string]: unknown }
+    switch (f.type) {
+      case 'approval/request': {
+        const eventId = String(f.eventId ?? '')
+        const req = (f.request ?? {}) as Record<string, unknown>
+        const internal = {
+          type: 'approval/requested',
+          sessionId: typeof req.sessionId === 'string' ? req.sessionId : (this.activeSessionId ?? ''),
+          approvalId: eventId,
+          toolName: typeof req.toolName === 'string' ? req.toolName : undefined,
+          callId: typeof req.callId === 'string' ? req.callId : undefined,
+          reason: typeof req.reason === 'string' ? req.reason : undefined,
+        } as MuxFrame
+        this.approvalFrames.set(eventId, { eventId, sessionId: (internal as { sessionId: string }).sessionId })
+        this.notifyApproval(internal, eventId)
+        return
+      }
+      case 'user-questions/request': {
+        const eventId = String(f.eventId ?? '')
+        const req = (f.request ?? {}) as Record<string, unknown>
+        const internal = {
+          type: 'question/requested',
+          sessionId: typeof req.sessionId === 'string' ? req.sessionId : (this.activeSessionId ?? ''),
+          questions: Array.isArray(req.questions) ? req.questions : [],
+        } as MuxFrame
+        this.notifyApproval(internal, eventId)
+        return
+      }
+    }
+    this.onMuxFrame(frame)
+  }
+
   /** One decoded mux frame: route approvals to approval listeners, session frames to the active sink. */
   private onMuxFrame(frame: MuxFrame): void {
-    // MuxFrame is an open union (catch-all member with `type: string`), so discriminant
-    // narrowing does not exclude the catch-all; cast at the field-access sites.
     const f = frame as { type: string; [k: string]: unknown }
     switch (f.type) {
       case 'approval/requested': {
         const af = frame as Extract<MuxFrame, { type: 'approval/requested' }>
-        this.approvalFrames.set(af.approvalId, af)
         this.notifyApproval(af, af.approvalId)
         return
       }
@@ -683,7 +723,8 @@ export class HarnessClient implements Disposable {
           if (cookie !== undefined) headers['cookie'] = cookie
           return headers
         },
-        onFrame: (frame) => { this.onMuxFrame(frame) },
+        onReady: (ready) => { this.onReady(ready) },
+        onFrame: (frame) => { this.onMuxMessage(frame) },
         onStatus: (s) => { this.onMuxStatus(s) },
         log: this.opts.log,
       })
@@ -707,7 +748,7 @@ export class HarnessClient implements Disposable {
     }
   }
 
-  /** Resolve once the mux socket reports open; the ready signal for rc.6. */
+  /** Resolve once the mux socket reports open (the WS upgrade succeeded). */
   private awaitMuxOpen(): Promise<void> {
     const mux = this.mux
     if (mux === undefined) return Promise.reject(new Error('mux is not open'))
@@ -721,6 +762,21 @@ export class HarnessClient implements Disposable {
         resolve: () => { clearTimeout(timer); resolve() },
         reject: (e) => { clearTimeout(timer); reject(e) },
       }
+    })
+  }
+
+  /** Resolve (once) when the `ready` frame arrives, or after a short timeout. */
+  private awaitReady(): Promise<void> {
+    if (this.readyResolved) return Promise.resolve()
+    return new Promise<void>((resolve) => {
+      this.readyResolver = resolve
+      this.readyTimer = setTimeout(() => {
+        if (!this.readyResolved) {
+          this.readyResolved = true
+          this.readyResolver = undefined
+          resolve()
+        }
+      }, READY_TIMEOUT_MS)
     })
   }
 }

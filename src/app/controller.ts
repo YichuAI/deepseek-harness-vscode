@@ -621,8 +621,8 @@ export class AppController {
     if (sid === undefined) return
     // Pre-fill with the title the host is currently projecting, so the box
     // starts as "edit this" rather than "retype from scratch".
-    const currentTitle = this.sessions.find(s => s.sessionId === sid)
-      ?.projections?.values.title ?? undefined
+    const currentTitle = (this.sessions.find(s => s.sessionId === sid)
+      ?.projections?.values.title ?? undefined) as string | undefined
     const next = await this.d.vscodeAPI.window.showInputBox({
       title: 'DeepSeek Harness: Rename session',
       prompt: 'A renamed session is pinned — the host stops regenerating its title.',

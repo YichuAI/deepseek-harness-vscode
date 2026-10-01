@@ -109,6 +109,7 @@ function muxLabel(s: MuxStatus): string {
     case 'idle': return 'idle'
     case 'connecting': return 'connecting…'
     case 'open': return 'live'
+    case 'ready': return 'ready'
     case 'closed': return 'closed (' + s.reason + ')'
     case 'error': return 'error: ' + s.message
   }

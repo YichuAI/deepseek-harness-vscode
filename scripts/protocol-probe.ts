@@ -132,7 +132,6 @@ async function main(): Promise<void> {
   console.log(`event socket   : ${profile.muxPath}`)
   console.log(`authentication : ${profile.auth}`)
   console.log(`session/list   : args ${JSON.stringify(profile.listArgs)}`)
-  if (profile.catalogEndpoint !== undefined) console.log(`model catalog  : ${profile.catalogEndpoint}`)
   // What the sidebar's control panel may offer is decided by this probe.
   const controlSurface = Object.entries(profile.capabilities)
   const served = controlSurface.filter(([, present]) => present).map(([name]) => name)

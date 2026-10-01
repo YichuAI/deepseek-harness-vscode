@@ -8,8 +8,11 @@
 #   PAT        必填。repo 作用域的 GitHub Personal Access Token。
 #   owner      默认 YichuAI
 #   repo       默认 deepseek-harness-vscode
-#   tag        默认 v0.0.7（须已存在于远端）
-#   vsix-path  默认 harness-connector-deepseek-0.0.7.vsix（仓库根目录，*.vsix 被 gitignore）
+#   tag        默认 v0.0.8（须已存在于远端）
+#   vsix-path  默认 harness-connector-deepseek-0.0.8.vsix（仓库根目录，*.vsix 被 gitignore）
+#
+# 注：当前发版走 `gh release create`（本机已 gh auth login 为 YichuAI，token 含 repo
+# 作用域，存 keyring），不再传 PAT。本脚本保留作离线/CI 备用。
 #
 # 说明:
 #   - Release 正文从 CHANGELOG.md 的对应 `## [x.y.z]` 段落自动截取。

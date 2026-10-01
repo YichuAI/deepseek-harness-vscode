@@ -255,8 +255,65 @@ export interface SessionPageValue {
 export interface ModelCatalog {
   default: { provider: string; model: string; reasoningEffort?: string }
   routableProviders: readonly string[]
-  groups: readonly { id: string; name: string; models: readonly { id: string; name: string }[] }[]
+  groups: readonly {
+    id: string
+    name: string
+    models: readonly {
+      id: string
+      name: string
+      description?: string
+      /** Reasoning-effort ladder for this model, with the host default. */
+      reasoning?: {
+        efforts: readonly { id: string; name: string; description?: string }[]
+        defaultEffort: string
+      }
+    }[]
+  }[]
   failures: readonly { id: string; name: string; message: string }[]
+}
+
+/** `session/selectModel` response value (rc.2: `{ request: … }` args). */
+export interface ModelSelectionValue {
+  selected: { provider: string; model: string; reasoningEffort?: string }
+}
+
+/** One entry of the `commands/list` registry (rc.2 slash commands). */
+export interface CommandDescriptor {
+  definitionId: string
+  name: string
+  description: string
+  input?: { hint?: string; attachments?: boolean }
+}
+
+/** One pending queued message from the `inbox.next-turn` projection. */
+export interface QueueItemView {
+  id: string
+  text: string
+}
+
+/** Session-level token/usage projection (`projections.values`). */
+export interface SessionUsageProjection {
+  tokenUsage?: {
+    uncachedInputTokens?: number
+    outputTokens?: number
+    cacheReadTokens?: number
+    cacheWriteTokens?: number
+  }
+  sessionStats?: {
+    turns?: number
+    steps?: number
+    llmMs?: number
+    toolMs?: number
+    ttftMs?: number
+    ttftSteps?: number
+    decodeMs?: number
+    decodeTokens?: number
+  }
+  contextBreakdown?: {
+    systemTokens?: number
+    toolsTokens?: number
+    messageTokens?: number
+  }
 }
 
 // ─── workspace domain ────────────────────────────────────────────────────────
@@ -374,7 +431,20 @@ export interface AssistantMessageData {
   turn: number
   step: number
   message: { role: string; content?: ContentBlock[]; source?: { kind?: string; provider?: string; model?: string }; id?: string }
-  usage?: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number }
+  /**
+   * Usage sample for this step (rc.2, mirrors the official UI's `normalizeUsage`).
+   * `inputTokens` is the UNCACHED prompt portion; cached prompt tokens travel
+   * separately as `cacheReadTokens` (hits) / `cacheWriteTokens` (writes).
+   */
+  usage?: {
+    inputTokens?: number
+    outputTokens?: number
+    cacheReadTokens?: number
+    cacheWriteTokens?: number
+    reasoningTokens?: number
+    totalTokens?: number
+    routes?: { provider?: string; model?: string }[]
+  }
 }
 
 export interface ToolCallData {

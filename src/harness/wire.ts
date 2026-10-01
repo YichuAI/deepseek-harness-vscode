@@ -62,7 +62,7 @@ export interface NegotiateOptions {
 
 /** Namespaces whose methods are converted between `ns/method` and `ns.method`. */
 const CONVERTIBLE_NAMESPACES = new Set([
-  'session', 'workspace', 'host', 'agentPreset', 'goal', 'llm', 'subagent', 'skill', 'settings', 'credentials',
+  'session', 'workspace', 'host', 'agentPreset', 'goal', 'llm', 'subagent', 'skill', 'settings', 'credentials', 'commands',
 ])
 
 /** Event-socket candidates, 0.2.0-rc.2 first (WS upgrade, not a GET route). */
@@ -86,6 +86,8 @@ export const CONTROL_METHODS = [
   'session/page',
   'workspace/create',
   'session/modelCatalog',
+  'commands/execute',
+  'commands/list',
 ] as const
 
 export type ControlMethod = (typeof CONTROL_METHODS)[number]

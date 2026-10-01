@@ -38,6 +38,20 @@ export interface UiState {
   brandIconUri?: string
   reviews?: import('../review/types.ts').ReviewSummary[]
   approvals?: import('../approval/types.ts').ApprovalSummary[]
+  /** Control surface folded from the session's knob/goal/todo events. */
+  control?: import('../conversation/control.ts').ControlState
+  /** `ns/method` → served by this host. Absent key means "probed and missing". */
+  capabilities?: Record<string, boolean>
+  /** Model catalog (rc.2 `session/modelCatalog`) — gated by capability. */
+  modelCatalog?: import('../harness/protocol.ts').ModelCatalog
+  /** Slash-command registry (rc.2 `commands/list`) for the active session. */
+  commands?: import('../harness/protocol.ts').CommandDescriptor[]
+  /** Queued messages (rc.2 `inbox.next-turn` projection) for the active session. */
+  queue?: import('../harness/protocol.ts').QueueItemView[]
+  /** Session token/usage totals (folded events + host projections). */
+  sessionUsage?: import('../conversation/usage.ts').SessionUsageState
+  /** Auto-approve incoming approval requests (setting mirror). */
+  autoApprove: boolean
   renderVersion: number
 }
 
@@ -48,7 +62,7 @@ export type WebviewAction =
   | { type: 'selectSession'; sessionId: string }
   | { type: 'newSession' }
   | { type: 'refreshSessions' }
-  | { type: 'sendPrompt'; text: string; context?: import('../harness/protocol.ts').PromptContext }
+  | { type: 'sendPrompt'; text: string; context?: import('../harness/protocol.ts').PromptContext; steer?: boolean }
   | { type: 'stop' }
   | { type: 'openWebUI' }
   | { type: 'toggleSystemMessages' }
@@ -64,10 +78,14 @@ export type WebviewAction =
   // ─── control surface ────────────────────────────────────────────────────────
   | { type: 'controlPlan'; active: boolean }
   | { type: 'controlPreset'; preset: string }
+  | { type: 'controlModel'; provider: string; model: string; reasoningEffort?: string }
   | { type: 'controlFork' }
   | { type: 'controlCompact' }
   | { type: 'controlArchive' }
   | { type: 'controlRename' }
+  // ─── queued messages (rc.2 session/updateQueue) ─────────────
+  | { type: 'queueSteer'; itemId: string }
+  | { type: 'queueRemove'; itemId: string }
 
 export interface ProviderDeps {
   client: HarnessClient

@@ -2,7 +2,7 @@
   "name": "harness-connector-deepseek",
   "displayName": "DeepSeek Harness Connector",
   "description": "Native VS Code client for DeepSeek Harness. Connect to your existing local Harness instance and continue the same workspaces and sessions directly inside VS Code.",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "publisher": "lucasliang",
   "license": "MIT",
   "repository": {
@@ -172,6 +172,11 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "Show plugin-injected system messages (e.g. `@deepseek-ai/dsh-system-prompt` runtime context, approval-policy notices). Hidden by default to reduce noise."
+        },
+        "deepseekHarness.autoApproveApprovals": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Automatically answer tool-approval requests with `allow once` (only those answerable from VS Code). Equivalent of Copilot's `/autoApprove` — review the security trade-off before enabling."
         },
         "deepseekHarness.autoSession": {
           "type": "boolean",

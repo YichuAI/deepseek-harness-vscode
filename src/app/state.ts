@@ -6,9 +6,10 @@
  */
 
 import type { MuxStatus } from '../harness/events.ts'
-import type { SessionSummary, WorkspaceView } from '../harness/protocol.ts'
+import type { CommandDescriptor, ModelCatalog, QueueItemView, SessionSummary, WorkspaceView } from '../harness/protocol.ts'
 import type { SessionSnapshot } from '../conversation/types.ts'
 import type { ControlState } from '../conversation/control.ts'
+import type { SessionUsageState } from '../conversation/usage.ts'
 import type { ReviewSummary } from '../review/types.ts'
 import type { ApprovalSummary } from '../approval/types.ts'
 
@@ -43,6 +44,16 @@ export interface UiState {
   control?: ControlState
   /** `ns/method` → served by this host. Absent key means "probed and missing". */
   capabilities?: Record<string, boolean>
+  /** Model catalog (rc.2 `session/modelCatalog`) — gated by capability. */
+  modelCatalog?: ModelCatalog
+  /** Slash-command registry (rc.2 `commands/list`) for the active session. */
+  commands?: CommandDescriptor[]
+  /** Queued messages (rc.2 `inbox.next-turn` projection) for the active session. */
+  queue?: QueueItemView[]
+  /** Session token/usage totals (folded events + host projections). */
+  sessionUsage?: SessionUsageState
+  /** Auto-approve incoming approval requests (setting mirror). */
+  autoApprove: boolean
   /** Monotonically increasing. Bumps whenever any UiState field changes,
    *  including sub-object mutations inside snapshot. Webview re-renders on
    *  renderVersion change only (solves streaming no-render bug). */

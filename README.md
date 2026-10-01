@@ -38,8 +38,18 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full diff.
 
 ### Previous releases
 
+- **v0.0.9** — Interaction loop: model + reasoning-effort picker, approval auto-approve, sandbox switching, queued/steer messages, slash-command palette, token-usage panel with cache-hit %.
 - **v0.0.2** — Conversation UX & Architecture Baseline: Assistant Markdown rendering, tool card merging, system message collapsing, lazy workspace/session creation, streaming render fix, architecture hardening.
 - **v0.0.1** — First public release: prove VS Code and the browser share the same Harness session.
+
+## What v0.0.9 adds
+
+- **Model + reasoning-effort picker** — the sidebar fetches `session/modelCatalog` and switches via `session/selectModel`; the effective model renders from `request/header`.
+- **Approval auto-approve** — optional setting `deepseekHarness.autoApproveApprovals` answers incoming `approval/request` frames with `allowed-once` automatically (off by default).
+- **Sandbox switching** — the sandbox-mode control now writes, not just renders.
+- **Queued messages / steer** — a queue bar renders the host's `inbox.next-turn` projection; you can steer a queued item into the running turn or remove it (`session/updateQueue`), and send prompts in steer mode while a turn is running.
+- **Slash-command palette** — typing `/` opens completion from `commands/list`; execution goes through the real rc.2 write path `commands/execute`.
+- **Token usage panel** — per-session input/output/cache-read/cache-write/reasoning tokens, totals and **cache-hit percentage** (same formula as the official Web UI), folded from `assistant/message.usage` events and reconciled with host projections.
 
 ## What v0.0.3 does
 
@@ -63,8 +73,7 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full diff.
 
 For your safety, the following remain out of scope:
 
-- No `commands/execute`, no `credentials` or `settings` API.
-- No model switching.
+- No `credentials` or `settings` API; no auto-approve of high-risk tools beyond the opt-in `autoApproveApprovals` switch.
 - No inline completion, terminal/LSP integration.
 - High-risk approvals (e.g. `bash` with untrusted input) cannot be allowed from VS Code — the card shows "Review in Web UI".
 - No second session database — the Harness Session is the **only** source of truth.
@@ -100,7 +109,7 @@ For your safety, the following remain out of scope:
    Or install the VSIX from [GitHub Releases](https://github.com/liangwythu/deepseek-harness-vscode/releases):
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.0.8.vsix
+   code --install-extension harness-connector-deepseek-0.0.9.vsix
    ```
 
 3. Nothing to configure. The extension auto-connects: it reads the browser-session
@@ -165,6 +174,7 @@ command to run instead of just reporting `401`.
 | `deepseekHarness.host` | `127.0.0.1` | **v0.0.x only allows `127.0.0.1` or `localhost`.** Any other value is refused. |
 | `deepseekHarness.port` | `3080` | The default `dsh web` port. Override if you started `dsh web --port <n>`. |
 | `deepseekHarness.showSystemMessages` | `false` | Show plugin-injected system messages (runtime context, approval notices). Hidden by default; toggle live with the `SYS` button in the webview header. |
+| `deepseekHarness.autoApproveApprovals` | `false` | **v0.0.9+** Automatically answer incoming approval requests with `allowed-once`. Off by default — enabling it means tools run without per-call confirmation. |
 
 ## Commands
 
@@ -245,8 +255,8 @@ npm install
 npm run build        # esbuild → dist/extension.js
 npm run watch        # rebuild on change
 npm run typecheck
-npm run package      # → harness-connector-deepseek-0.0.8.vsix
-npm run protocol-test      # 83 protocol assertions against a fake harness
+npm run package      # → harness-connector-deepseek-0.0.9.vsix
+npm run protocol-test      # 91 protocol assertions against a fake harness
 npm run protocol-probe     # report what your real dsh web exposes
 ```
 
@@ -270,10 +280,10 @@ Press `F5` in VS Code to launch an Extension Development Host with the extension
 - Unknown harness event types are ignored (the protocol is merge-extensible); they do not crash the client but also do not render.
 - Diff review revert uses `git checkout` — uncommitted changes to the target file will be lost on Reject.
 
-## Roadmap (v0.0.7+)
+## Roadmap (v0.1.0+)
 
-- Model / reasoning-effort pickers driven by `session/selectModel` and `llm/models`
-- Sub-agent controls (`subagent/interrupt`, queued-message steering)
+- Session search (`session/search`) and attachment upload (`session/attachment`)
+- Live event inspector / agent-debug panel
 - "Load older" history pagination
 - Inline Completion
 - VS Code filesystem provider

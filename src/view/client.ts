@@ -20,7 +20,13 @@ export const CLIENT_SCRIPT = /* js */ `
   let currentReviews = [];
   let currentApprovals = [];
   let currentCapabilities = {};
+  let currentCommands = [];
+  let currentQueue = [];
+  let currentCatalog = null;
   let lastControlSig = '';
+  // Slash completion state
+  let slashItems = [];
+  let slashIndex = -1;
 
   // ─── markdown renderer (webview-only, html disabled!) ──────────────────────
   const md = new MarkdownIt({ html: false, linkify: true, breaks: false });
@@ -68,6 +74,9 @@ export const CLIENT_SCRIPT = /* js */ `
     currentReviews = state.reviews || [];
     currentApprovals = state.approvals || [];
     currentCapabilities = state.capabilities || {};
+    currentCommands = state.commands || [];
+    currentQueue = state.queue || [];
+    currentCatalog = state.modelCatalog || null;
 
     // Brand bar
     const icon = $('brand-icon');
@@ -178,7 +187,82 @@ export const CLIENT_SCRIPT = /* js */ `
     $('stop').disabled = !state.canStop;
     $('new-session').disabled = state.connection !== 'connected' || state.workspace === null;
     $('refresh').disabled = state.connection !== 'connected';
+    // Steer checkbox only makes sense while the agent is running.
+    const running = !!(snap && snap.running);
+    $('steer-wrap').style.display = running ? '' : 'none';
+    if (!running) $('steer').checked = false;
+    renderQueueBar(state);
   }
+
+  // ─── queued messages (rc.2 session/updateQueue) ──────────────────────────
+  function renderQueueBar(state) {
+    const bar = $('queue-bar');
+    if (!state.activeSessionId || currentQueue.length === 0) {
+      bar.style.display = 'none'; bar.innerHTML = ''; return;
+    }
+    bar.style.display = '';
+    bar.innerHTML = '';
+    const title = document.createElement('div');
+    title.className = 'queue-title';
+    title.textContent = currentQueue.length === 1 ? '1 queued message' : (currentQueue.length + ' queued messages');
+    bar.appendChild(title);
+    for (const q of currentQueue) {
+      const row = document.createElement('div');
+      row.className = 'queue-item';
+      const text = document.createElement('span');
+      text.className = 'queue-text';
+      text.textContent = q.text;
+      text.title = q.text;
+      const steerBtn = document.createElement('button');
+      steerBtn.className = 'secondary icon';
+      steerBtn.textContent = '⚡';
+      steerBtn.title = 'Steer: inject into the running turn now';
+      steerBtn.addEventListener('click', (e) => { e.stopPropagation(); post({ type: 'queueSteer', itemId: q.id }); });
+      const rmBtn = document.createElement('button');
+      rmBtn.className = 'secondary icon';
+      rmBtn.textContent = '✕';
+      rmBtn.title = 'Remove from queue';
+      rmBtn.addEventListener('click', (e) => { e.stopPropagation(); post({ type: 'queueRemove', itemId: q.id }); });
+      row.appendChild(text); row.appendChild(steerBtn); row.appendChild(rmBtn);
+      bar.appendChild(row);
+    }
+  }
+
+  // ─── slash command completion (rc.2 commands/list) ───────────────────────
+  function slashMatches(text) {
+    if (!text.startsWith('/')) return [];
+    const word = text.slice(1).toLowerCase();
+    return currentCommands.filter((c) => c.name.toLowerCase().startsWith(word)).slice(0, 8);
+  }
+
+  function renderSlashPopup() {
+    const popup = $('slash-popup');
+    if (slashItems.length === 0) { popup.style.display = 'none'; popup.innerHTML = ''; return; }
+    popup.style.display = '';
+    popup.innerHTML = '';
+    slashItems.forEach((c, i) => {
+      const row = document.createElement('div');
+      row.className = 'slash-row' + (i === slashIndex ? ' active' : '');
+      const name = document.createElement('span');
+      name.className = 'slash-name'; name.textContent = '/' + c.name;
+      const desc = document.createElement('span');
+      desc.className = 'slash-desc';
+      desc.textContent = c.description + (c.input && c.input.hint ? '  ' + c.input.hint : '');
+      row.appendChild(name); row.appendChild(desc);
+      row.addEventListener('click', () => { applySlash(c); });
+      popup.appendChild(row);
+    });
+  }
+
+  function applySlash(c) {
+    const ta = $('input');
+    ta.value = '/' + c.name + ' ';
+    closeSlash();
+    ta.focus();
+    updateContextPreview();
+  }
+
+  function closeSlash() { slashItems = []; slashIndex = -1; renderSlashPopup(); }
 
   // ─── control surface ────────────────────────────────────────────────────────
   // The harness ships plan mode, permission presets, sandbox/approval knobs,
@@ -261,18 +345,25 @@ export const CLIENT_SCRIPT = /* js */ `
       if ((c.subagents || []).some((s) => s.running)) summary.appendChild(ctlChip('subagent', 'running'));
       if (c.compaction && c.compaction.running) summary.appendChild(ctlChip('compacting', 'running'));
       if (c.model && c.model.model) summary.appendChild(ctlChip(c.model.model, ''));
+      const u = state.sessionUsage;
+      if (u && u.projected && u.projected.tokenUsage) {
+        const t = u.projected.tokenUsage;
+        const total = (t.uncachedInputTokens || 0) + (t.outputTokens || 0) + (t.cacheReadTokens || 0) + (t.cacheWriteTokens || 0);
+        if (total > 0) summary.appendChild(ctlChip(fmtCompact(total) + ' tok', ''));
+      }
     }
 
     // ── execution knobs ──
+    const canCommand = supported('commands/execute');
     body.appendChild(ctlSection('Execution', (box) => {
       const row = ctlRow(box);
       const planOn = !!(c && c.planActive === true);
       const planBtn = ctlButton(row, planOn ? 'Plan mode: on' : 'Plan mode: off',
-        { secondary: true, disabled: !supported('session/command') },
+        { secondary: true, disabled: !canCommand },
         () => post({ type: 'controlPlan', active: !planOn }));
-      planBtn.title = supported('session/command')
+      planBtn.title = canCommand
         ? 'Flip /plan on this session'
-        : 'This host does not expose session/command';
+        : 'This host does not expose commands/execute';
 
       if (c && (c.sandbox || c.approvalPolicy)) {
         const chips = ctlRow(box);
@@ -290,7 +381,7 @@ export const CLIENT_SCRIPT = /* js */ `
         if (c && c.preset === name) opt.selected = true;
         sel.appendChild(opt);
       }
-      sel.disabled = !supported('session/command');
+      sel.disabled = !canCommand;
       sel.title = 'Permission preset (sandbox mode + approval policy)';
       sel.addEventListener('change', (e) => {
         post({ type: 'controlPreset', preset: e.target.value });
@@ -299,6 +390,106 @@ export const CLIENT_SCRIPT = /* js */ `
       selRow.appendChild(sel);
       if (c && c.agentPreset) ctlNote(box, 'agent preset: ' + c.agentPreset);
     }));
+
+    // ── model + reasoning effort (rc.2 session/modelCatalog + selectModel) ──
+    if (currentCatalog && currentCatalog.groups && supported('session/selectModel')) {
+      body.appendChild(ctlSection('Model', (box) => {
+        const row = ctlRow(box);
+        const current = (c && c.model) || {};
+        const currentKey = (current.provider || currentCatalog.default.provider) + '|' + (current.model || currentCatalog.default.model);
+        const modelSel = document.createElement('select');
+        modelSel.title = 'Model for future turns';
+        for (const group of currentCatalog.groups) {
+          for (const m of (group.models || [])) {
+            const key = group.id + '|' + m.id;
+            const opt = document.createElement('option');
+            opt.value = key;
+            opt.textContent = (m.name || m.id) + (group.name ? ' · ' + group.name : '');
+            if (key === currentKey) opt.selected = true;
+            modelSel.appendChild(opt);
+          }
+        }
+        const effortSel = document.createElement('select');
+        effortSel.title = 'Reasoning effort';
+        const fillEfforts = () => {
+          effortSel.innerHTML = '';
+          const parts = modelSel.value.split('|');
+          const gid = parts[0], mid = parts[1];
+          let model = null;
+          for (const g of currentCatalog.groups) {
+            if (g.id !== gid) continue;
+            for (const m of (g.models || [])) if (m.id === mid) model = m;
+          }
+          const efforts = (model && model.reasoning && model.reasoning.efforts) || [];
+          const def = (model && model.reasoning && model.reasoning.defaultEffort) || 'high';
+          for (const e of efforts) {
+            const opt = document.createElement('option');
+            opt.value = e.id;
+            opt.textContent = 'effort: ' + (e.name || e.id);
+            opt.title = e.description || '';
+            if (e.id === def) opt.selected = true;
+            effortSel.appendChild(opt);
+          }
+          effortSel.style.display = efforts.length > 0 ? '' : 'none';
+        };
+        fillEfforts();
+        modelSel.addEventListener('change', fillEfforts);
+        const applyBtn = ctlButton(row, 'Apply', { secondary: true }, () => {
+          const parts = modelSel.value.split('|');
+          post({ type: 'controlModel', provider: parts[0], model: parts[1],
+            reasoningEffort: effortSel.value || undefined });
+        });
+        applyBtn.title = 'Select this model (and reasoning effort) for future turns';
+        const selRow2 = ctlRow(box);
+        selRow2.appendChild(modelSel);
+        selRow2.appendChild(effortSel);
+      }));
+    }
+
+    // ── token usage (event fold + host projections) ──
+    const u = state.sessionUsage;
+    const t = (u && u.projected && u.projected.tokenUsage) || null;
+    const folded = u && u.folded;
+    if (t || (folded && folded.steps > 0)) {
+      body.appendChild(ctlSection('Token usage', (box) => {
+        const src = t || {
+          uncachedInputTokens: folded.uncachedInputTokens,
+          outputTokens: folded.outputTokens,
+          cacheReadTokens: folded.cacheReadTokens,
+          cacheWriteTokens: folded.cacheWriteTokens,
+        };
+        const prompt = (src.uncachedInputTokens || 0) + (src.cacheReadTokens || 0) + (src.cacheWriteTokens || 0);
+        const total = prompt + (src.outputTokens || 0);
+        const grid = document.createElement('div');
+        grid.className = 'usage-grid';
+        const add = (label, value) => {
+          const cell = document.createElement('div');
+          cell.className = 'usage-cell';
+          const v = document.createElement('b'); v.textContent = value;
+          const l = document.createElement('span'); l.textContent = label;
+          cell.appendChild(v); cell.appendChild(l);
+          grid.appendChild(cell);
+        };
+        if (t && t.cacheReadTokens > 0 && prompt > 0) {
+          add('cache hit', Math.round((t.cacheReadTokens / prompt) * 1000) / 10 + '%');
+        }
+        add('total', fmtCompact(total));
+        add('input', fmtCompact(src.uncachedInputTokens || 0));
+        if (src.cacheReadTokens > 0) add('cache read', fmtCompact(src.cacheReadTokens));
+        if (src.cacheWriteTokens > 0) add('cache write', fmtCompact(src.cacheWriteTokens));
+        add('output', fmtCompact(src.outputTokens || 0));
+        box.appendChild(grid);
+        const stats = t && u.projected.sessionStats;
+        if (stats && (stats.turns > 0 || stats.llmMs > 0)) {
+          const bits = [];
+          if (stats.turns > 0) bits.push(stats.turns + ' turns');
+          if (stats.llmMs > 0) bits.push((stats.llmMs / 1000).toFixed(1) + 's llm');
+          if (stats.ttftMs > 0) bits.push('ttft ' + (stats.ttftMs / 1000).toFixed(2) + 's');
+          if (stats.decodeTokens > 0) bits.push(fmtCompact(stats.decodeTokens) + ' decoded');
+          if (bits.length > 0) ctlNote(box, bits.join(' · '));
+        }
+      }));
+    }
 
     // ── todos ──
     const todos = (c && c.todos) || [];
@@ -367,7 +558,7 @@ export const CLIENT_SCRIPT = /* js */ `
         () => post({ type: 'controlFork' }));
       ctlButton(row, 'Rename', { secondary: true, disabled: !supported('session/rename') },
         () => post({ type: 'controlRename' }));
-      ctlButton(row, 'Compact', { secondary: true, disabled: !supported('session/command') },
+      ctlButton(row, 'Compact', { secondary: true, disabled: !supported('commands/execute') },
         () => post({ type: 'controlCompact' }));
       ctlButton(row, 'Archive', { secondary: true, disabled: !supported('workspace/archiveSession') },
         () => post({ type: 'controlArchive' }));
@@ -377,7 +568,7 @@ export const CLIENT_SCRIPT = /* js */ `
       if (!supported('session/fork')) missing.push('session/fork');
       if (!supported('session/rename')) missing.push('session/rename');
       if (!supported('workspace/archiveSession')) missing.push('workspace/archiveSession');
-      if (!supported('session/command')) missing.push('session/command');
+      if (!supported('commands/execute')) missing.push('commands/execute');
       if (missing.length > 0) {
         const n = ctlNote(box, 'Not served by this host: ' + missing.join(', '));
         n.className = 'ctl-unsupported';
@@ -692,12 +883,29 @@ export const CLIENT_SCRIPT = /* js */ `
       const u = document.createElement('div');
       u.className = 'usage';
       const parts = [];
-      if (item.usage.inputTokens != null) parts.push('in ' + item.usage.inputTokens);
-      if (item.usage.outputTokens != null) parts.push('out ' + item.usage.outputTokens);
+      const use = item.usage;
+      const uncached = use.inputTokens != null ? use.inputTokens : undefined;
+      const promptTotal = (uncached || 0) + (use.cacheReadTokens || 0) + (use.cacheWriteTokens || 0);
+      if (use.cacheReadTokens > 0 && promptTotal > 0) {
+        parts.push('cache ' + (Math.round((use.cacheReadTokens / promptTotal) * 1000) / 10) + '%');
+      }
+      if (uncached != null) parts.push('in ' + fmtCompact(uncached));
+      if (use.cacheReadTokens > 0) parts.push('r ' + fmtCompact(use.cacheReadTokens));
+      if (use.cacheWriteTokens > 0) parts.push('w ' + fmtCompact(use.cacheWriteTokens));
+      if (use.outputTokens != null) parts.push('out ' + fmtCompact(use.outputTokens));
+      if (use.reasoningTokens > 0) parts.push('think ' + fmtCompact(use.reasoningTokens));
       u.textContent = parts.join(' · ') + ' tokens';
       d.appendChild(u);
     }
     return d;
+  }
+
+  /** Compact token count: 1234 → 1.2k, 2300000 → 2.3M. */
+  function fmtCompact(n) {
+    if (n == null || isNaN(n)) return '0';
+    if (n >= 1000000) return (Math.round(n / 100000) / 10) + 'M';
+    if (n >= 1000) return (Math.round(n / 100) / 10) + 'k';
+    return String(n);
   }
 
   // ─── @file parsing (webview-side preview only; authoritative parse is in extension host) ──
@@ -772,21 +980,51 @@ export const CLIENT_SCRIPT = /* js */ `
   $('move-right').addEventListener('click', () => post({ type: 'moveToSecondarySideBar' }));
   $('ctl-head').addEventListener('click', () => $('control').classList.toggle('open'));
   $('input').addEventListener('keydown', (e) => {
+    // Slash completion keyboard navigation first.
+    if (slashItems.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        slashIndex = (slashIndex + 1) % slashItems.length;
+        renderSlashPopup(); return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        slashIndex = (slashIndex - 1 + slashItems.length) % slashItems.length;
+        renderSlashPopup(); return;
+      }
+      if (e.key === 'Tab' || (e.key === 'Enter' && slashIndex >= 0)) {
+        e.preventDefault();
+        applySlash(slashItems[slashIndex >= 0 ? slashIndex : 0]); return;
+      }
+      if (e.key === 'Escape') { e.preventDefault(); closeSlash(); return; }
+    }
     if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
       e.preventDefault(); sendPrompt();
     }
   });
-  // Update context preview as user types @file references
-  $('input').addEventListener('input', () => updateContextPreview());
+  // Update context preview as user types @file references (+ slash popup)
+  $('input').addEventListener('input', () => {
+    updateContextPreview();
+    const text = $('input').value;
+    const matches = slashMatches(text.trimStart());
+    // Only show while typing the command word itself (no space yet).
+    const typing = /^\/\S*$/.test(text.trimStart()) && text.trimStart().startsWith('/');
+    slashItems = typing ? matches : [];
+    slashIndex = slashItems.length > 0 ? 0 : -1;
+    renderSlashPopup();
+  });
+  $('input').addEventListener('blur', () => setTimeout(closeSlash, 150));
 
   // Send prompt: the extension host does authoritative @file parsing and
-  // inlines file content into the user message. No need to send context here.
+  // inlines file content into the user message. Steer is read from the
+  // checkbox (only shown while the agent is running).
   function sendPrompt() {
     const ta = $('input');
     const text = ta.value.trim();
     if (!text) return;
     ta.value = '';
-    post({ type: 'sendPrompt', text });
+    post({ type: 'sendPrompt', text, steer: $('steer').checked === true });
+    closeSlash();
     updateContextPreview();
   }
 

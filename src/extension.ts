@@ -72,6 +72,7 @@ export function activate(context: vscode.ExtensionContext): void {
     canStop: false,
     showSystemMessages: cfg.showSystemMessages,
     systemMessageCount: 0,
+    autoApprove: cfg.autoApproveApprovals,
     renderVersion: 0,
   }
   const stateListeners = new Set<(s: UiState) => void>()
@@ -274,6 +275,11 @@ export function activate(context: vscode.ExtensionContext): void {
       cfg.showSystemMessages = next.showSystemMessages
       controller.applyConfigShowSystem(next.showSystemMessages)
     }
+    if (next.autoApproveApprovals !== cfg.autoApproveApprovals) {
+      cfg.autoApproveApprovals = next.autoApproveApprovals
+      setState({ autoApprove: next.autoApproveApprovals })
+      pushState()
+    }
     if (next.autoSession !== cfg.autoSession) {
       cfg.autoSession = next.autoSession
       auth.setAllowLocalMint(next.autoSession)
@@ -295,11 +301,12 @@ export function deactivate(): void {
   // Disposables owned by context.subscriptions; nothing to do here.
 }
 
-function readConfig(): { host: string; port: number; showSystemMessages: boolean; autoSession: boolean } {
+function readConfig(): { host: string; port: number; showSystemMessages: boolean; autoSession: boolean; autoApproveApprovals: boolean } {
   const cfg = vscode.workspace.getConfiguration(SECTION)
   const host = cfg.get<string>('host') ?? '127.0.0.1'
   const port = cfg.get<number>('port') ?? 3080
   const showSystemMessages = cfg.get<boolean>('showSystemMessages') ?? false
   const autoSession = cfg.get<boolean>('autoSession') ?? true
-  return { host, port, showSystemMessages, autoSession }
+  const autoApproveApprovals = cfg.get<boolean>('autoApproveApprovals') ?? false
+  return { host, port, showSystemMessages, autoSession, autoApproveApprovals }
 }

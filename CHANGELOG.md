@@ -5,6 +5,57 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.9] — 2026-10-01
+
+Tagline: **交互闭环 — 模型选择器、审批自动通过、排队/转向、Slash 命令、Token 用量面板。**
+Tagline (EN): **the interaction loop — model picker, auto-approve, queue/steer, slash commands, token usage panel.**
+
+v0.0.8 把线缆钉死到了真实契约（`0.2.0-rc.2`）但控制面只读；本版本补齐 P1 交互闭环，
+并新增 Token 用量统计（含官方网页同款的缓存命中率）。
+
+### Added
+
+- **F1 模型 + 推理强度选择器。** `session/modelCatalog` 拉取目录（分组/模型/推理档位），
+  `session/selectModel` 下发切换；UI 按能力探测门控。
+  *EN:* model + reasoning-effort picker backed by `session/modelCatalog` /
+  `session/selectModel`, capability-gated.
+- **F2 审批自动通过。** 新设置 `deepseekHarness.autoApproveApprovals`（默认 `false`）：
+  开启后插件对 `approval/request` 自动回 `allowed-once`（走既有 `/api/$events/result`）。
+  *EN:* auto-approve incoming approval requests via the new setting (off by default).
+- **F3 沙箱模式切换。** v0.0.8 只渲染 `sandbox/mode`，本版本可切换（与 permission 面板同构）。
+  *EN:* the sandbox-mode control now switches, not just renders.
+- **F4 排队 / 转向消息。** 队列条渲染 `inbox.next-turn` 投影；运行中可 steer 注入当前回合
+  （`session/prompt` mode:'steer'）或 `session/updateQueue` 转向/移除队列项。
+  *EN:* queued-message bar with steer/remove (`session/updateQueue`) and
+  steer-mode prompts (`session/prompt`).
+- **F5 Slash 命令面板。** 输入 `/` 弹出 `commands/list` 注册表补全；执行走 **`commands/execute`**
+  （`{agentId, line, submittedAttachments:[]}`）。
+  *EN:* slash-command completion popup from `commands/list`; execution goes through
+  `commands/execute`.
+- **Token 用量面板。** 双通道数据：`assistant/message.data.usage` 事件折叠 +
+  `session/list` 投影（权威全量）。展示输入/输出/缓存读/缓存写/推理 token、
+  总量与**缓存命中率**（官方网页同口径），以及回合/步数/LLM 耗时等会话统计。
+  *EN:* token-usage panel (input/output/cache-read/cache-write/reasoning, totals,
+  cache-hit percentage) folded from events and reconciled with host projections.
+
+### Fixed
+
+- **`session/command` → `commands/execute`。** v0.0.8 的 `runCommand`（plan/permission/compact
+  命令路径）依赖 rc.2 **不存在**的 `session/command`，对真机永远是 404。现改为真机写路径
+  `commands/execute`。*EN:* slash-command execution moved from the non-existent
+  `session/command` to the real rc.2 write path `commands/execute`.
+- **`session/prompt` 补 `requestId`**（rc.2 必填的客户端自签身份），并支持 `mode` 参数。
+  *EN:* prompts now carry the required client-minted `requestId` and a `mode`.
+- **`session/selectModel` 参数修正**：`{request:{sessionId, provider, model, reasoningEffort?}}`
+  （provider 必填）；`session/updateQueue` 走 `{request:{sessionId, itemId, action}}`。
+  *EN:* corrected arg shapes for `selectModel` (provider required) and `updateQueue`.
+
+### Changed
+
+- 回归门扩到 **91 项断言**（假 harness 新增 `commands/execute`、`commands/list`、
+  rc.2 形状的 `modelCatalog`；覆盖 selectModel/updateQueue/prompt-requestId/commands 形状）。
+  *EN:* regression gate grown to **91 assertions** covering the new methods and shapes.
+
 ## [0.0.8] — 2026-09-19
 
 Tagline: **the real wire contract — DeepSeek Harness `0.2.0-rc.2`.**

@@ -53,8 +53,11 @@ import {
 import {
   type ApprovalOutcome,
   type ClientRequest,
+  type CommandDescriptor,
   type HarnessInfo,
   type HistoryEntry,
+  type ModelCatalog,
+  type ModelSelectionValue,
   type MuxFrame,
   type ReadyFrame,
   type RemoteEventResult,
@@ -140,6 +143,10 @@ function innerCandidates(method: string, req: Record<string, unknown>): Record<s
   if (method === 'session/page' || method === 'session/modelCatalog' || method === 'llm/listProviders') {
     return [{ request: req }, req]
   }
+  // rc.2 (official bundle, empirically pinned): these take the {request:{...}}
+  // wrapper; commands/execute takes the bare {agentId,line,submittedAttachments}.
+  if (method === 'session/selectModel' || method === 'session/updateQueue') return [{ request: req }, req]
+  if (method === 'commands/execute' || method === 'commands/list') return [req]
   return [{ request: req }, { _request: req }, req]
 }
 
@@ -333,12 +340,23 @@ export class HarnessClient implements Disposable {
   }
 
   /**
-   * Send a text prompt to an existing session (mode 'queue' = normal send).
+   * Send a prompt to an existing session.
+   *
+   * `mode` mirrors the rc.2 wire union: `'queue'` appends to the inbox (the
+   * host runs it when the session is idle), `'steer'` injects into the RUNNING
+   * turn. rc.2 args are `{ request: { requestId, sessionId, mode, content,
+   * clientTimeZone? } }` — `requestId` is a required client-minted identity.
    */
-  prompt(sessionId: SessionId, text: string, clientTimeZone?: string): Promise<SessionPromptValue> {
+  prompt(
+    sessionId: SessionId,
+    text: string,
+    clientTimeZone?: string,
+    opts: { mode?: 'queue' | 'steer' } = {},
+  ): Promise<SessionPromptValue> {
     const request: Record<string, unknown> = {
+      requestId: randomUUID(),
       sessionId,
-      mode: 'queue',
+      mode: opts.mode ?? 'queue',
       content: [{ type: 'text', text }],
     }
     if (clientTimeZone !== undefined) request.clientTimeZone = clientTimeZone
@@ -367,16 +385,19 @@ export class HarnessClient implements Disposable {
   /**
    * Run one slash-command line against a session's agent.
    *
-   * In 0.2.0-rc.2 the control-plane write path is NOT a single `session/command`
-   * RPC (that method does not exist); the web UI drives plan/permission/goal via
-   * the event `command` channel instead. This call therefore degrades cleanly:
-   * if `session/command` was not probed as present, `requireControl` throws and the
-   * caller surfaces a friendly "upgrade the host" notice.
+   * rc.2's write path is `commands/execute` (`{ agentId, line,
+   * submittedAttachments }`) — there is NO `session/command` RPC in rc.2, and
+   * calling it (as v0.0.8 did) always answered 404. The host durably logs the
+   * command lifecycle; outcomes render as `command/run`/`command/done` events.
    */
   runCommand(sessionId: SessionId, line: string): Promise<{ matched?: boolean }> {
-    this.requireControl('session/command')
+    this.requireControl('commands/execute')
     const text = line.startsWith('/') ? line : `/${line}`
-    return this.rpc<{ matched?: boolean }>('session/command', { request: { sessionId, line: text } })
+    return this.rpc<{ matched?: boolean }>('commands/execute', {
+      agentId: sessionId,
+      line: text,
+      submittedAttachments: [],
+    })
   }
 
   /** Switch permission preset (`/permission <preset>`), e.g. `workspace-write`. */
@@ -407,11 +428,42 @@ export class HarnessClient implements Disposable {
     return this.rpc<SessionRenameValue>('session/rename', { sessionId, title })
   }
 
-  /** Select the model (and optionally the provider) for future turns. */
-  selectModel(sessionId: SessionId, model: string, provider?: string): Promise<unknown> {
+  /**
+   * Fetch the model catalog (rc.2 `session/modelCatalog` — takes no args).
+   * Groups models per provider and carries each model's reasoning-effort ladder.
+   */
+  modelCatalog(): Promise<ModelCatalog> {
+    return this.rpc<ModelCatalog>('session/modelCatalog', {})
+  }
+
+  /**
+   * Select the model (provider + model + optional reasoning effort) for future
+   * turns. rc.2 args: `{ request: { sessionId, provider, model, reasoningEffort? } }`.
+   */
+  selectModel(sessionId: SessionId, provider: string, model: string, reasoningEffort?: string): Promise<ModelSelectionValue> {
     this.requireControl('session/selectModel')
-    const base = provider === undefined ? { sessionId, model } : { sessionId, model, provider }
-    return this.rpc<unknown>('session/selectModel', base)
+    const request: Record<string, unknown> = { sessionId, provider, model }
+    if (reasoningEffort !== undefined) request.reasoningEffort = reasoningEffort
+    return this.rpc<ModelSelectionValue>('session/selectModel', request)
+  }
+
+  /**
+   * Apply one action to a queued message (rc.2 `session/updateQueue`).
+   * Actions: `{kind:'steer'}` (inject into the running turn),
+   * `{kind:'edit', content:[{type:'text',text}]}` or `{kind:'remove'}`.
+   */
+  updateQueue(
+    sessionId: SessionId,
+    itemId: string,
+    action: { kind: 'steer' } | { kind: 'edit'; content: { type: 'text'; text: string }[] } | { kind: 'remove' },
+  ): Promise<{ accepted: true }> {
+    this.requireControl('session/updateQueue')
+    return this.rpc<{ accepted: true }>('session/updateQueue', { sessionId, itemId, action })
+  }
+
+  /** The slash-command registry this host serves for the session's agent. */
+  listCommands(sessionId: SessionId): Promise<CommandDescriptor[]> {
+    return this.rpc<CommandDescriptor[]>('commands/list', { agentId: sessionId })
   }
 
   /** Archive the session out of the active workspace list. */

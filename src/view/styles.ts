@@ -234,4 +234,29 @@ textarea { resize: none; min-height: 60px; max-height: 200px; width: 100%; }
 .t-review .review-file button { padding: 2px 6px; font-size: 10px; flex: 0 0 auto; }
 .t-review .review-actions { display: flex; gap: 6px; margin-top: 6px; }
 .t-review .review-actions button { flex: 1; padding: 3px 10px; font-size: 11px; }
+
+/* ── v0.0.9: queued messages / slash completion / usage panel ───────────── */
+#queue-bar { border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.25)); border-radius: 4px; margin-bottom: 6px; padding: 5px 7px; }
+#queue-bar .queue-title { font-size: 10px; color: var(--vscode-descriptionForeground); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .4px; }
+#queue-bar .queue-item { display: flex; align-items: center; gap: 5px; padding: 3px 0; }
+#queue-bar .queue-item + .queue-item { border-top: 1px dashed var(--vscode-panel-border, rgba(128,128,128,.2)); }
+#queue-bar .queue-text { flex: 1; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-charts-yellow, #ca9c2e); }
+#queue-bar .queue-item button { padding: 1px 6px; font-size: 10px; flex: 0 0 auto; }
+
+#slash-popup { position: relative; border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.3)); border-radius: 4px; margin-bottom: 4px; background: var(--vscode-editorWidget-background, var(--vscode-input-background)); box-shadow: 0 2px 8px rgba(0,0,0,.35); max-height: 180px; overflow-y: auto; z-index: 5; }
+#slash-popup .slash-row { display: flex; gap: 8px; align-items: baseline; padding: 4px 8px; cursor: pointer; }
+#slash-popup .slash-row.active { background: var(--vscode-list-activeSelectionBackground, rgba(128,128,128,.25)); color: var(--vscode-list-activeSelectionForeground, inherit); }
+#slash-popup .slash-name { font-family: var(--vscode-editor-font-family, monospace); font-weight: 600; font-size: 11.5px; flex: 0 0 auto; }
+#slash-popup .slash-desc { font-size: 10.5px; color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.steer-wrap { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--vscode-descriptionForeground); cursor: pointer; flex: 0 0 auto; margin-left: auto; }
+.steer-wrap input { width: auto; margin: 0; }
+.input-row { display: flex; gap: 6px; align-items: center; }
+.input-row #send { flex: 0 0 auto; }
+.input-row #stop { flex: 0 0 auto; }
+
+.usage-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); gap: 6px; margin: 4px 0; }
+.usage-grid .usage-cell { background: var(--vscode-editor-background, rgba(128,128,128,.08)); border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.2)); border-radius: 4px; padding: 4px 6px; text-align: center; }
+.usage-grid .usage-cell b { display: block; font-size: 12px; }
+.usage-grid .usage-cell span { font-size: 9.5px; color: var(--vscode-descriptionForeground); text-transform: uppercase; letter-spacing: .3px; }
 `

@@ -16,9 +16,10 @@ import * as path from 'node:path'
 import { readFileSync } from 'node:fs'
 import type { HarnessClient } from '../harness/client.ts'
 import type { MuxStatus } from '../harness/events.ts'
-import type { CallId, FileReference, PromptContext, RpcId, SessionId, SessionSummary, WorkspaceView } from '../harness/protocol.ts'
+import type { CallId, FileReference, PromptContext, QueueItemView, RpcId, SessionId, SessionSummary, SessionUsageProjection, WorkspaceView } from '../harness/protocol.ts'
 import { ConversationModel, sessionLabel } from '../conversation/model.ts'
 import { ControlSurface } from '../conversation/control.ts'
+import { SessionUsage } from '../conversation/usage.ts'
 import type { ConversationItem, SessionSnapshot } from '../conversation/types.ts'
 import {
   findHarnessWorkspace, ensureHarnessWorkspace, pickVsCodeFolder,
@@ -65,6 +66,8 @@ export class AppController {
   private approvalStore = new ApprovalStore()
   /** Control surface for the active session (plan/preset/todos/goal/…). */
   private control = new ControlSurface()
+  /** Session token/usage accumulator (event fold + host projections). */
+  private usage = new SessionUsage()
   /** Tracks which sessions have already received their first prompt (with context). */
   private firstPromptSent = new Set<SessionId>()
 
@@ -114,7 +117,7 @@ export class AppController {
       case 'selectSession': await this.selectSession(action.sessionId); break
       case 'newSession': await this.newSession(); break
       case 'refreshSessions': await this.refreshSessions(); break
-      case 'sendPrompt': await this.sendPrompt(action.text, action.context); break
+      case 'sendPrompt': await this.sendPrompt(action.text, action.context, { steer: action.steer === true }); break
       case 'stop': await this.stopActive(); break
       case 'openWebUI': this.d.openHarnessHome(); break
       case 'toggleSystemMessages': this.toggleSystemMessages(); break
@@ -132,6 +135,9 @@ export class AppController {
       case 'controlCompact': await this.compactActive(); break
       case 'controlArchive': await this.archiveActive(); break
       case 'controlRename': await this.renameActive(); break
+      case 'controlModel': await this.setModel(action.provider, action.model, action.reasoningEffort); break
+      case 'queueSteer': await this.queueAction(action.itemId, { kind: 'steer' }); break
+      case 'queueRemove': await this.queueAction(action.itemId, { kind: 'remove' }); break
     }
   }
 
@@ -139,6 +145,9 @@ export class AppController {
     try {
       await this.d.client.connect()
       await this.discoverFolder()
+      // Model catalog is session-independent — fetch once per connect when the
+      // host serves it, so the selector is ready before the first session opens.
+      await this.fetchModelCatalog()
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       this.d.log.error('connect failed: ' + msg)
@@ -159,7 +168,8 @@ export class AppController {
     this.binding = null
     this.noFolder = undefined
     this.firstPromptSent.clear()
-    this.d.setState({ snapshot: undefined, activeSessionId: undefined, sessions: [], workspace: undefined, reviews: undefined, approvals: undefined })
+    this.usage.reset()
+    this.d.setState({ snapshot: undefined, activeSessionId: undefined, sessions: [], workspace: undefined, reviews: undefined, approvals: undefined, queue: [], sessionUsage: this.usage.snapshot() })
     this.d.pushState()
   }
 
@@ -192,6 +202,7 @@ export class AppController {
         if (first) await this.selectSession(first.sessionId)
         return
       }
+      this.syncSessionProjection()
       this.d.pushState()
     } catch (e) {
       this.d.log.error('list sessions: ' + (e instanceof Error ? e.message : String(e)))
@@ -201,6 +212,7 @@ export class AppController {
   async selectSession(sessionId: SessionId): Promise<void> {
     this.activeSessionId = sessionId
     this.control.reset()
+    this.usage.reset()
     this.model = new ConversationModel(sessionId)
     this.model.setShowSystemMessages(this.d.getState().showSystemMessages)
     // Wire tool completion → ReviewController (creates review transactions for write/edit)
@@ -226,6 +238,8 @@ export class AppController {
       this.d.log.error('history/subscribe: ' + msg)
       this.d.notifyError(msg)
     }
+    await this.fetchCommands(sessionId)
+    this.syncSessionProjection()
     this.pushReviewApprovalState()
   }
 
@@ -262,6 +276,12 @@ export class AppController {
       const event = f.event as Parameters<ConversationModel['applyEvent']>[0]
       this.model.applyEvent(event)
       if (this.control.apply(event)) this.pushControl()
+      // Token usage: fold assistant/message samples live; refresh the host's
+      // projections after a turn ends (they cover the whole session log).
+      if (this.usage.apply(event)) {
+        this.d.setState({ sessionUsage: this.usage.snapshot() })
+      }
+      if (event.type === 'turn/end') void this.syncSessionProjectionAsync()
       this.d.setState({ snapshot: this.model.snapshot() })
       const snap = this.d.getState().snapshot
       this.d.setState({ canStop: snap?.running === true })
@@ -312,6 +332,16 @@ export class AppController {
       }
       this.d.log.info(`Approval requested: ${f.toolName ?? 'unknown'} (callId=${f.callId ?? '—'})`)
       this.pushReviewApprovalState()
+      // F2: auto-approve — answer the waterfall immediately when the setting is
+      // on and this approval is answerable from VS Code. Mirrors Copilot's
+      // /autoApprove and Claude Code's /yolo, scoped to what canAllow permits.
+      if (this.d.getState().autoApprove === true) {
+        const approval = this.approvalStore.getByRpcId(eventId)
+        if (approval && this.approvalStore.canAllow(approval, this.activeSessionId)) {
+          this.d.log.info(`Auto-approving: ${f.toolName ?? 'unknown'} (autoApprove setting)`)
+          void this.respondApproval(eventId, 'allowed-once')
+        }
+      }
       return
     }
     if (f.type === 'approval/resolved' && f.approvalId) {
@@ -381,8 +411,12 @@ export class AppController {
    *  6. Only on the FIRST prompt of a session, also attach `context` metadata
    *     (active file, selection). Subsequent prompts rely on inlined content.
    *  7. Optimistic echo (user text only) → send prompt.
+   *
+   * v0.0.9: a leading `/` routes through `commands/execute` (the rc.2 slash
+   * write path); `opts.steer` sends with mode `'steer'` to inject into the
+   * running turn instead of queueing.
    */
-  async sendPrompt(rawText: string, _webviewContext?: PromptContext): Promise<void> {
+  async sendPrompt(rawText: string, _webviewContext?: PromptContext, opts: { steer?: boolean } = {}): Promise<void> {
     this.d.setState({ sending: true })
     this.d.pushState()
     try {
@@ -404,6 +438,13 @@ export class AppController {
         await this.selectSession(created.sessionId)
       }
       if (!this.activeSessionId) return
+
+      // Slash-command routing: a leading `/` is a command admission, not a
+      // user message (the host durably logs the lifecycle as command/run+done).
+      if (rawText.startsWith('/')) {
+        await this.runControl(() => this.d.client.runCommand(this.activeSessionId!, rawText), 'command')
+        return
+      }
 
       // 4: parse @file references (strips tokens from text)
       const { cleanedText, files: atFileRefs } = parseAtFileReferences(rawText)
@@ -466,6 +507,7 @@ export class AppController {
         this.activeSessionId,
         promptText,
         Intl.DateTimeFormat().resolvedOptions().timeZone,
+        { mode: opts.steer === true ? 'steer' : 'queue' },
       )
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -539,6 +581,84 @@ export class AppController {
     }))
   }
 
+  // ─── v0.0.9 surfaces (catalog / commands / projections) ──────────────────
+
+  /** Fetch the model catalog once per connect (capability-gated). */
+  private async fetchModelCatalog(): Promise<void> {
+    if (!this.d.client.supports('session/modelCatalog')) return
+    try {
+      const catalog = await this.d.client.modelCatalog()
+      this.d.setState({ modelCatalog: catalog })
+      this.d.pushState()
+    } catch (e) {
+      this.d.log.error('modelCatalog: ' + (e instanceof Error ? e.message : String(e)))
+    }
+  }
+
+  /** Fetch the slash-command registry for the active session (capability-gated). */
+  private async fetchCommands(sessionId: SessionId): Promise<void> {
+    if (!this.d.client.supports('commands/list')) {
+      this.d.setState({ commands: [] })
+      return
+    }
+    try {
+      const commands = await this.d.client.listCommands(sessionId)
+      this.d.setState({ commands })
+      this.d.pushState()
+    } catch (e) {
+      this.d.log.error('commands/list: ' + (e instanceof Error ? e.message : String(e)))
+      this.d.setState({ commands: [] })
+    }
+  }
+
+  /** Pull queue + usage projections for the active session out of the session list. */
+  private syncSessionProjection(): void {
+    const sid = this.activeSessionId
+    if (sid === undefined) return
+    const summary = this.sessions.find(s => s.sessionId === sid)
+    const values = summary?.projections?.values
+    if (values === undefined) return
+
+    // Queued messages: `inbox.next-turn` items carry an id plus text content.
+    const inbox = values.inbox
+    const nextTurn = (inbox !== null && typeof inbox === 'object' ? (inbox as Record<string, unknown>).nextTurn : undefined)
+      ?? (inbox !== null && typeof inbox === 'object' ? (inbox as Record<string, unknown>)['next-turn'] : undefined)
+    if (Array.isArray(nextTurn)) {
+      const items: QueueItemView[] = []
+      for (const entry of nextTurn) {
+        if (entry === null || typeof entry !== 'object') continue
+        const r = entry as Record<string, unknown>
+        const id = typeof r.id === 'string' ? r.id : typeof r.itemId === 'string' ? r.itemId : undefined
+        if (id === undefined) continue
+        items.push({ id, text: queueItemText(r) })
+      }
+      const prev = this.d.getState().queue ?? []
+      if (JSON.stringify(prev) !== JSON.stringify(items)) {
+        this.d.setState({ queue: items })
+      }
+    }
+
+    // Token usage + session stats projections.
+    const projection: SessionUsageProjection = {
+      ...(values.tokenUsage !== undefined ? { tokenUsage: values.tokenUsage as SessionUsageProjection['tokenUsage'] } : {}),
+      ...(values.sessionStats !== undefined ? { sessionStats: values.sessionStats as SessionUsageProjection['sessionStats'] } : {}),
+      ...(values.contextBreakdown !== undefined ? { contextBreakdown: values.contextBreakdown as SessionUsageProjection['contextBreakdown'] } : {}),
+    }
+    if (this.usage.applyProjection(projection)) {
+      this.d.setState({ sessionUsage: this.usage.snapshot() })
+    }
+  }
+
+  /** Debounce-guarded async variant used from the event path. */
+  private syncTimer: ReturnType<typeof setTimeout> | undefined
+  private syncSessionProjectionAsync(): void {
+    if (this.syncTimer !== undefined) return
+    this.syncTimer = setTimeout(() => {
+      this.syncTimer = undefined
+      void this.refreshSessions()
+    }, 300)
+  }
+
   // ─── control surface ───────────────────────────────────────────────────────
   /**
    * Run one control write, turning transport/rpc failures into a message the
@@ -581,6 +701,37 @@ export class AppController {
     const sid = this.activeSessionId
     if (sid === undefined) return
     await this.runControl(() => this.d.client.setPermissionPreset(sid, preset), 'permission')
+  }
+
+  /**
+   * Select the model + reasoning effort for future turns (rc.2
+   * `session/selectModel`). Provider is required by the host's descriptor; the
+   * webview sends the resolved `provider|model` pair from the catalog.
+   */
+  async setModel(provider: string, model: string, reasoningEffort?: string): Promise<void> {
+    const sid = this.activeSessionId
+    if (sid === undefined) return
+    const res = await this.runControl(
+      () => this.d.client.selectModel(sid, provider, model, reasoningEffort),
+      'selectModel',
+    )
+    if (res !== undefined) {
+      this.d.notifyInfo(`DeepSeek Harness: model set to ${res.selected.model}`
+        + (res.selected.reasoningEffort !== undefined ? ` (effort ${res.selected.reasoningEffort})` : '') + '.')
+    }
+  }
+
+  /** Apply one action to a queued message (steer into the turn, or remove). */
+  async queueAction(
+    itemId: string,
+    action: { kind: 'steer' } | { kind: 'remove' },
+  ): Promise<void> {
+    const sid = this.activeSessionId
+    if (sid === undefined) return
+    const done = await this.runControl(() => this.d.client.updateQueue(sid, itemId, action), 'updateQueue')
+    if (done === undefined) return
+    // The inbox projection changes server-side; re-read it instead of guessing.
+    await this.refreshSessions()
   }
 
   /** Fork the active session into a sibling and switch to it. */
@@ -679,4 +830,24 @@ export class AppController {
   }
 }
 
+/** Extract a display text from one queued inbox item (defensive). */
+function queueItemText(item: Record<string, unknown>): string {
+  const content = item.content
+  if (Array.isArray(content)) {
+    const texts: string[] = []
+    for (const part of content) {
+      if (part !== null && typeof part === 'object' && (part as Record<string, unknown>).type === 'text') {
+        const t = (part as Record<string, unknown>).text
+        if (typeof t === 'string') texts.push(t)
+      }
+    }
+    if (texts.length > 0) {
+      const joined = texts.join('\n')
+      return joined.length > 200 ? joined.slice(0, 199) + '…' : joined
+    }
+  }
+  const text = item.text
+  if (typeof text === 'string' && text.length > 0) return text.length > 200 ? text.slice(0, 199) + '…' : text
+  return '(queued message)'
+}
 

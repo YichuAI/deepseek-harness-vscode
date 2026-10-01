@@ -137,6 +137,7 @@ type AuthMode = 'none' | 'cookie'
 const PRESENT_CONTROLS = new Set<string>([
   'session/fork', 'session/rename', 'session/selectModel', 'session/updateQueue',
   'workspace/archiveSession', 'session/page', 'workspace/create', 'session/modelCatalog',
+  'commands/execute', 'commands/list',
 ])
 
 function okBody(value: unknown): string {
@@ -234,7 +235,29 @@ function makeHarness(auth: AuthMode, controls: Set<string>): {
         return controls.has('workspace/archiveSession') ? { status: 200, body: okBody({ accepted: true }) } : missing()
       case 'session/modelCatalog':
         return controls.has('session/modelCatalog')
-          ? { status: 200, body: okBody({ models: [{ id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' }] }) }
+          ? { status: 200, body: okBody({
+              default: { provider: 'deepseek', model: 'deepseek-v4-pro' },
+              routableProviders: ['deepseek'],
+              groups: [{
+                id: 'deepseek', name: 'DeepSeek',
+                models: [{
+                  id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro',
+                  reasoning: { efforts: [{ id: 'high', name: 'High' }], defaultEffort: 'high' },
+                }],
+              }],
+              failures: [],
+            }) }
+          : missing()
+      case 'commands/execute': {
+        if (!controls.has('commands/execute')) return missing()
+        const inner = (args['request'] as Record<string, unknown> | undefined) ?? args
+        return { status: 200, body: okBody({ matched: typeof inner['line'] === 'string' && inner['line'].startsWith('/') }) }
+      }
+      case 'commands/list':
+        return controls.has('commands/list')
+          ? { status: 200, body: okBody([
+              { definitionId: 'd1', name: 'permission', description: 'Switch the permission preset' },
+            ]) }
           : missing()
       // rc.2 does NOT serve any of these — they must be reported as absent.
       case 'session/command':
@@ -405,8 +428,12 @@ async function main(): Promise<void> {
   await client.prompt('session-1', 'hello', 'UTC')
   await client.cancel('session-1')
   const promptRpc = harness.seen.rpc.find((r) => r.endpoint === 'session/prompt')
-  eq('session/prompt inner is {request:{...}}', promptRpc?.inner as Record<string, unknown>,
-    { request: { sessionId: 'session-1', mode: 'queue', content: [{ type: 'text', text: 'hello' }], clientTimeZone: 'UTC' } })
+  const promptRequest = (promptRpc?.inner as { request?: Record<string, unknown> } | undefined)?.request
+  check('session/prompt inner is {request:{requestId,sessionId,mode,content}}',
+    typeof promptRequest?.['requestId'] === 'string' && promptRequest['requestId'].length > 0
+    && promptRequest['sessionId'] === 'session-1' && promptRequest['mode'] === 'queue'
+    && JSON.stringify(promptRequest['content']) === JSON.stringify([{ type: 'text', text: 'hello' }]),
+    JSON.stringify(promptRequest?.['requestId'] !== undefined))
 
   // 06. history arrives from session/page (a unary RPC), not session/history.
   const history = await client.getHistory('session-1', { maxMessages: 50 })
@@ -460,13 +487,36 @@ async function main(): Promise<void> {
   eq('fork returns the child session id', await client.forkSession('session-1'), 'session-2')
   eq('rename returns the accepted title', (await client.renameSession('session-1', 'My title')).title, 'My title')
   check('archive answers without throwing', (await client.archiveSession('session-1')) !== undefined)
-  check('selectModel answers without throwing', (await client.selectModel('session-1', 'deepseek-v4-pro')) !== undefined)
+  check('selectModel answers without throwing (provider is required)',
+    (await client.selectModel('session-1', 'deepseek', 'deepseek-v4-pro', 'high')) !== undefined)
+  const selectModelRpc = harness.seen.rpc.filter((r) => r.endpoint === 'session/selectModel').at(-1)
+  eq('selectModel inner is {request:{sessionId,provider,model,reasoningEffort}}',
+    selectModelRpc?.inner as Record<string, unknown>,
+    { request: { sessionId: 'session-1', provider: 'deepseek', model: 'deepseek-v4-pro', reasoningEffort: 'high' } })
 
-  // 11. Control methods that DON'T exist degrade to a clear, actionable error.
-  let cmdMsg = ''
-  try { await client.runCommand('session-1', '/permission workspace-write') } catch (e) { cmdMsg = (e as Error).message }
-  check('a non-served control (session/command) is refused with a clear message',
-    /session\/command/.test(cmdMsg) && /does not serve/.test(cmdMsg), cmdMsg.slice(0, 120))
+  const catalog = await client.modelCatalog()
+  eq('modelCatalog returns the provider groups with reasoning efforts',
+    catalog.groups[0]?.models[0]?.reasoning?.efforts.map((e) => e.id) ?? [], ['high'])
+
+  check('updateQueue steer answers without throwing',
+    (await client.updateQueue('session-1', 'item-1', { kind: 'steer' })) !== undefined)
+  const updateQueueRpc = harness.seen.rpc.filter((r) => r.endpoint === 'session/updateQueue').at(-1)
+  eq('updateQueue inner is {request:{sessionId,itemId,action}}',
+    updateQueueRpc?.inner as Record<string, unknown>,
+    { request: { sessionId: 'session-1', itemId: 'item-1', action: { kind: 'steer' } } })
+
+  // 11. rc.2 write path for slash commands: commands/execute (NOT session/command).
+  const matched = await client.runCommand('session-1', '/permission workspace-write')
+  eq('commands/execute accepts the slash line', matched.matched, true)
+  const execRpc = harness.seen.rpc.filter((r) => r.endpoint === 'commands/execute').at(-1)
+  eq('commands/execute inner is {agentId,line,submittedAttachments:[]}',
+    execRpc?.inner as Record<string, unknown>,
+    { agentId: 'session-1', line: '/permission workspace-write', submittedAttachments: [] })
+  const commands = await client.listCommands('session-1')
+  eq('commands/list returns the registry descriptors',
+    commands.map((c) => c.name), ['permission'])
+  check('session/command is never called (rc.2 has no such RPC)',
+    !harness.seen.rpc.some((r) => r.endpoint === 'session/command'))
 
   client.dispose()
   await harness.stop()
@@ -485,6 +535,10 @@ async function main(): Promise<void> {
     check('every control method is probed as absent',
       Object.values(bareClient.capabilities()).every((v) => v !== true),
       JSON.stringify(bareClient.capabilities()))
+    let bareMsg = ''
+    try { await bareClient.runCommand('session-1', '/plan') } catch (e) { bareMsg = (e as Error).message }
+    check('a non-served control (commands/execute) is refused with a clear message',
+      /commands\/execute/.test(bareMsg) && /does not serve/.test(bareMsg), bareMsg.slice(0, 120))
     bareClient.dispose()
     await bare.stop()
   }

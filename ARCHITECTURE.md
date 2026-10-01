@@ -204,19 +204,17 @@ Transport and messaging — always called (routed through the negotiated profile
 
 `session/list`, `session/create`, `session/prompt`, `session/cancel`,
 `session/page`, `session/modelCatalog`, `workspace/create`.
-
 Control surface — called only when capability probing confirmed the host serves
 them (see {@link probeCapabilities} in `harness/wire.ts`), and therefore safe to
 leave enabled against an older host. On 0.2.0-rc.2 the **present** set is:
 
 `session/fork`, `session/rename`, `session/selectModel`, `session/updateQueue`,
-`workspace/archiveSession`.
+`workspace/archiveSession`, `commands/execute`, `commands/list`.
 
-(`session/command` is probed but **absent** in rc.2, so plan / permission /
-compaction are display-only there; `agentPreset/*`, `subagent/*`, `host/describe`,
+(`agentPreset/*`, `subagent/*`, `host/describe`,
 `workspace/list`, `llm/models` and `goal/*` are likewise absent and gated off.)
 
-Never called, ever: `settings/*`, `credentials/*`, `commands/*`, `terminal/*`,
+Never called, ever: `settings/*`, `credentials/*`, `terminal/*`,
 `directoryPicker/*`, or any approval/permission mutation outside the list above.
 
 
@@ -241,14 +239,31 @@ fold — apply every event in order and you have the truth, whether it came from
 | `request/header` | `{ header: { config } }` | effective provider / model / effort |
 
 Write paths are split by what upstream actually exposes. On 0.2.0-rc.2 the
-**command registry** (`session/command`) is *not* served, so plan mode, permission
-presets and compaction are **display-only** (rendered from the wire events, not
-writable from VS Code). Fork / rename / archive / model selection / queue steering
-have dedicated endpoints (`session/fork`, `session/rename`,
+**slash-command write path** is `commands/execute` (`{agentId, line,
+submittedAttachments:[]}`) with the registry at `commands/list` — the earlier
+`session/command` RPC does not exist in rc.2. Plan mode, permission presets and
+compaction ride `commands/execute`; fork / rename / archive / model selection /
+queue steering have dedicated endpoints (`session/fork`, `session/rename`,
 `workspace/archiveSession`, `session/selectModel`, `session/updateQueue`) — each
 gated by a live capability probe; if the host does not serve it,
 `requireControl` throws `HarnessUnsupportedError` whose message names the missing
 endpoint, and the UI shows fewer controls rather than dead ones.
+
+## Token usage (`src/conversation/usage.ts`, v0.0.9)
+
+Usage is a two-channel fold, like the control surface:
+
+1. **Events** — every `assistant/message` may carry `data.usage`
+   (`inputTokens`, `outputTokens`, `cacheReadTokens?`, `cacheWriteTokens?`,
+   `reasoningTokens?`). `SessionUsage` sums them per session live.
+2. **Projection (authoritative)** — `session/list` rows carry
+   `projections.values` with `tokenUsage`, `sessionStats` (turns, steps,
+   llmMs, toolMs, decode tokens) and `contextBreakdown`; `applyProjection`
+   overwrites the folded numbers after each turn end and on session select.
+
+Cache-hit percentage follows the official Web UI formula:
+`cacheReadTokens / (uncachedInput + cacheRead + cacheWrite)` — rendered in the
+sidebar's usage panel.
 
 ## Workspace lifecycle (v0.0.2: lazy create)
 

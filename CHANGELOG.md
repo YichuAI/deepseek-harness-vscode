@@ -131,14 +131,20 @@ Tagline (EN): **fix: the sidebar connected and then went silent; plus inline ima
 
 ### Verified
 
-- 回归门 **108 → 178 项**。假宿主按 `0.2.1-alpha.2` 重建（`$events` 白名单 + `session/follow`
+- 回归门 **108 → 180 项**。假宿主按 `0.2.1-alpha.2` 重建（`$events` 白名单 + `session/follow`
   流），新增断言把两条流的 open payload、快照回放、`api-session/status` 翻译、`waterfall`
   审批信封、"孤儿 / 迟到 chunk 必须被丢弃"，以及"业务级 `x/not-found` 不是能力缺失"全部钉死。
-  本轮又补了四组：`session/attachment` **读图**形状 vs. 暂存两条路、三种 prompt content 组合
+  本轮又补了五组：`session/attachment` **读图**形状 vs. 暂存两条路、三种 prompt content 组合
   （纯文本 / 图+文 / 纯图）、`session/page` "无游标不发请求、有游标才透传"、
-  `session/follow` 快照教会客户端游标；假宿主也补上了 `uploadFileBinary` 的**原始字节**路由
-  （连 415/400 边界一起）。第 G 组新增六条 Connect 按钮断言（已连接时隐藏、断开时显示可点的
-  `Connect`、失败后显示 `Retry`、连接中显示 `Connecting…` 且禁用）。
+  `session/follow` 快照教会客户端游标，以及**读回图片时的记录形状**；假宿主也补上了
+  `uploadFileBinary` 的**原始字节**路由（连 415/400 边界一起）。第 G 组新增六条 Connect 按钮
+  断言（已连接时隐藏、断开时显示可点的 `Connect`、失败后显示 `Retry`、连接中显示
+  `Connecting…` 且禁用）。
+  - **最后那一组是被一次真实事故逼出来的**：两种持久消息记录的嵌套方式**不一样**，而且是
+    静默失败——`user/message` 把内容放在 `data.content`（图片的持久引用就在这里），
+    `assistant/message` 与 `system/message` 才放在 `data.message.content`。集成测试里那条
+    "落库消息带持久图片引用"的断言只查了嵌套形式，于是**永远找不到图片**；它此前"通过"过，
+    属于偶然命中而非测量。现在这个不对称由协议层断言直接钉住（真机实测三种记录形状）。
 - **真机集成测试 16 → 21 项全绿**，新增的 08b 段落跑的是**真图闭环**：遍历 `modelCatalog`
   找到肯收图的模型路由（默认 `deepseek-v4-flash` 被拒、`deepseek-flash` 收下）→ 内联发图
   → 落库后经 `session/page` 找到持久的图片引用（`sha256:97a3a410…`）→

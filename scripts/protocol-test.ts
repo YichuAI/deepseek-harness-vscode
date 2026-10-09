@@ -52,6 +52,7 @@ import type { MuxFrame, ReadyFrame, RemoteEventResult } from '../src/harness/pro
 import { CLIENT_SCRIPT } from '../src/view/client.ts'
 import { HTML_SKELETON } from '../src/view/html.ts'
 import { ControlSurface } from '../src/conversation/control.ts'
+import { ConversationModel } from '../src/conversation/model.ts'
 import { cookieNameForAuthority } from '../src/harness/auth.ts'
 import { isMissingMethodError, isShapeRejection, negotiateWire, wireEndpoint } from '../src/harness/wire.ts'
 import { findHarnessWorkspace } from '../src/workspace/binding.ts'
@@ -901,8 +902,44 @@ async function main(): Promise<void> {
   await client.prompt('session-1', 'plain')
   const textOnly = harness.seen.rpc.filter((r) => r.endpoint === 'session/prompt').at(-1)
     ?.inner as { request?: { content?: unknown } } | undefined
-  eq('a text-only prompt still sends one text part', textOnly?.request?.content,
+  eq('a text-only prompt still sends a single text part', textOnly?.request?.content,
     [{ type: 'text', text: 'plain' }])
+
+  // 12d. Reading the image back out of the log — the mirror image of 12c.
+  //
+  //      The two durable message record types nest DIFFERENTLY, and getting this
+  //      wrong is silent: the image simply is not found and the message renders
+  //      empty. Measured on a live host:
+  //
+  //        user/message      → data.content          ← the promoted image ref
+  //        assistant/message → data.message.content
+  //        system/message    → data.message.content
+  //
+  //      An integration-test assertion had this backwards (it looked for
+  //      `data.message.content` everywhere) and passed only by accident, so the
+  //      asymmetry is pinned here where it is cheap to check.
+  const restoreModel = new ConversationModel('session-1')
+  restoreModel.loadHistory([
+    ev('user/message', {
+      content: [
+        { type: 'text', text: 'look at this' },
+        { type: 'image', attachment: { attachmentId: 'sha256:deadbeef', mediaType: 'image/png' } },
+      ],
+      role: 'user',
+    }, 1) as never,
+    ev('assistant/message', {
+      turn: 1,
+      step: 1,
+      message: { role: 'assistant', content: [{ type: 'text', text: 'Red' }] },
+    }, 2) as never,
+  ])
+  const restored = restoreModel.snapshot().items
+  eq('a durable user/message is read from data.content (not data.message.content)',
+    [restored[0]?.kind, restored[0]?.kind === 'user' ? restored[0].text : undefined],
+    ['user', 'look at this\n[image]'])
+  eq('a durable assistant/message is read from data.message.content',
+    [restored[1]?.kind, restored[1]?.kind === 'assistant' ? restored[1].text : undefined],
+    ['assistant', 'Red'])
 
   // 12b. The `@` completion source. Unlike the search/attachment pair above,
   //      `fileReferences/list` declares (agentId, query) positionally: the inner

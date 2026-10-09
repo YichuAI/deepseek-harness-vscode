@@ -237,22 +237,47 @@ async function main(): Promise<void> {
   // The durable ref, read back off the log. `session/page` needs the cursor the
   // follow stream published: `throughSeq: 0` would answer a single
   // `permission/preset` record and never a message.
+  //
+  // Getting the *shape* right matters as much as the cursor. The two message
+  // record types nest differently and it is not cosmetic — measured on the live
+  // host:
+  //
+  //   user/message      → data.content            ← the image lands here
+  //   assistant/message → data.message.content
+  //
+  // Looking only at the nested form (which this assertion used to do) silently
+  // finds nothing, because the user record has no `message` wrapper at all.
+  const contentPartsOf = (event: unknown): { type?: string; attachment?: { attachmentId?: string; mediaType?: string } }[] => {
+    const data = (event as { data?: Record<string, unknown> }).data
+    if (data === undefined || data === null) return []
+    const nested = (data['message'] as { content?: unknown } | undefined)?.content
+    const out: { type?: string; attachment?: { attachmentId?: string; mediaType?: string } }[] = []
+    for (const candidate of [data['content'], nested]) {
+      if (Array.isArray(candidate)) out.push(...candidate as { type?: string }[])
+    }
+    return out
+  }
+
   let imageRef: { attachmentId?: string; mediaType?: string } | undefined
+  let lastShape = 'no page yet'
   for (let attempt = 0; attempt < 24 && imageRef === undefined; attempt++) {
     await new Promise((r) => setTimeout(r, 500))
     const page = await client.getHistory(sessionId, { maxMessages: 50 })
+    lastShape = page.events
+      .map((entry) => {
+        const e = entry.event as { type?: string; seq?: number }
+        const parts = contentPartsOf(entry.event)
+        return `${String(e.seq)}:${String(e.type)}${parts.length === 0 ? '' : `(${parts.map((p) => p.type ?? '?').join(',')})`}`
+      })
+      .join(' ')
     for (const entry of page.events) {
-      const data = entry.event.data as { message?: { content?: unknown } } | undefined
-      const content = data?.message?.content
-      if (!Array.isArray(content)) continue
-      const block = (content as { type?: string; attachment?: { attachmentId?: string; mediaType?: string } }[])
-        .find((b) => b.type === 'image')
+      const block = contentPartsOf(entry.event).find((b) => b.type === 'image')
       if (block?.attachment !== undefined) { imageRef = block.attachment; break }
     }
   }
   if (imageAdmitted) {
     check('the stored message carries a durable image ref', imageRef?.attachmentId !== undefined,
-      imageRef?.attachmentId ?? 'no image block in the log')
+      imageRef?.attachmentId ?? `no image block in the log — records were: ${lastShape.slice(0, 300)}`)
   }
 
   if (imageRef?.attachmentId !== undefined) {

@@ -346,6 +346,21 @@ survive a host restart, so a staged-but-unsent file must be re-uploaded.
 `attachmentId` (`sha256:<hex>`) it returns `{ attachment, data }` — that is how
 the plugin can thumb a stored image again without re-sending bytes.
 
+Finding that ref in the journal is where the shapes bite, and they bite
+silently. The three durable message records do **not** nest the same way
+(measured on a live host):
+
+| record | content lives at |
+| --- | --- |
+| `user/message` | `data.content` — this is where a promoted image ref lands |
+| `assistant/message` | `data.message.content` |
+| `system/message` | `data.message.content` |
+
+Read only the nested form and a picture-bearing user message simply looks empty;
+nothing errors, the ref is just never found. `blocksToText` in
+`conversation/model.ts` reads `data.content` for user records for exactly this
+reason, and `scripts/protocol-test.ts` step 12d pins all three shapes.
+
 Two consequences the UI has to own:
 
 - **The host may promote, not store.** `admitPromptContent` turns an inline image
@@ -526,7 +541,7 @@ media/
 ├── origin.png                # source material (excluded from VSIX)
 └── markdown-it.umd.min.js    # bundled for VSIX (114 KB)
 scripts/
-├── protocol-test.ts          # fake-harness protocol test, 178 assertions (no dsh web)
+├── protocol-test.ts          # fake-harness protocol test, 180 assertions (no dsh web)
 ├── protocol-probe.ts         # asks a live `dsh web` what it actually serves
 ├── integration-test.ts       # closed-loop test against real dsh
 └── gen-icon.ts               # icon generation from origin.png

@@ -39,7 +39,7 @@ npm run typecheck          # → tsc --noEmit, exit 0
 npm run build              # → dist/extension.js
 
 # 1.3 protocol test (fake harness — no dsh web needed)
-npm run protocol-test      # → all 178 assertions ✓
+npm run protocol-test      # → all 180 assertions ✓
 
 # 1.4 integration test (writes a session — needs dsh web running)
 #     start dsh web first in another terminal:
@@ -59,8 +59,8 @@ Manual checks:
       twin. This is a standing rule, not a per-release judgement call.
 - [ ] `CHANGELOG.md` and `ARCHITECTURE.md` still quote the **current** assertion
       count from `npm run protocol-test` (it has grown 50 → 64 → 98 → 83 → 156 →
-      178 as the rc.2 rewrite replaced the rc.6 fake harness; stale counts are the
-      most common doc drift here).
+      178 → 180 as the rc.2 rewrite replaced the rc.6 fake harness; stale counts
+      are the most common doc drift here).
 - [ ] `LICENSE` present (MIT).
 - [ ] No secrets / API keys / real prompt content in `test/fixtures/`
       (fixtures must use `<redacted:...>` placeholders).

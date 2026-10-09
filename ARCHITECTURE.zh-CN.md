@@ -263,6 +263,19 @@ content-type: application/octet-stream
 **`session/attachment` 是读回路径，不是写入路径。** 给它一个 `attachmentId`（`sha256:<hex>`）
 它返回 `{ attachment, data }`，插件凭这个就能在不重发字节的情况下把已存图片再缩略显示一次。
 
+到日志里把这个引用找出来，才是形状真正咬人的地方，而且是**静默**地咬。三种持久消息记录的
+嵌套方式**并不一样**（真机实测）：
+
+| 记录 | content 在哪 |
+| --- | --- |
+| `user/message` | `data.content` —— 被提升的图片引用就落在这里 |
+| `assistant/message` | `data.message.content` |
+| `system/message` | `data.message.content` |
+
+只读嵌套形式的话，带图的那条用户消息看上去就是空的：不报错，只是永远找不到引用。
+`conversation/model.ts` 的 `blocksToText` 对用户记录读 `data.content` 正是因为这个，
+而 `scripts/protocol-test.ts` 第 12d 步把三种形状都钉住了。
+
 两个必须由 UI 承担的后果：
 
 - **宿主可能"提升"而非原样存储。** `admitPromptContent` 会把内联图片变成
@@ -387,7 +400,7 @@ media/
 ├── origin.png                # 源材料（VSIX 排除）
 └── markdown-it.umd.min.js    # VSIX 打包用（114 KB）
 scripts/
-├── protocol-test.ts          # 假 harness 协议测试，178 项断言（无需 dsh web）
+├── protocol-test.ts          # 假 harness 协议测试，180 项断言（无需 dsh web）
 ├── protocol-probe.ts         # 向真实 `dsh web` 询问它实际提供什么
 ├── integration-test.ts       # 针对真实 dsh 的闭环测试
 └── gen-icon.ts               # 从 origin.png 生成图标

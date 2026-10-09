@@ -5,6 +5,39 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — 2026-10-09
+
+Tagline: **修复：工作区发现恒为空导致面板永远显示 Disconnected。**
+Tagline (EN): **fix: workspace discovery always returned empty, so the panel stayed "Disconnected".**
+
+### Fixed
+
+- **工作区绑定不再恒为空（`listWorkspaces`）。** 该方法此前是一个硬编码的空数组桩，
+  注释写"等 projection 接上再说"。后果是连锁的：`findHarnessWorkspace()` 对空数组
+  做 `find()` 必然返回 `undefined` → `binding.harness` 永远不赋值 → 面板一直停在
+  **Disconnected**，尽管握手、鉴权（cookie + ready 帧）全部正常。唯一能走通的路径
+  是发送时的 `createWorkspace()` 兜底，而它只活在内存里，窗口一重载就还原。
+  现在改为**从 `session/list` 的 `cwd` 派生工作区注册表**——这正是原注释指明的路径。
+  rc.2 没有 `workspace/list`（真机 HTTP 404，宿主源码零匹配），但每条 `session/list`
+  记录都带宿主规范化的 `cwd`，且这些目录与工作区注册表 1:1（工作区以路径为键，
+  对已存在路径调用 `workspace/create` 会返回既有工作区且 `created:false`）。
+  *EN:* `listWorkspaces()` derives the registry by grouping `session/list` rows on
+  their host-canonical `cwd`, instead of returning a hard-coded empty array that
+  made workspace binding impossible and left the UI permanently "Disconnected".
+- **派生的 workspaceId 不再被当作宿主 id 写入。** 派生出的 `workspaceId` 就是路径，
+  直接传给 `session/create` 是错的。现在写入前统一走一次幂等的 `workspace/create`
+  取回宿主签发的权威 id（`WorkspaceBinding.confirmed` 标记，避免重复确认），
+  `newSession()` 与 `sendPrompt()` 均已改道。
+
+### Verified
+
+- 真机（`127.0.0.1:3080`）验证：1 个 session、1 个 distinct cwd → 派生 1 个工作区，
+  `title` 取自目录名，中文路径正常。
+- 回归门 **95 → 102 项断言**全绿；新增断言覆盖派生条目数、cwd 聚合、排序、
+  "从不调用 workspace/list" 以及 `findHarnessWorkspace` 端到端解析。
+  同时修正两条被新数据推翻的旧断言（session/list 条数、以及那条断言
+  "listWorkspaces 应为空"的用例——它正是本次要推翻的行为）。
+
 ## [0.1.0] — 2026-10-01
 
 Tagline: **会话级工具链 — 全文搜索、实时事件检查器、附件上传。**

@@ -335,6 +335,30 @@ not found? → binding stays pending, UI shows "Not registered yet"
 
 No confirmation modals. The workspace is a **send-time lazily ensured resource**, not a connect-time resource.
 
+### Where the workspace list comes from (v0.1.1)
+
+rc.2 serves **no `workspace/list`** — verified three ways: HTTP 404 on a live host,
+zero occurrences in the harness source, and the capability probe reporting it
+absent. `listWorkspaces()` therefore **reconstructs the registry from
+`session/list`**, grouping rows on their host-canonical `cwd`:
+
+- every `session/list` row carries `cwd`; those directories are 1:1 with the
+  workspace registry, because a workspace is keyed by its path —
+  `workspace/create` on an existing path returns that workspace with
+  `created:false` rather than making a second one;
+- `workspaceId` is therefore **synthetic**: it is the canonical path, not a
+  host-issued id. It is safe for matching and display, and must never be handed
+  to `session/create`;
+- so anything that writes goes through `ensureHarnessWorkspace()`, which
+  confirms the derived workspace with one idempotent `workspace/create` and
+  caches the authoritative id on `WorkspaceBinding.confirmed`;
+- `newSession()` and `sendPrompt()` both route through that helper, so no write
+  path can observe an unconfirmed id.
+
+An empty result here is never benign: `findHarnessWorkspace()` would find
+nothing, the binding would never resolve, and the UI would sit at
+"Disconnected" while the handshake looked perfectly healthy.
+
 ## Markdown rendering
 
 `markdown-it` (`html: false`, `linkify: true`, `breaks: false`) runs **inside the webview** — not in the extension host. This keeps `ConversationModel` semantic-only (it sends raw markdown text; the webview does presentation).

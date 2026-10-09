@@ -41,6 +41,7 @@ import type { MuxFrame, ReadyFrame, RemoteEventResult } from '../src/harness/pro
 import { ControlSurface } from '../src/conversation/control.ts'
 import { cookieNameForAuthority } from '../src/harness/auth.ts'
 import { negotiateWire, wireEndpoint } from '../src/harness/wire.ts'
+import { findHarnessWorkspace } from '../src/workspace/binding.ts'
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 
@@ -206,7 +207,11 @@ function makeHarness(auth: AuthMode, controls: Set<string>): {
     const missing = (): { status: number; body: string } => ({ status: 404, body: 'not found' })
     switch (endpoint) {
       case 'session/list':
-        return { status: 200, body: okBody({ items: [{ sessionId: 'session-1', updatedAt: 2, running: false, blank: false }] }) }
+        return { status: 200, body: okBody({ items: [
+          { sessionId: 'session-1', updatedAt: 2, running: false, blank: false, cwd: '/repo/alpha' },
+          { sessionId: 'session-2', updatedAt: 9, running: false, blank: false, cwd: '/repo/beta' },
+          { sessionId: 'session-3', updatedAt: 5, running: false, blank: false, cwd: '/repo/alpha' },
+        ] }) }
       case 'session/page':
         return controls.has('session/page') ? { status: 200, body: okBody({ records: [{ type: 'event', event: { type: 'user/message', seq: 0, time: 1, data: { content: [{ type: 'text', text: 'hi' }] } } }], hasMore: false }) } : missing()
       case 'workspace/create': {
@@ -424,9 +429,11 @@ async function main(): Promise<void> {
 
   // 03. Listing works.
   const sessions = await client.listSessions()
-  eq('session/list returns the host list', sessions.items.length, 1)
+  eq('session/list returns the host list', sessions.items.length, 3)
+  eq('session/list rows carry a host-canonical cwd', sessions.items[0]?.cwd, '/repo/alpha')
   const workspaces = await client.listWorkspaces()
-  eq('rc.2 has no workspace/list: listWorkspaces is empty', workspaces.items.length, 0)
+  check('rc.2 serves no workspace/list, yet listWorkspaces still resolves the registry',
+    workspaces.items.length > 0, JSON.stringify(workspaces.items.map(w => w.path)))
 
   // 04. createWorkspace.
   const created = await client.createWorkspace('/tmp/new')
@@ -495,6 +502,23 @@ async function main(): Promise<void> {
   eq('fork returns the child session id', await client.forkSession('session-1'), 'session-2')
   eq('rename returns the accepted title', (await client.renameSession('session-1', 'My title')).title, 'My title')
   check('archive answers without throwing', (await client.archiveSession('session-1')) !== undefined)
+
+  // 9b. listWorkspaces() derives the registry from session/list cwd.
+  // Regression: it used to return a hard-coded empty array, so
+  // findHarnessWorkspace() never resolved and the UI stayed "Disconnected".
+  const wsList = await client.listWorkspaces()
+  eq('listWorkspaces derives one entry per distinct cwd', wsList.items.map(w => w.path), ['/repo/beta', '/repo/alpha'])
+  eq('a derived workspace collects every session under that cwd',
+    wsList.items.find(w => w.path === '/repo/alpha')?.sessionIds, ['session-1', 'session-3'])
+  eq('a derived workspace is titled after its directory',
+    wsList.items.find(w => w.path === '/repo/alpha')?.title, 'alpha')
+  check('listWorkspaces derives in most-recently-touched order',
+    wsList.items[0]?.path === '/repo/beta', JSON.stringify(wsList.items.map(w => w.path)))
+  check('listWorkspaces never calls the non-existent workspace/list RPC',
+    !harness.seen.rpc.some((r) => r.endpoint === 'workspace/list'))
+  const alpha = { uri: { fsPath: '/repo/alpha' } } as unknown as Parameters<typeof findHarnessWorkspace>[1]
+  eq('findHarnessWorkspace resolves a derived workspace by path',
+    (await findHarnessWorkspace(client, alpha))?.path, '/repo/alpha')
   check('selectModel answers without throwing (provider is required)',
     (await client.selectModel('session-1', 'deepseek', 'deepseek-v4-pro', 'high')) !== undefined)
   const selectModelRpc = harness.seen.rpc.filter((r) => r.endpoint === 'session/selectModel').at(-1)

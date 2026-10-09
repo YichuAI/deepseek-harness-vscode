@@ -42,6 +42,10 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full diff.
 - **v0.0.2** — Conversation UX & Architecture Baseline: Assistant Markdown rendering, tool card merging, system message collapsing, lazy workspace/session creation, streaming render fix, architecture hardening.
 - **v0.0.1** — First public release: prove VS Code and the browser share the same Harness session.
 
+## What v0.1.1 fixes
+
+**The panel could sit at "Disconnected" forever, with a perfectly healthy connection.** Workspace discovery was a hard-coded empty array, so binding never resolved and no session list ever appeared on activation. v0.1.1 derives the workspace registry from the `cwd` on every `session/list` row (rc.2 has no `workspace/list`), so an existing harness workspace is now found on connect and the binding survives a reload. Full notes: [CHANGELOG](CHANGELOG.md).
+
 ## What v0.1.0 adds
 
 - **Session search (F6, `session/search`)** — a 🔍 panel in the sidebar: type a full-text query, get matching sessions with title + hit snippet, click one to jump straight into it. Request shape `{ request: { query } }`, empirically confirmed against a live host.
@@ -118,7 +122,7 @@ For your safety, the following remain out of scope:
    Or install the VSIX from [GitHub Releases](https://github.com/liangwythu/deepseek-harness-vscode/releases):
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.1.0.vsix
+   code --install-extension harness-connector-deepseek-0.1.1.vsix
    ```
 
 3. Nothing to configure. The extension auto-connects: it reads the browser-session
@@ -265,8 +269,8 @@ npm install
 npm run build        # esbuild → dist/extension.js
 npm run watch        # rebuild on change
 npm run typecheck
-npm run package      # → harness-connector-deepseek-0.1.0.vsix
-npm run protocol-test      # 95 protocol assertions against a fake harness
+npm run package      # → harness-connector-deepseek-0.1.1.vsix
+npm run protocol-test      # 102 protocol assertions against a fake harness
 npm run protocol-probe     # report what your real dsh web exposes
 ```
 
@@ -290,7 +294,7 @@ Press `F5` in VS Code to launch an Extension Development Host with the extension
 - Unknown harness event types are ignored (the protocol is merge-extensible); they do not crash the client but also do not render.
 - Diff review revert uses `git checkout` — uncommitted changes to the target file will be lost on Reject.
 
-## Roadmap (v0.1.1+)
+## Roadmap (v0.1.2+)
 
 - Pin the `session/attachment` inner descriptor once upstream schema is readable (single-constant fix)
 - Inspector: filter box / type highlight / export as JSONL

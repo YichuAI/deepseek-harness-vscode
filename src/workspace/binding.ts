@@ -16,6 +16,8 @@ import type { WorkspaceView } from '../harness/protocol.ts'
 export interface WorkspaceBinding {
   folder: vscode.WorkspaceFolder
   harness?: WorkspaceView
+  /** True once `harness` came back from `workspace/create` (host-issued id). */
+  confirmed?: boolean
 }
 
 /** Normalize a directory path for matching against harness canonical paths. */
@@ -64,20 +66,28 @@ export async function findHarnessWorkspace(
 
 /** Lazy ensure: resolve-or-create the harness workspace for a binding.
  *  Called the first time the user sends a prompt on a pending binding.
- *  No user confirmation — creation is implicit at write-time. */
+ *  No user confirmation — creation is implicit at write-time.
+ *
+ *  A workspace discovered by {@link findHarnessWorkspace} is *derived* from
+ *  `session/list` (rc.2 has no `workspace/list`), so its `workspaceId` is a
+ *  path, not a host-issued id. Passing that to `session/create` would be
+ *  wrong. `workspace/create` is idempotent — the host returns the existing
+ *  workspace with `created:false` — so we always go through it at write-time
+ *  to obtain the authoritative workspace before creating a session. */
 export async function ensureHarnessWorkspace(
   client: HarnessClient,
   binding: WorkspaceBinding,
 ): Promise<WorkspaceView> {
-  if (binding.harness) return binding.harness
-  // Try to find again (someone else may have created it in the web UI).
-  const resolved = await findHarnessWorkspace(client, binding.folder)
-  if (resolved) {
-    binding.harness = resolved
-    return resolved
+  if (binding.harness) {
+    if (binding.confirmed) return binding.harness
+    const confirmed = await client.createWorkspace(binding.harness.path)
+    binding.harness = confirmed.workspace
+    binding.confirmed = true
+    return confirmed.workspace
   }
   const created = await client.createWorkspace(binding.folder.uri.fsPath)
   binding.harness = created.workspace
+  binding.confirmed = true
   return created.workspace
 }
 

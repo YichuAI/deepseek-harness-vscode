@@ -423,8 +423,9 @@ export class AppController {
   }
 
   async newSession(): Promise<void> {
-    // Make sure workspace exists; user may be clicking this on a pending binding.
-    const ws = this.binding?.harness ?? await this.ensureWorkspaceQuiet()
+    // Always go through ensureWorkspaceQuiet: a discovered workspace carries a
+    // path-shaped workspaceId that `session/create` must not be given.
+    const ws = await this.ensureWorkspaceQuiet()
     if (!ws) return
     try {
       const res = await this.d.client.createSession({ workspaceId: ws.workspaceId })
@@ -454,16 +455,14 @@ export class AppController {
     this.d.setState({ sending: true })
     this.d.pushState()
     try {
-      // 1+2: ensure workspace
-      let ws = this.binding?.harness
+      // 1+2: ensure workspace (confirmed against the host — its workspaceId
+      // must be a host-issued id before it reaches `session/create`).
+      const ws = await this.ensureWorkspaceQuiet()
       if (!ws) {
-        ws = await this.ensureWorkspaceQuiet()
-        if (!ws) {
-          if (this.noFolder === null) {
-            this.d.notifyError('Open a VS Code folder first — DeepSeek Harness needs a workspace root.')
-          }
-          return
+        if (this.noFolder === null) {
+          this.d.notifyError('Open a VS Code folder first — DeepSeek Harness needs a workspace root.')
         }
+        return
       }
       // 3: ensure session
       if (!this.activeSessionId) {
@@ -553,7 +552,11 @@ export class AppController {
   }
 
   /** Resolve-or-create a workspace, without user prompts. Errors bubble.
-   *  Updates this.binding.harness on success. */
+   *  Updates this.binding.harness on success.
+   *
+   *  A discovered workspace is derived from `session/list`, so its
+   *  `workspaceId` is a path. `ensureHarnessWorkspace` confirms it against the
+   *  host (idempotent `workspace/create`) before anything writes with that id. */
   private async ensureWorkspaceQuiet(): Promise<WorkspaceView | undefined> {
     if (!this.binding) {
       // Try picking folder once (discovery may have been skipped)
@@ -562,12 +565,17 @@ export class AppController {
       const existing = await findHarnessWorkspace(this.d.client, folder)
       this.binding = { folder, harness: existing }
     }
-    if (!this.binding.harness) {
+    if (!this.binding.confirmed) {
+      const first = this.binding.harness
       const ws = await ensureHarnessWorkspace(this.d.client, this.binding)
       this.d.setState({ workspace: workspaceToUi(ws) })
       // Sessions list is out of date now (new workspace has none)
-      this.sessions = []
-      this.d.setState({ sessions: sessionsToUi(this.sessions, sessionLabel) })
+      if (!first) {
+        this.sessions = []
+        this.d.setState({ sessions: sessionsToUi(this.sessions, sessionLabel) })
+      } else {
+        await this.refreshSessions()
+      }
     }
     return this.binding.harness
   }

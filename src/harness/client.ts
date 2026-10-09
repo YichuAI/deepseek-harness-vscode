@@ -40,6 +40,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import * as path from 'node:path'
 import type { Disposable } from '../disposable.ts'
 import { CompositeDisposable } from '../disposable.ts'
 import {
@@ -151,6 +152,15 @@ function innerCandidates(method: string, req: Record<string, unknown>): Record<s
   if (method === 'session/search' || method === 'session/attachment') return [{ request: req }, req]
   if (method === 'commands/execute' || method === 'commands/list') return [req]
   return [{ request: req }, { _request: req }, req]
+}
+
+/** Newest `updatedAt` among the sessions of one derived workspace. */
+function newestSessionAt(sessions: readonly SessionSummary[], ws: WorkspaceView): number {
+  let newest = 0
+  for (const s of sessions) {
+    if (s.cwd === ws.path && s.updatedAt > newest) newest = s.updatedAt
+  }
+  return newest
 }
 
 export class HarnessClient implements Disposable {
@@ -297,11 +307,46 @@ export class HarnessClient implements Disposable {
   // ─── unary RPCs (the only methods business code may call) ───────────────────
   describe(): HarnessInfo { return this.info ?? { home: '' } }
 
-  /** Workspace list — derived from `session/list` projections; see listSessions. */
+  /** Workspace list — derived from `session/list` projections; see listSessions.
+   *
+   *  0.2.0-rc.2 has **no** `workspace/list` RPC (verified: HTTP 404 on a live
+   *  host, and zero occurrences in the harness source). Workspaces are however
+   *  observable: every `session/list` row carries a host-canonical `cwd`, and
+   *  those directories are 1:1 with the workspace registry (a workspace is
+   *  keyed by its path — `workspace/create` returns the existing workspace,
+   *  `created:false`, when one already exists for that path).
+   *
+   *  So we reconstruct the list by grouping sessions on `cwd`. This must never
+   *  be a stub: an empty result makes `findHarnessWorkspace` return undefined
+   *  forever, the binding never resolves, and the UI sits at "Disconnected"
+   *  even though the handshake is healthy.
+   *
+   *  The derived `workspaceId` is the canonical path. It is a *path*, not a
+   *  host-issued id, so callers must NOT pass it to `session/create` as
+   *  `workspaceId` — use `{ cwd }` instead (see AppController.newSession).
+   */
   async listWorkspaces(): Promise<{ items: WorkspaceView[]; archivedSessionIds: SessionId[] }> {
-    // 0.2.0-rc.2 has no `workspace/list` RPC; workspaces are surfaced through
-    // `session/list` projections. Until that projection is wired, return empty.
-    return { items: [], archivedSessionIds: [] }
+    const { items: sessions } = await this.listSessions()
+    const byPath = new Map<string, WorkspaceView>()
+    for (const s of sessions) {
+      if (!s.cwd) continue
+      const existing = byPath.get(s.cwd)
+      if (existing) {
+        existing.sessionIds.push(s.sessionId)
+        continue
+      }
+      byPath.set(s.cwd, {
+        workspaceId: s.cwd,
+        path: s.cwd,
+        title: path.basename(s.cwd) || s.cwd,
+        sessionIds: [s.sessionId],
+        createdAt: '',
+        updatedAt: '',
+      })
+    }
+    // Most-recently-touched first: that is the workspace a returning user wants.
+    const items = [...byPath.values()].sort((a, b) => newestSessionAt(sessions, b) - newestSessionAt(sessions, a))
+    return { items, archivedSessionIds: [] }
   }
 
   createWorkspace(path: string): Promise<{ workspace: WorkspaceView; created: boolean }> {

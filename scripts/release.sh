@@ -8,11 +8,12 @@
 #   PAT        必填。repo 作用域的 GitHub Personal Access Token。
 #   owner      默认 YichuAI
 #   repo       默认 deepseek-harness-vscode
-#   tag        默认 v0.1.2（须已存在于远端）
-#   vsix-path  默认 harness-connector-deepseek-0.1.2.vsix（仓库根目录，*.vsix 被 gitignore）
+#   tag        默认 v0.1.3（须已存在于远端）
+#   vsix-path  默认 harness-connector-deepseek-0.1.3.vsix（仓库根目录，*.vsix 被 gitignore）
 #
-# 注：当前发版走 `gh release create`（本机已 gh auth login 为 YichuAI，token 含 repo
-# 作用域，存 keyring），不再传 PAT。本脚本保留作离线/CI 备用。
+# 注：本机（2026-10）没有 `gh` CLI，也没有 gh 的 keyring 凭据，所以发 Release 只能走
+# 本脚本的 REST API 路径 —— 需要用户提供一次性 PAT（repo 作用域），用完即撤销。
+# GH_TOKEN 也可用，但按仓库约定从命令行参数传入、不写入任何文件。
 #
 # 说明:
 #   - Release 正文从 CHANGELOG.md 的对应 `## [x.y.z]` 段落自动截取。
@@ -25,8 +26,8 @@ cd "$(dirname "$0")/.."   # 切到仓库根目录
 PAT="${1:-}"
 OWNER="${2:-YichuAI}"
 REPO="${3:-deepseek-harness-vscode}"
-TAG="${4:-v0.1.0}"
-VSIX="${5:-harness-connector-deepseek-0.1.2.vsix}"
+TAG="${4:-v0.1.3}"
+VSIX="${5:-harness-connector-deepseek-0.1.3.vsix}"
 
 if [ -z "$PAT" ]; then
   echo "用法: ./scripts/release.sh <PAT> [owner] [repo] [tag] [vsix-path]" >&2

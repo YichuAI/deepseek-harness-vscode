@@ -38,6 +38,10 @@ import type { Duplex } from 'node:stream'
 import { BrowserSessionAuth } from '../src/harness/auth.ts'
 import { HarnessClient } from '../src/harness/client.ts'
 import type { MuxFrame, ReadyFrame, RemoteEventResult } from '../src/harness/protocol.ts'
+// The webview script is a plain template string, so tsc never looks inside it.
+// These two give the regression gate eyes on it (see step G).
+import { CLIENT_SCRIPT } from '../src/view/client.ts'
+import { HTML_SKELETON } from '../src/view/html.ts'
 import { ControlSurface } from '../src/conversation/control.ts'
 import { cookieNameForAuthority } from '../src/harness/auth.ts'
 import { negotiateWire, wireEndpoint } from '../src/harness/wire.ts'
@@ -72,6 +76,65 @@ function wait(ms: number): Promise<void> {
 }
 function lastOf<T>(a: T[]): T | undefined {
   return a.length > 0 ? a[a.length - 1] : undefined
+}
+
+// ─── webview boot harness (step G) ────────────────────────────────────────────
+type StubEl = Record<string, unknown>
+function makeStubEl(id: string): StubEl {
+  return {
+    id, value: '', textContent: '', innerHTML: '', className: '', src: '',
+    disabled: false, checked: false, style: {}, children: [] as unknown[],
+    classList: { add() {}, remove() {}, toggle() {}, contains() { return false } },
+    addEventListener() {}, appendChild(c: unknown) { (this.children as unknown[]).push(c) },
+    focus() {}, setAttribute() {}, getAttribute() { return null },
+  }
+}
+
+/**
+ * Boot the real webview script against a minimal DOM stub and feed it one state.
+ *
+ * This is the exact path that froze the sidebar on its static "Disconnected"
+ * placeholder: the script is a template string, so a stray TypeScript annotation
+ * (or a backslash the template ate) parses fine for tsc and dies only in the
+ * webview — killing every control with no visible error.
+ */
+function bootWebview(
+  script: string,
+  skeleton: string,
+  markdownItFactory?: () => unknown,
+): { handlerRegistered: boolean; statusText: string; error: string } {
+  const ids = [...skeleton.matchAll(/id="([^"]+)"/g)].map((m) => m[1] as string)
+  const els = new Map(ids.map((id) => [id, makeStubEl(id)]))
+  let handler: ((e: unknown) => void) | undefined
+  const g = globalThis as unknown as Record<string, unknown>
+  g.document = { getElementById: (id: string) => els.get(id) ?? null, createElement: (t: string) => makeStubEl(t) }
+  g.window = { addEventListener: (type: string, fn: (e: unknown) => void) => { if (type === 'message') handler = fn } }
+  g.acquireVsCodeApi = () => ({ postMessage() {}, getState() { return undefined }, setState() {} })
+  // Default: a real-shaped MarkdownIt, as the shipped UMD bundle provides.
+  g.MarkdownIt = markdownItFactory
+    ?? function () { return { renderer: { rules: {} as Record<string, unknown> }, render: (s: string) => String(s ?? '') } }
+  try {
+    new Function(script)()
+  } catch (e) {
+    return { handlerRegistered: false, statusText: '', error: (e as Error).message }
+  }
+  if (typeof handler !== 'function') return { handlerRegistered: false, statusText: '', error: 'no state listener registered' }
+  const state = {
+    connection: 'connected', sessions: [], sending: false, canStop: false,
+    showSystemMessages: false, systemMessageCount: 0, autoApprove: false, renderVersion: 1,
+    capabilities: {}, commands: [], queue: [], eventLog: [], search: null,
+    workspace: { workspaceId: '/w', title: 'w', path: '/w' },
+  }
+  try {
+    handler({ data: { kind: 'state', state } })
+  } catch (e) {
+    return { handlerRegistered: true, statusText: '', error: (e as Error).message }
+  }
+  return {
+    handlerRegistered: true,
+    statusText: String((els.get('status-text') as { textContent: string }).textContent),
+    error: '',
+  }
 }
 
 // ─── WebSocket helpers (minimal RFC 6455 server side) ─────────────────────────
@@ -865,6 +928,33 @@ async function main(): Promise<void> {
   check('reset clears the whole control surface',
     surface.snapshot().version > beforeReset && surface.snapshot().todos.length === 0
     && surface.snapshot().goal === undefined && surface.snapshot().planActive === undefined)
+
+  // ─── G. webview script integrity ──────────────────────────────────────────
+  // The client script ships as a template string, so tsc never looks inside it.
+  // Nothing above would have caught a TypeScript annotation or a backslash the
+  // template ate — and either one silently kills every control in the panel,
+  // leaving the status frozen on its static "Disconnected" placeholder.
+  {
+    let parseError = ''
+    try { new Function(CLIENT_SCRIPT) } catch (e) { parseError = (e as Error).message }
+    check('the webview script parses as JavaScript (no TS in the template)', parseError === '', parseError)
+
+    const definedIds = new Set([...HTML_SKELETON.matchAll(/id="([^"]+)"/g)].map((m) => m[1] as string))
+    const usedIds = new Set([...CLIENT_SCRIPT.matchAll(/\$\('([^']+)'\)/g)].map((m) => m[1] as string))
+    eq('every element id the script looks up exists in the HTML skeleton',
+      [...usedIds].filter((id) => !definedIds.has(id)), [])
+
+    const boot = bootWebview(CLIENT_SCRIPT, HTML_SKELETON)
+    check('the webview boots and attaches a state listener', boot.handlerRegistered, boot.error)
+    eq('a connected state renders the Connected label', boot.statusText, 'Connected')
+
+    // The degraded path (no markdown-it UMD) must still boot: the extension
+    // serves a stub, and an unguarded renderer override used to abort on it.
+    const degraded = bootWebview(CLIENT_SCRIPT, HTML_SKELETON,
+      function () { return { render: (s: string) => String(s ?? '') } })
+    check('the no-markdown-it fallback still boots the panel', degraded.handlerRegistered, degraded.error)
+    eq('the fallback still renders Connected', degraded.statusText, 'Connected')
+  }
 
   console.log(`\n${failures === 0 ? 'all checks passed' : `${String(failures)} CHECK(S) FAILED`} (${String(step)} total)\n`)
   process.exit(failures === 0 ? 0 : 1)

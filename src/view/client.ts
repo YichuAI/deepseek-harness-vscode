@@ -16,6 +16,26 @@
 export const CLIENT_SCRIPT = /* js */ `
   const vscode = acquireVsCodeApi();
   const $ = (id) => document.getElementById(id);
+
+  // ─── boot guard ─────────────────────────────────────────────────────────────
+  // A throw anywhere below (a bad dependency, an unexpected state shape) used to
+  // abort the whole script *before* the state listener was attached, freezing the
+  // panel on its static "Disconnected" placeholder with dead controls and no
+  // explanation. Surface it instead: an uncaught boot error is printed in the
+  // message area, so a broken panel is self-evident rather than silent.
+  window.addEventListener('error', function (ev) {
+    try {
+      var box = document.getElementById('messages');
+      if (box && !box.getAttribute('data-boot-error')) {
+        box.setAttribute('data-boot-error', '1');
+        var detail = (ev && (ev.message || (ev.error && ev.error.message))) || 'unknown error';
+        box.innerHTML = '<div class="empty">Webview failed to start: '
+          + String(detail).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; })
+          + '</div>';
+      }
+    } catch (e) { /* never mask the original error */ }
+  });
+
   let lastRenderVersion = -1;
   let currentReviews = [];
   let currentApprovals = [];
@@ -33,22 +53,27 @@ export const CLIENT_SCRIPT = /* js */ `
 
   // ─── markdown renderer (webview-only, html disabled!) ──────────────────────
   const md = new MarkdownIt({ html: false, linkify: true, breaks: false });
-  // Override the default link renderer to add target=_blank + rel=noopener
-  const defaultLinkRender = md.renderer.rules.link_open || function(tokens, idx, options, env, self) {
-    return self.renderToken(tokens, idx, options);
-  };
-  md.renderer.rules.link_open = function(tokens, idx, options, env, self) {
-    const hrefIndex = tokens[idx].attrIndex('href');
-    if (hrefIndex >= 0) {
-      const href = tokens[idx].attrs[hrefIndex][1];
-      // Only allow http/https/mailto — block javascript: / data: payloads
-      const safe = /^(https?:|mailto:)/i.test(href);
-      if (!safe) tokens[idx].attrs[hrefIndex][1] = '#';
-    }
-    tokens[idx].attrSet('target', '_blank');
-    tokens[idx].attrSet('rel', 'noopener noreferrer');
-    return defaultLinkRender(tokens, idx, options, env, self);
-  };
+  // Override the default link renderer to add target=_blank + rel=noopener.
+  // Guarded: the extension's no-markdown-it fallback stub returns an object
+  // without a renderer, and touching renderer.rules unguarded would abort the
+  // whole script — the exact failure mode this panel just came out of.
+  if (md.renderer && md.renderer.rules) {
+    const defaultLinkRender = md.renderer.rules.link_open || function(tokens, idx, options, env, self) {
+      return self.renderToken(tokens, idx, options);
+    };
+    md.renderer.rules.link_open = function(tokens, idx, options, env, self) {
+      const hrefIndex = tokens[idx].attrIndex('href');
+      if (hrefIndex >= 0) {
+        const href = tokens[idx].attrs[hrefIndex][1];
+        // Only allow http/https/mailto — block javascript: / data: payloads
+        const safe = /^(https?:|mailto:)/i.test(href);
+        if (!safe) tokens[idx].attrs[hrefIndex][1] = '#';
+      }
+      tokens[idx].attrSet('target', '_blank');
+      tokens[idx].attrSet('rel', 'noopener noreferrer');
+      return defaultLinkRender(tokens, idx, options, env, self);
+    };
+  }
 
   function renderMarkdown(s) {
     if (!s) return '';
@@ -103,7 +128,7 @@ export const CLIENT_SCRIPT = /* js */ `
     const labels = { disconnected: 'Disconnected', connecting: 'Connecting…', connected: 'Connected', error: 'Connection error' };
     $('status-text').textContent = labels[conn] || conn;
     const hi = state.hostInfo;
-    const bits: string[] = [];
+    const bits = [];
     if (hi) {
       if (hi.home) bits.push(hi.home);
       if (hi.provider) bits.push(hi.provider);
@@ -1099,7 +1124,10 @@ export const CLIENT_SCRIPT = /* js */ `
     const text = $('input').value;
     const matches = slashMatches(text.trimStart());
     // Only show while typing the command word itself (no space yet).
-    const typing = /^\/\S*$/.test(text.trimStart()) && text.trimStart().startsWith('/');
+    const t = text.trimStart();
+    // NOTE: this template literal eats single backslashes, so \\s is required
+    // to hand the webview a real \s. (Same trap documented above for AT_FILE_RE.)
+    const typing = t.startsWith('/') && !/\\s/.test(t);
     slashItems = typing ? matches : [];
     slashIndex = slashItems.length > 0 ? 0 : -1;
     renderSlashPopup();

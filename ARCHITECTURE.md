@@ -368,6 +368,32 @@ nothing, the binding would never resolve, and the UI would sit at
 - Tool results: `<pre>` (no markdown)
 - Links: `target=_blank rel=noopener`; `javascript:` / `data:` URLs stripped
 - `markdown-it.umd.min.js` is bundled in `media/` for VSIX packaging
+- When the UMD read fails, `provider.getMarkdownItSource()` serves a stub. That stub must mirror markdown-it's public shape closely enough that the client's link-renderer override does not throw — v0.1.2 gave it `renderer.rules` and made the override feature-detected, because a "graceful fallback" that crashes the boot sequence is not graceful.
+
+## Webview script integrity (v0.1.2)
+
+`src/view/client.ts` exports the entire renderer as **one template string**. TypeScript
+type-checks the file but never looks *inside* that string, which makes two mistakes
+invisible to every build step and fatal at runtime:
+
+1. **TS syntax leaking in.** `const bits: string[] = [];` sat in the script from v0.0.4
+   to v0.1.1. The webview threw `SyntaxError` on load, so the script never ran: the
+   status stayed on the static `Disconnected` placeholder in `html.ts` and every control
+   was inert. The panel did not merely look disconnected — it had never booted.
+2. **Eaten backslashes.** A template literal consumes escapes: `\/` → `/`, `\S` → `S`.
+   Regexes must double them (`\\s`), as the `AT_FILE_RE` comment documents. A single
+   `\S` turned the slash-completion test into `/^/S*$/`.
+
+Both are now covered by step **G** of `scripts/protocol-test.ts`:
+
+- the script must be parseable by `new Function(CLIENT_SCRIPT)`;
+- every `$('id')` it looks up must exist in `HTML_SKELETON`;
+- the script is **booted against a DOM stub** and fed one state, asserting it registers
+  a `message` listener and renders `Connected` — once with a real markdown-it and once
+  with the no-markdown-it stub.
+
+At runtime, a boot-time `window.addEventListener('error', …)` prints any future startup
+failure into the message area, so a broken panel is self-evident instead of silent.
 
 ## Streaming performance
 

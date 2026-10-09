@@ -5,7 +5,55 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.1] — 2026-10-09
+## [0.1.2] — 2026-10-09
+
+Tagline: **修复：webview 脚本自 v0.0.4 起就是语法错误的——面板其实从未启动过。**
+Tagline (EN): **fix: the webview script had been invalid JavaScript since v0.0.4 — the panel never actually booted.**
+
+### Fixed
+
+- **面板"永远 Disconnected"的真正根因：webview 脚本是一个语法错误的 JS。**
+  `src/view/client.ts` 的脚本是**模板字符串**，`tsc` 看不到里面的内容。里面混进了一句
+  TypeScript：`const bits: string[] = [];`。浏览器解析这段脚本时直接抛
+  `SyntaxError: Missing initializer in const declaration`，于是**整个脚本从头到尾没有执行**——
+  第 1030 行那条 `window.addEventListener('message', …)` 从未注册，面板永远停在
+  `html.ts` 里写死的静态占位 `<span id="status-text">Disconnected</span>`，所有按钮全部失效。
+  这条错误由 **v0.0.4（commit `ac1cb2c`）** 引入，**v0.0.8 / v0.0.9 / v0.1.0 / v0.1.1
+  每一个发布版本都带着它**。这也解释了为什么 v0.1.1 修好工作区发现之后面板仍然
+  "Disconnected"——工作区那条修复是必要的，但不是充分的：面板压根没在运行。
+  *EN:* A TypeScript annotation inside the webview template string made the whole
+  client script a syntax error, so it never executed and the panel stayed on the
+  static "Disconnected" placeholder with dead controls. Present since v0.0.4.
+- **同一模板转义坑的第二处：`/^\/\S*$/` 被吃掉反斜杠。** 模板字符串会把 `\/` 变成 `/`、
+  `\S` 变成 `S`，于是 Slash 补全的判定正则变成 `/^/S*$/`（`Invalid regular expression flags`）。
+  已改为等价的、不依赖斜杠转义的写法，并在注释里标明这个坑（与既有的 `AT_FILE_RE` 注释一致）。
+  *EN:* The template literal also ate the backslashes in the slash-command regex;
+  rewritten without needing slash escapes.
+
+### Hardened
+
+- **启动失败不再静默。** 脚本开头装了 `window.addEventListener('error', …)` 兜底：
+  今后任何启动期异常都会把原因直接打印在消息区，而不是把一个"看起来是 Disconnected、
+  其实是死的"面板留在那里。
+- **markdown-it 降级路径修好。** 覆盖链接渲染器的那段代码此前无条件访问
+  `md.renderer.rules`；而扩展在没有 markdown-it UMD 时用的兜底 stub 恰好没有
+  `renderer`，于是**兜底本身就会让脚本崩溃**（"优雅降级"其实不优雅）。现在加了特性判断，
+  并让 provider 的兜底 stub 也带 `renderer.rules`，两条路都能启动。
+- **webview 脚本纳入回归门（新增第 G 组断言）。** 三条检查：
+  ① 脚本必须能被 `new Function()` 解析（任何 TS 语法泄漏、被吃掉的反斜杠都会在这里现形）；
+  ② 脚本里每一个 `$('id')` 都必须在 HTML 骨架里有对应元素；
+  ③ 用 DOM 桩**真实启动**脚本并投喂一份 state，断言能注册监听并把状态渲染成 `Connected`
+  ——正常 markdown-it 与"无 markdown-it 兜底"两种模式各测一遍。
+  回归门 **102 → 108 项断言**全绿。
+
+### Verified
+
+- 用真实传输代码对本机 `dsh web`（`127.0.0.1:3080`）连接：`connecting → connected`，
+  `session/list` 返回 1 条、`listWorkspaces` 派生 1 个工作区（`default-workspace`）。
+- 把 webview 脚本单独导出后 `node --check` 通过；DOM 桩启动测试两种模式均
+  `render(state) → status-text = "Connected"`。
+
+
 
 Tagline: **修复：工作区发现恒为空导致面板永远显示 Disconnected。**
 Tagline (EN): **fix: workspace discovery always returned empty, so the panel stayed "Disconnected".**

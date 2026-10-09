@@ -204,8 +204,11 @@ ${CLIENT_SCRIPT}
         return this.markdownItSource
       } catch { /* try next */ }
     }
-    // Fallback: plain-text stub so the UI degrades gracefully.
-    this.markdownItSource = `window.MarkdownIt = function(){return{render:function(s){return String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])).replace(/\\n/g,'<br/>')}}};`
+    // Fallback: plain-text stub so the UI degrades gracefully. It must mirror
+    // markdown-it's public shape (`renderer.rules`) closely enough that the
+    // client's link-renderer override does not throw — a stub that crashes the
+    // boot sequence is not a graceful degradation.
+    this.markdownItSource = `window.MarkdownIt = function(){return{renderer:{rules:{}},render:function(s){return String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])).replace(/\\n/g,'<br/>')}}};`
     return this.markdownItSource
   }
 }

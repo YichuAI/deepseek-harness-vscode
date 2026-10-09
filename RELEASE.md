@@ -5,9 +5,9 @@ This document describes how to cut and publish a release of
 VSIX asset; Marketplace publishing is optional and documented in step 5.
 
 The repo lives at `git@github.com:YichuAI/deepseek-harness-vscode.git`. Pushing
-over HTTPS fails here (no credential helper), so the remote is SSH with a
-repo-local `core.sshCommand` pointing at an ASCII key path — see "Appendix —
-SSH setup" at the end.
+over HTTPS fails here (no credential helper), so the remote is SSH. A repo-local
+`core.sshCommand` workaround for the non-ASCII home used to be required; it is
+not any more — see "Appendix — SSH setup" at the end.
 
 ---
 
@@ -137,37 +137,28 @@ git tag v<ver>
 git push origin main --tags
 
 # 4.3 create the GitHub Release and attach the VSIX
-#     Option A — gh CLI (not installed on every machine):
-gh release create v<ver> \
+#     Option A — gh CLI (preferred). On this machine it is installed but NOT on
+#     PATH: /c/Program Files/GitHub CLI/gh.exe. Logged in as YichuAI via
+#     `gh auth login --web`; the token lives in the Windows credential store.
+#     Device flow, if you ever need to redo it:
+#       printf '\n\n\n' | "/c/Program Files/GitHub CLI/gh.exe" auth login \
+#         --hostname github.com --git-protocol ssh --web --scopes "repo,read:org"
+#     then it prints a one-time code for https://github.com/login/device.
+"/c/Program Files/GitHub CLI/gh.exe" release create v<ver> \
   harness-connector-deepseek-<ver>.vsix \
   --title "v<ver>" \
-  --notes-file CHANGELOG.md \
+  --notes-file <notes.md> \
   --verify-tag
+#     `--notes-file CHANGELOG.md` would paste the *entire* changelog, so write the
+#     matching `## [<ver>]` section to a temp file first.
 
 #     Option B — REST API with a classic PAT scoped to `repo`/`public_repo`.
-#     Pass the token via env var, never as a CLI argument (that leaks into
-#     shell history and `ps` output). Revoke it once the release is up.
-GITHUB_TOKEN=ghp_… python - <<'PY'
-import os, json, urllib.request
-tok = os.environ["GITHUB_TOKEN"]
-repo = "YichuAI/deepseek-harness-vscode"
-def api(method, path, body=None, ctype="application/json"):
-    req = urllib.request.Request(f"https://api.github.com{path}", method=method)
-    req.add_header("Authorization", f"Bearer {tok}")
-    req.add_header("Accept", "application/vnd.github+json")
-    data = None
-    if body is not None:
-        data = body if isinstance(body, bytes) else json.dumps(body).encode()
-        req.add_header("Content-Type", ctype)
-    with urllib.request.urlopen(req, data) as r:
-        return json.loads(r.read() or b"{}")
-rel = api("POST", f"/repos/{repo}/releases",
-          {"tag_name": "<ver>", "name": "v<ver>", "body": open("notes.md").read()})
-with open("harness-connector-deepseek-<ver>.vsix", "rb") as f:
-    api("POST", f"https://uploads.github.com/repos/{repo}/releases/{rel['id']}"
-                "/assets?name=harness-connector-deepseek.vsix",
-        f.read(), "application/octet-stream")
-PY
+#     `scripts/release.sh <PAT>` does exactly this (credential check, changelog
+#     extraction, create-or-reuse, asset upload) — prefer it over hand-rolling
+#     the calls. Pass the token via env var or argument, never commit it, and
+#     revoke it once the release is up.
+./scripts/release.sh ghp_… YichuAI deepseek-harness-vscode v<ver> \
+  harness-connector-deepseek-<ver>.vsix
 ```
 
 The Release notes should be the matching `## [<version>]` section from
@@ -240,13 +231,22 @@ tag remains. Communicate the rollback in the release notes.
 
 ## Appendix — SSH setup on this machine
 
-The Windows username is non-ASCII, and the `ssh` binary resolves `HOME` through
-the account DB in the local code page — so it looks for the key under a mojibake
-path and silently finds nothing (`Could not create directory '/c/Users/<garbage>'`).
-Work around it by keeping the key on an ASCII path and pointing git at it
-explicitly:
+Historically the Windows username was non-ASCII and the `ssh` binary resolved
+`HOME` through the account DB in the local code page — so it looked for the key
+under a mojibake path and silently found nothing
+(`Could not create directory '/c/Users/<garbage>'`). The workaround was to keep
+the key on an ASCII path and point git at it explicitly.
+
+**That workaround is no longer in place and no longer needed.** As of 2026-10 the
+account home is ASCII (`C:\Users\PP`), Git Bash reports `HOME=/c/Users/PP`, and
+`~/.ssh/id_ed25519` authenticates as YichuAI. `/c/ssh/id_ed25519` does **not**
+exist — do not paste the snippet below blindly, it will break the push.
 
 ```bash
+# verify first — this must print "Hi YichuAI!"
+ssh -T git@github.com
+
+# only if the mojibake problem comes back:
 mkdir -p /c/ssh
 cp ~/.ssh/id_ed25519 /c/ssh/          # key generated normally, then relocated
 git config core.sshCommand \

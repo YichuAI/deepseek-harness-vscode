@@ -11,9 +11,11 @@
 #   tag        默认 v0.1.3（须已存在于远端）
 #   vsix-path  默认 harness-connector-deepseek-0.1.3.vsix（仓库根目录，*.vsix 被 gitignore）
 #
-# 注：本机（2026-10）没有 `gh` CLI，也没有 gh 的 keyring 凭据，所以发 Release 只能走
-# 本脚本的 REST API 路径 —— 需要用户提供一次性 PAT（repo 作用域），用完即撤销。
-# GH_TOKEN 也可用，但按仓库约定从命令行参数传入、不写入任何文件。
+# 注：本机（2026-10）已装 `gh` 2.102.0（winget 装到 C:\Program Files\GitHub CLI\gh.exe，
+# 不在默认 PATH 里），并已 `gh auth login --web` 登录为 YichuAI（token 存 Windows 凭据管理器，
+# 作用域 repo / read:org / gist）。所以首选路径是：
+#     gh release create v<tag> <vsix> --title "…" --notes-file <changelog 段> --verify-tag
+# 本脚本保留为备用：无 gh / 无 keyring（例如 CI）时用一次性 PAT 走 REST API。
 #
 # 说明:
 #   - Release 正文从 CHANGELOG.md 的对应 `## [x.y.z]` 段落自动截取。

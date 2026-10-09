@@ -4,8 +4,8 @@
 v0.0.6 以 GitHub Release + VSIX 资产的形式发布；Marketplace 发布是可选的，见第 5 节。
 
 仓库地址 `git@github.com:YichuAI/deepseek-harness-vscode.git`。此处 HTTPS 推送会失败
-（没有凭据助手），因此 remote 走 SSH，并用 repo-local 的 `core.sshCommand` 指向一个
-纯 ASCII 的密钥路径——详见文末"附录 — 本机 SSH 配置"。
+（没有凭据助手），因此 remote 走 SSH。曾经需要 repo-local 的 `core.sshCommand` 来绕过
+非 ASCII 主目录，现在已不需要——详见文末"附录 — 本机 SSH 配置"。
 
 ---
 
@@ -140,37 +140,26 @@ git tag v<版本>
 git push origin main --tags
 
 # 4.3 创建 GitHub Release 并附加 VSIX
-#     方式 A —— gh CLI（并非每台机器都装了）：
-gh release create v<版本> \
+#     方式 A —— gh CLI（首选）。本机已装但**不在 PATH 里**：
+#     /c/Program Files/GitHub CLI/gh.exe，且已用 `gh auth login --web` 登录为
+#     YichuAI（token 存 Windows 凭据管理器）。需要重新登录时走设备码：
+#       printf '\n\n\n' | "/c/Program Files/GitHub CLI/gh.exe" auth login \
+#         --hostname github.com --git-protocol ssh --web --scopes "repo,read:org"
+#     它会打印一个一次性验证码，拿去 https://github.com/login/device 授权。
+"/c/Program Files/GitHub CLI/gh.exe" release create v<版本> \
   harness-connector-deepseek-<版本>.vsix \
   --title "v<版本>" \
-  --notes-file CHANGELOG.md \
+  --notes-file <notes.md> \
   --verify-tag
+#     注意别用 `--notes-file CHANGELOG.md`：那会把**整份**变更日志贴上去。
+#     先把对应的 `## [<版本>]` 段写进一个临时文件。
 
 #     方式 B —— 用一个 scope 为 `repo`（公开仓库为 `public_repo`）的 classic PAT
-#     打 REST API。token 走环境变量传入，绝不要作为命令行参数（会泄进 shell
-#     历史和 `ps` 输出）。Release 建好后就把 token 吊销。
-GITHUB_TOKEN=ghp_… python - <<'PY'
-import os, json, urllib.request
-tok = os.environ["GITHUB_TOKEN"]
-repo = "YichuAI/deepseek-harness-vscode"
-def api(method, path, body=None, ctype="application/json"):
-    req = urllib.request.Request(f"https://api.github.com{path}", method=method)
-    req.add_header("Authorization", f"Bearer {tok}")
-    req.add_header("Accept", "application/vnd.github+json")
-    data = None
-    if body is not None:
-        data = body if isinstance(body, bytes) else json.dumps(body).encode()
-        req.add_header("Content-Type", ctype)
-    with urllib.request.urlopen(req, data) as r:
-        return json.loads(r.read() or b"{}")
-rel = api("POST", f"/repos/{repo}/releases",
-          {"tag_name": "<版本>", "name": "v<版本>", "body": open("notes.md").read()})
-with open("harness-connector-deepseek-<版本>.vsix", "rb") as f:
-    api("POST", f"https://uploads.github.com/repos/{repo}/releases/{rel['id']}"
-                "/assets?name=harness-connector-deepseek.vsix",
-        f.read(), "application/octet-stream")
-PY
+#     打 REST API。`scripts/release.sh <PAT>` 就是干这个的（凭据自检、截取变更日志、
+#     存在则复用否则新建、上传资产），优先用它而不是手写请求。
+#     token 走环境变量或参数传入，绝不提交，Release 建好后立刻吊销。
+./scripts/release.sh ghp_… YichuAI deepseek-harness-vscode v<版本> \
+  harness-connector-deepseek-<版本>.vsix
 ```
 
 Release 说明应为 `CHANGELOG.md` 中对应的 `## [<版本>]` 章节。**仅**附加 `.vsix` 作为二进制资产。
@@ -245,11 +234,19 @@ gh release edit v<版本> --draft
 
 ## 附录 — 本机 SSH 配置
 
-Windows 用户名含非 ASCII 字符，而 `ssh` 会通过账户数据库按本地代码页解析 `HOME`，
+历史上 Windows 用户名含非 ASCII 字符，而 `ssh` 会通过账户数据库按本地代码页解析 `HOME`，
 于是去一个乱码路径下找密钥并静默失败（`Could not create directory '/c/Users/<乱码>'`）。
-绕开办法：把密钥放在纯 ASCII 路径上，并让 git 显式指向它。
+当时的绕开办法是把密钥放到纯 ASCII 路径，并让 git 显式指向它。
+
+**这个绕法现在已经不在了，也不再需要。** 2026-10 起账户主目录是纯 ASCII（`C:\Users\PP`），
+Git Bash 里 `HOME=/c/Users/PP`，`~/.ssh/id_ed25519` 直接就能以 YichuAI 身份通过认证。
+**`/c/ssh/id_ed25519` 并不存在**——别照抄下面这段，照抄会把推送弄坏。
 
 ```bash
+# 先自检——必须打印 "Hi YichuAI!"
+ssh -T git@github.com
+
+# 只有当乱码问题真的回来了才用：
 mkdir -p /c/ssh
 cp ~/.ssh/id_ed25519 /c/ssh/          # 密钥正常生成后再迁移
 git config core.sshCommand \

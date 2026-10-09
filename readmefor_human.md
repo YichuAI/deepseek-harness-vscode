@@ -16,4 +16,4 @@ npm run deploy
 https://marketplace.visualstudio.com/manage/publishers/lucasliang
 
 ### GitHub 仓库
-https://github.com/liangwythu/deepseek-harness-vscode
+https://github.com/YichuAI/deepseek-harness-vscode

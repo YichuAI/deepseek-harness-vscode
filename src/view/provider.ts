@@ -54,6 +54,10 @@ export interface UiState {
   search?: import('../app/state.ts').SearchState | null
   /** F7: ring buffer of recently observed mux frames. */
   eventLog?: import('../app/state.ts').InspectorFrame[]
+  /** `@` completion candidates for the active session (`fileReferences/list`). */
+  refCandidates?: import('../harness/protocol.ts').FileReferenceCandidate[]
+  /** The path text these candidates answer for; also the stale-response guard. */
+  refQuery?: string
   /** Auto-approve incoming approval requests (setting mirror). */
   autoApprove: boolean
   renderVersion: number
@@ -66,7 +70,7 @@ export type WebviewAction =
   | { type: 'selectSession'; sessionId: string }
   | { type: 'newSession' }
   | { type: 'refreshSessions' }
-  | { type: 'sendPrompt'; text: string; context?: import('../harness/protocol.ts').PromptContext; steer?: boolean }
+  | { type: 'sendPrompt'; text: string; steer?: boolean }
   | { type: 'stop' }
   | { type: 'openWebUI' }
   | { type: 'toggleSystemMessages' }
@@ -95,8 +99,33 @@ export type WebviewAction =
   | { type: 'searchClear' }
   // ─── F7 live event inspector ───────────────────────────────
   | { type: 'inspectorClear' }
+  // ─── `@` completion (host-served fileReferences/list) ──────
+  | { type: 'refsQuery'; query: string }
+  // ─── composer attachments (images ride the prompt; files are staged) ──
+  | { type: 'pendingAdd'; items: PendingAttachmentPayload[] }
+  | { type: 'pendingRemove'; id: string }
+  | { type: 'pendingClear' }
   // ─── F8 attach files (routes to the extension-host file picker) ──
   | { type: 'attachFile' }
+
+/**
+ * One attachment handed up from the composer. Bytes travel exactly once, here —
+ * `UiState.pending` carries only chips, because `pushState` runs on every
+ * streamed chunk and re-sending a screenshot's base64 per chunk would be absurd.
+ */
+export interface PendingAttachmentPayload {
+  kind: 'image' | 'file'
+  name: string
+  mediaType?: string
+  /** Base64 of the exact file bytes. */
+  data: string
+  /**
+   * Composer-side identity, when the webview already minted one. It lets the
+   * composer keep a local blob preview keyed by the very id the chip comes back
+   * with, so a screenshot is never round-tripped as base64 just to be shown.
+   */
+  key?: string
+}
 
 export interface ProviderDeps {
   client: HarnessClient

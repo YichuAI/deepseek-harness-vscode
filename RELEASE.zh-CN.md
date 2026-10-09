@@ -37,7 +37,7 @@ npm run typecheck          # → tsc --noEmit, 退出码 0
 npm run build              # → dist/extension.js
 
 # 1.3 协议测试（假 harness——不需要 dsh web）
-npm run protocol-test      # → 全部 83 项断言 ✓
+npm run protocol-test      # → 全部 178 项断言 ✓
 
 # 1.4 协议探测（可选但推荐——需要 dsh web 运行）
 #     打印该 host 的端点风格、是否 cookie 门禁、事件套接字，以及它实际提供哪些
@@ -47,8 +47,9 @@ npm run protocol-probe     # 接受 [host] [port] 参数，默认 127.0.0.1:3080
 # 1.5 集成测试（会写入会话——需要 dsh web 运行）
 #     先在另一个终端启动 dsh web：
 #       cd ../deepseek-harness && npm run dsh -- web
-#     然后复制它打印的启动 URL
-DSH_LAUNCH_URL='http://127.0.0.1:3080/?token=<token>' npm run integration-test
+#     默认走本地自签（也就是扩展实际用的那条路），无需再复制 token；
+#     需要时可用 DSH_LAUNCH_URL='http://127.0.0.1:3080/?token=<token>' 覆盖
+npm run integration-test   # → 21/21 项 ✓，闭环通过
 
 # 1.6 打包 VSIX
 npm run package            # → harness-connector-deepseek-<版本>.vsix
@@ -62,12 +63,12 @@ npm run package            # → harness-connector-deepseek-<版本>.vsix
       `RELEASE.md` 的每一处修改，都已镜像到对应的 `*.zh-CN.md`。这是长期约定，
       不是每次发版再临时判断的事。
 - [ ] `CHANGELOG.md` 与 `ARCHITECTURE.md` 里的断言数与 `npm run protocol-test`
-      的**当前**输出一致（它已历经 50 → 64 → 98 → 83，其中 rc.2 重写用新假 harness 替换了
-      rc.6 假 harness；此处数字过期是最常见的文档漂移）。
+      的**当前**输出一致（它已历经 50 → 64 → 98 → 83 → 156 → 178，其中 rc.2 重写用新假
+      harness 替换了 rc.6 假 harness；此处数字过期是最常见的文档漂移）。
 - [ ] `LICENSE` 存在（MIT）。
 - [ ] `test/fixtures/` 中无秘钥/API 密钥/真实提示内容
       （固件必须使用 `<redacted:...>` 占位符）。
-- [ ] `.vscodeignore` 排除了 `src/`、`scripts/`、`test/`、配置文件
+- [ ] `.vscodeignore` 排除了 `src/`、`scripts/`、`test/`、配置文件**以及 `.workbuddy/`**
       （VSIX 中只包含 `dist/`、`media/`、文档、`package.json`、`LICENSE`）。
 - [ ] `git status` 干净（无未提交变更）。
 
@@ -80,22 +81,26 @@ npm run package            # → harness-connector-deepseek-<版本>.vsix
 unzip -l harness-connector-deepseek-<版本>.vsix
 ```
 
-预期（v0.0.1 ≈ 10 个文件，约 40 KB）：
+预期（v0.1.3 = 14 个文件，约 239 KB）：
 
 ```
 [Content_Types].xml
 extension.vsixmanifest
 extension/ARCHITECTURE.md
+extension/ARCHITECTURE.zh-CN.md
+extension/CHANGELOG.zh-CN.md
 extension/LICENSE.txt
+extension/README.zh-CN.md
 extension/changelog.md
 extension/package.json
 extension/readme.md
 extension/dist/extension.js
 extension/media/icon.png
 extension/media/icon.svg
+extension/media/markdown-it.umd.min.js
 ```
 
-如果出现 `src/`、`scripts/`、`test/`、`node_modules/` 或 `*.map`，
+如果出现 `src/`、`scripts/`、`test/`、`node_modules/`、`.workbuddy/` 或 `*.map`，
 说明 `.vscodeignore` 配置有误——修复后重新打包。
 
 ---

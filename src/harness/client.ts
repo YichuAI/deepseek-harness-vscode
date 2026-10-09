@@ -4,7 +4,7 @@
  * All HTTP and WebSocket access goes through here; the rest of the extension
  * never calls an HTTP client or opens a socket directly (§8).
  *
- * ── Wire contract (DSH 0.2.0-rc.2, the runtime installed on this machine) ──────
+ * ── Wire contract (DSH 0.2.1-alpha.2, the runtime installed on this machine) ────
  *
  *   POST /api/<namespace>/<method>        (slash-style endpoint)
  *     Content-Type: application/json
@@ -14,16 +14,32 @@
  *                                              and <inner> is keyed by the Typert
  *                                              parameter wire name: `_request` for
  *                                              session/list, `request` for most
- *                                              others, none for arg-less methods.
+ *                                              others, bare for a few
+ *                                              (`commands/*`, `fileReferences/list`).
  *     resp: { type:'server-response', rpcId, result:{ ok, value | error } }
  *
- *   WS   ws://host:port/api/remote.mux    (multiplexed Remote stream)
- *     → send one `open` frame for the `$events` logical stream:
- *       { type:'open', streamId, endpoint:'$events', payload:{args:{}} }
- *     ← frames: { type:'item'|'end'|'error', streamId, value }
- *       the FIRST `item.value` is { type:'ready', clientId, host:{home} } — that
- *       is the only host-identity frame (there is no host.describe in rc.2).
- *       every later `item.value` is a MuxFrame (session/event, approval/request, …).
+ *   WS   ws://host:port/api/remote.mux    (multiplexed Remote stream carrier)
+ *     One socket may carry several logical streams; each is opened with
+ *     { type:'open', streamId, endpoint, payload:{ args } } and every response
+ *     frame is { type:'item'|'end'|'error', streamId, value }. Any further
+ *     client message is a protocol violation (the Host closes with 1008).
+ *
+ *     • endpoint `$events` — forwarded Host events, and the ONLY source of the
+ *       host identity: its first item is
+ *       { type:'ready', clientId, host:{home} }. Later items are
+ *       { type:'emit', event, args } or, for the answerable ones,
+ *       { type:'waterfall', event, eventId, agentId, request }.
+ *       Approvals and user questions arrive here, and nowhere else.
+ *
+ *     • endpoint `session/follow` — one session's conversation, opened with
+ *       { request:{ address:{ kind:'session', sessionId }, assistantStream:true } }:
+ *         { type:'snapshot', header, cursor, records, hasMore, projections }
+ *         { type:'event', event }                    ← durable log records
+ *         { type:'assistant-stream', frame }         ← live start/chunk/end deltas
+ *       The durable records are the same `SessionEvent`s `session/page` returns;
+ *       the assistant frames are process-local and never reach the journal.
+ *       (This split is why the sidebar used to connect and then stay silent:
+ *       `$events` stopped carrying conversation traffic.)
  *
  *   POST /api/$events/result              (to settle an approval / question)
  *     body: { type:'client-request', rpcId, method:'$events/result',
@@ -31,12 +47,6 @@
  *
  * Every `/api/*` call and the mux upgrade require the browser-session cookie
  * (401 without one). The autoSession cookie machinery mints it locally.
- *
- * The transport was rewritten from a fictional 0.1.6-alpha model (which invented
- * logical-stream muxes, a `ready` frame, `session/follow` streams and a
- * `$events/result` RPC) — and then from a mis-remembered rc.6 model — to the real
- * 0.2.0-rc.2 model above, verified against the installed package source and a
- * live `dsh web` running on this machine.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -44,7 +54,7 @@ import * as path from 'node:path'
 import type { Disposable } from '../disposable.ts'
 import { CompositeDisposable } from '../disposable.ts'
 import {
-  DownlinkSocket, EventBuffer, muxUrl, type MuxStatus,
+  DownlinkSocket, EventBuffer, EVENTS_ENDPOINT, SESSION_FOLLOW_ENDPOINT, muxUrl, type MuxStatus,
 } from './events.ts'
 import { HarnessAuthRequiredError, type BrowserSessionAuth } from './auth.ts'
 import { httpRequest } from './http.ts'
@@ -53,18 +63,26 @@ import {
 } from './wire.ts'
 import {
   type ApprovalOutcome,
+  type AssistantStreamFrame,
   type ClientRequest,
   type CommandDescriptor,
+  type FileReferenceCandidate,
   type HarnessInfo,
   type HistoryEntry,
+  type FileUploadValue,
+  type ImageMediaType,
   type ModelCatalog,
   type ModelSelectionValue,
   type MuxFrame,
+  type PromptContentPart,
   type ReadyFrame,
+  type RemoteEventFrame,
   type RemoteEventResult,
   type RpcError,
   type ServerResponse,
+  type SessionAttachmentValue,
   type SessionCreateValue,
+  type SessionFollowFrame,
   type SessionForkValue,
   type SessionSummary,
   type SessionId,
@@ -74,7 +92,6 @@ import {
   type SessionPromptValue,
   type SessionRenameValue,
   type SessionSearchResult,
-  type SessionAttachmentResult,
   type WorkspaceCreateValue,
   type WorkspaceId,
   type WorkspaceListValue,
@@ -151,6 +168,9 @@ function innerCandidates(method: string, req: Record<string, unknown>): Record<s
   if (method === 'session/selectModel' || method === 'session/updateQueue') return [{ request: req }, req]
   if (method === 'session/search' || method === 'session/attachment') return [{ request: req }, req]
   if (method === 'commands/execute' || method === 'commands/list') return [req]
+  // `fileReferences/list` declares (agentId, query) positionally: a bare inner
+  // object, with no `request` wrapper to unwrap.
+  if (method === 'fileReferences/list') return [req]
   return [{ request: req }, { _request: req }, req]
 }
 
@@ -166,7 +186,39 @@ function newestSessionAt(sessions: readonly SessionSummary[], ws: WorkspaceView)
 export class HarnessClient implements Disposable {
   private readonly disposables = new CompositeDisposable()
   private state: ConnectionState = { kind: 'disconnected' }
-  private mux: DownlinkSocket<MuxFrame> | undefined
+  /** `$events` carrier: host identity + forwarded events (approvals, questions). */
+  private mux: DownlinkSocket<RemoteEventFrame> | undefined
+  /** `session/follow` carrier: the subscribed session's conversation. */
+  private follow: DownlinkSocket<SessionFollowFrame> | undefined
+  /** The session `follow` is currently opened for. */
+  private followSessionId: SessionId | undefined
+  /**
+   * `attemptId → { turn, step }` for the live assistant stream. The `start`
+   * frame carries the position; the `chunk` frames that follow only carry the
+   * attempt id, so the mapping is what turns a delta into a placeable item.
+   */
+  private readonly followAttempts = new Map<string, { turn: number; step: number }>()
+  /**
+   * Last durable seq seen per session on the follow stream.
+   *
+   * `session/page`'s `throughSeq` is a log offset, not a message count: the host
+   * validates it against the log's head and rejects anything past it, and `0`
+   * pages up to the very first event only. The follow opening frame publishes
+   * the cursor to page from, so it is recorded here and consumed by
+   * {@link getHistory}.
+   */
+  private readonly followCursors = new Map<SessionId, number>()
+
+  /** Track the newest durable seq seen for one session (never regresses). */
+  private noteFollowCursor(sessionId: SessionId, seq: number): void {
+    const known = this.followCursors.get(sessionId)
+    if (known === undefined || seq > known) this.followCursors.set(sessionId, seq)
+  }
+
+  /** The durable log cursor for one session, once the follow stream has spoken. */
+  followCursor(sessionId: SessionId): number | undefined {
+    return this.followCursors.get(sessionId)
+  }
   private muxOpened = false
   private muxOpenSignal: { resolve: () => void; reject: (e: Error) => void } | undefined
   private info: HarnessInfo | undefined
@@ -278,6 +330,7 @@ export class HarnessClient implements Disposable {
     this.activeSink?.buffer.dispose()
     this.activeSink = undefined
     if (this.mux !== undefined) { this.mux.close(); this.mux = undefined }
+    this.closeFollow()
     this.approvalFrames.clear()
     this.info = undefined
     this.activeSessionId = undefined
@@ -289,6 +342,15 @@ export class HarnessClient implements Disposable {
     this.setState({ kind: 'disconnected' })
   }
 
+  /** Tear down the conversation stream (session switch, or disconnect). */
+  private closeFollow(): void {
+    if (this.follow !== undefined) { this.follow.close(); this.follow = undefined }
+    this.followSessionId = undefined
+    this.followAttempts.clear()
+    // `followCursors` deliberately survives: a stale cursor only asks for an
+    // older page, and keeping it is what lets a reconnect refill history.
+  }
+
   dispose(): void {
     this.disconnect()
     this.disposables.dispose()
@@ -297,10 +359,14 @@ export class HarnessClient implements Disposable {
   /** The message shown when the harness refuses us: it names the exact fix. */
   private authRequired(): HarnessAuthRequiredError {
     this.opts.auth.noteRejected()
+    const gap = this.opts.auth.describeGap()
+    const mintGap = this.opts.auth.describeMintGap()
     return new HarnessAuthRequiredError(
-      `DeepSeek Harness requires a browser session before it answers /api/* (${this.opts.auth.describeGap()}). `
-      + 'Start `dsh web`, then run "DeepSeek Harness: Set Session Token from Launch URL" '
-      + 'and paste the line it printed (it looks like `dsh web: http://127.0.0.1:3080/?token=…`).',
+      `DeepSeek Harness requires a browser session before it answers /api/* (${gap}). `
+      + 'The extension mints that session from $DSH_HOME/.credentials.yaml on every connect — '
+      + 'make sure `dsh web` runs under the same user that owns that file'
+      + (this.opts.auth.sessionOrigin() === undefined && mintGap !== undefined ? ` (local mint said: ${mintGap})` : '')
+      + ', or turn the "autoSession" setting back on if it was disabled.',
     )
   }
 
@@ -366,13 +432,30 @@ export class HarnessClient implements Disposable {
    *   POST /api/session/page  payload { args:{ request:{ address, throughSeq, beforeSeq?, maxMessages? } } }
    * → { records:[{type:'event',event}], hasMore }.
    */
+  /**
+   * One message-aligned history page, newest first.
+   *
+   * `throughSeq` is a **log-offset cursor**, not a count and not a sentinel: the
+   * host validates it against the log head (`throughSeq: 100000` on a 31-event
+   * log answers `gateway/bad-request ... past cursor 30`), and `throughSeq: 0`
+   * pages up to the very first event only — which on a real session is a single
+   * `permission/preset` record, no messages at all. `-1` is accepted by
+   * validation but resolves to an empty page inside `paginate`.
+   *
+   * The cursor to page from is published by the `session/follow` opening frame,
+   * so it is read from {@link followCursor} unless the caller supplies one. When
+   * neither exists the honest answer is "no page yet" — the follow stream's own
+   * snapshot is about to deliver the same records.
+   */
   async getHistory(
     sessionId: SessionId,
-    opts: { maxMessages?: number } = {},
+    opts: { maxMessages?: number; throughSeq?: number } = {},
   ): Promise<{ events: HistoryEntry[]; hasMore: boolean }> {
+    const throughSeq = opts.throughSeq ?? this.followCursors.get(sessionId)
+    if (throughSeq === undefined) return { events: [], hasMore: false }
     const request: SessionPageRequest = {
       address: { kind: 'session', sessionId },
-      throughSeq: 0,
+      throughSeq,
       ...(opts.maxMessages === undefined ? {} : { maxMessages: opts.maxMessages }),
     }
     const value = await this.rpc<SessionPageValue>('session/page', request as unknown as Record<string, unknown>)
@@ -394,18 +477,41 @@ export class HarnessClient implements Disposable {
    * host runs it when the session is idle), `'steer'` injects into the RUNNING
    * turn. rc.2 args are `{ request: { requestId, sessionId, mode, content,
    * clientTimeZone? } }` — `requestId` is a required client-minted identity.
+   *
+   * Attachments ride the prompt itself; there is no separate send step.
+   * `images` are inlined as base64 parts (the host promotes them to durable
+   * refs during admission) and `files` reference receipts minted by
+   * {@link uploadFile}. The text part is dropped when it is empty and something
+   * else is attached, because the host rejects a prompt whose every part is
+   * blank.
    */
   prompt(
     sessionId: SessionId,
     text: string,
     clientTimeZone?: string,
-    opts: { mode?: 'queue' | 'steer' } = {},
+    opts: {
+      mode?: 'queue' | 'steer'
+      images?: readonly { mediaType: ImageMediaType; data: string; name?: string }[]
+      files?: readonly { receiptId: string }[]
+    } = {},
   ): Promise<SessionPromptValue> {
+    const content: PromptContentPart[] = []
+    if (text !== '') content.push({ type: 'text', text })
+    for (const image of opts.images ?? []) {
+      content.push({
+        type: 'image',
+        mediaType: image.mediaType,
+        data: image.data,
+        ...(image.name === undefined ? {} : { name: image.name }),
+      })
+    }
+    for (const file of opts.files ?? []) content.push({ type: 'file', receiptId: file.receiptId })
+    if (content.length === 0) content.push({ type: 'text', text })
     const request: Record<string, unknown> = {
       requestId: randomUUID(),
       sessionId,
       mode: opts.mode ?? 'queue',
-      content: [{ type: 'text', text }],
+      content,
     }
     if (clientTimeZone !== undefined) request.clientTimeZone = clientTimeZone
     return this.rpc<SessionPromptValue>('session/prompt', request)
@@ -515,6 +621,19 @@ export class HarnessClient implements Disposable {
   }
 
   /**
+   * `@` completion candidates for one session's working directory (host-served
+   * `fileReferences/list`, the same source the web composer's `@` menu reads).
+   *
+   * The host owns ranking, caching and invalidation; this only forwards the
+   * text typed after `@`. Candidates are paths, never content — picking one
+   * never attaches a file, it only names one, which is why the model still has
+   * to call a filesystem tool to read it.
+   */
+  listFileReferences(sessionId: SessionId, query: string): Promise<FileReferenceCandidate[]> {
+    return this.rpc<FileReferenceCandidate[]>('fileReferences/list', { agentId: sessionId, query })
+  }
+
+  /**
    * Full-text session search (rc.2 `session/search`, `{ request: { query } }`).
    *
    * NOTE: this endpoint may be disabled by the host deployment (the local
@@ -527,18 +646,50 @@ export class HarnessClient implements Disposable {
   }
 
   /**
-   * Attach local files to a session (rc.2 `session/attachment`,
-   * `{ request: { sessionId, attachments: [{ name, content }] } }`, `content` is
-   * base64 of the file bytes). The host's inner descriptor could not be pinned by
-   * blind probing against the local deployment, so this is the best-known shape;
-   * errors are surfaced verbatim to the caller.
+   * Read back one durable image by its content address.
+   *
+   * `session/attachment` is a **read**, not an upload: `{ sessionId, attachmentId }`
+   * answers the stored ref plus its bytes (base64). The host may have rescaled
+   * or re-encoded during admission, so `attachment.mediaType` is authoritative
+   * and the bytes are not guaranteed byte-identical to what was sent.
    */
-  uploadAttachment(
-    sessionId: SessionId,
-    attachments: Array<{ name: string; content: string }>,
-  ): Promise<SessionAttachmentResult> {
+  readAttachment(sessionId: SessionId, attachmentId: string): Promise<SessionAttachmentValue> {
     this.requireControl('session/attachment')
-    return this.rpc<SessionAttachmentResult>('session/attachment', { sessionId, attachments })
+    return this.rpc<SessionAttachmentValue>('session/attachment', { sessionId, attachmentId })
+  }
+
+  /**
+   * Stage one file and get the receipt a prompt references.
+   *
+   * Uploading does not ride the Remote surface at all: it is a raw byte route,
+   * `POST /api/session/uploadFileBinary?sessionId=<id>&name=<leaf>`, body
+   * `application/octet-stream`, answering `{ok:true, value:{receiptId, file}}`.
+   * The receipt is scoped to that session and to this host process. Verified
+   * live against `0.2.1-alpha.2` (30 bytes in, `receiptId` back).
+   */
+  async uploadFile(sessionId: SessionId, name: string, bytes: Uint8Array): Promise<FileUploadValue> {
+    const url = `http://${this.opts.host}:${String(this.opts.port)}/api/session/uploadFileBinary`
+      + `?sessionId=${encodeURIComponent(sessionId)}&name=${encodeURIComponent(name)}`
+    const cookie = this.opts.auth.cookieHeader()
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/octet-stream',
+        ...(cookie === undefined ? {} : { cookie }),
+      },
+      body: bytes as unknown as BodyInit,
+    })
+    if (res.status !== 200) {
+      throw new HarnessRpcError('gateway/internal',
+        `uploadFileBinary answered HTTP ${String(res.status)} ${res.statusText}`, { status: res.status })
+    }
+    const body = await res.json() as { ok?: boolean; value?: FileUploadValue; error?: { code?: string; message?: string } }
+    if (body.ok !== true || body.value === undefined) {
+      const err = body.error
+      throw new HarnessRpcError(err?.code ?? 'gateway/internal',
+        err?.message ?? 'uploadFileBinary returned no receipt', err ?? {})
+    }
+    return body.value
   }
 
   /** Archive the session out of the active workspace list. */
@@ -569,11 +720,23 @@ export class HarnessClient implements Disposable {
 
   // ─── event subscription ─────────────────────────────────────────────────────
   /**
-   * Subscribe to `sessionId`. Frames for other sessions are dropped. Durable
-   * events arrive as `session/event` frames; assistant streaming deltas arrive
-   * as `session/event` frames with `event.type === 'assistant/chunk'` — both are
-   * delivered to the conversation model unchanged. The buffer coalesces
-   * high-frequency frames; `onFlush` receives batches.
+   * Subscribe to `sessionId`'s conversation.
+   *
+   * This opens a `session/follow` stream on its own mux carrier. The Host
+   * answers with an opening `{type:'snapshot'}` (history prefix + log cut),
+   * then every durable `{type:'event'}` record, then live
+   * `{type:'assistant-stream'}` deltas while a turn runs. Each of those is
+   * translated into this plugin's internal vocabulary before it reaches
+   * `onFlush`, so `ConversationModel` never learns the wire names:
+   *
+   *   follow `event`             → { type:'session/event', sessionId, event }
+   *   follow `assistant-stream`  → { type:'assistant/stream', sessionId, turn, step, chunk }
+   *   follow `snapshot.records`  → { type:'session/event', … } (second delivery
+   *                                of history; the model's seq guard drops the
+   *                                overlap, so a reconnect only appends what is new)
+   *
+   * Switching sessions replaces the stream: the previous one is disposed, so at
+   * most one conversation is ever being followed.
    */
   subscribe(
     sessionId: SessionId,
@@ -587,13 +750,130 @@ export class HarnessClient implements Disposable {
     const previous = this.activeSink
     if (previous !== undefined) previous.buffer.dispose()
     this.activeSink = sink
+    this.openFollow(sessionId)
     return {
       dispose: () => {
         if (this.activeSink !== sink) return
         sink.buffer.dispose()
         this.activeSink = undefined
         if (this.activeSessionId === sessionId) this.activeSessionId = undefined
+        this.closeFollow()
       },
+    }
+  }
+
+  /** Open (replacing any previous) the conversation stream for one session. */
+  private openFollow(sessionId: SessionId): void {
+    if (this.followSessionId === sessionId && this.follow !== undefined) return
+    this.closeFollow()
+    this.followSessionId = sessionId
+    const follow = new DownlinkSocket<SessionFollowFrame>({
+      url: () => muxUrl(this.opts.host, this.opts.port, this.profile?.muxPath ?? defaultWireProfile().muxPath),
+      headers: () => {
+        const origin = `http://${this.opts.host}:${String(this.opts.port)}`
+        const cookie = this.opts.auth.cookieHeader()
+        const headers: Record<string, string> = { origin }
+        if (cookie !== undefined) headers['cookie'] = cookie
+        return headers
+      },
+      endpoint: SESSION_FOLLOW_ENDPOINT,
+      streamIdPrefix: 'harness-follow-',
+      openArgs: () => ({
+        request: {
+          address: { kind: 'session', sessionId },
+          // Opt in to the process-local assistant deltas; without this the
+          // stream is history-only and a running turn renders as a blank wait.
+          assistantStream: true,
+        },
+      }),
+      onFrame: (frame) => { this.onFollowFrame(sessionId, frame) },
+      onStreamError: (err) => {
+        const message = (err as { message?: string } | undefined)?.message ?? JSON.stringify(err)
+        this.opts.log(`follow: stream error — ${String(message).slice(0, 200)}`)
+        for (const l of this.muxStatusListeners) {
+          try { l({ kind: 'error', message: `session/follow: ${String(message).slice(0, 120)}` }) } catch { /* noop */ }
+        }
+      },
+      // Health of the conversation stream is informational: it must never
+      // overwrite the `$events` status the panel already shows.
+      onStatus: (s) => { this.opts.log(`follow: ${s.kind}${'reason' in s ? ' — ' + s.reason : ''}`) },
+      log: this.opts.log,
+    })
+    this.follow = follow
+    follow.open()
+  }
+
+  /**
+   * Translate one `session/follow` frame into the plugin's internal frames and
+   * hand it to the active sink.
+   */
+  private onFollowFrame(sessionId: SessionId, frame: SessionFollowFrame): void {
+    const sink = this.activeSink
+    if (sink === undefined || sink.sessionId !== sessionId) return
+    const f = frame as unknown as { type?: string; [k: string]: unknown }
+    switch (f.type) {
+      case 'snapshot': {
+        // The stream's opening history prefix — and, on this host, the only
+        // correct source of it. `session/page` needs a log-offset cursor, which
+        // is exactly what this frame carries; the plugin used to page with
+        // `throughSeq: 0` and get a single non-message record back.
+        const records = Array.isArray(f.records) ? f.records : []
+        if (typeof f.cursor === 'number') this.noteFollowCursor(sessionId, f.cursor)
+        for (const record of records) {
+          const event = (record as { event?: unknown }).event
+          if (event === undefined) continue
+          sink.buffer.push({ type: 'session/event', sessionId, event } as unknown as MuxFrame)
+        }
+        this.opts.log(`follow: snapshot with ${String(records.length)} record(s), cursor=${String(f.cursor)}`)
+        return
+      }
+      case 'event': {
+        if (f.event === undefined) return
+        const seq = (f.event as { seq?: unknown }).seq
+        if (typeof seq === 'number') this.noteFollowCursor(sessionId, seq)
+        sink.buffer.push({ type: 'session/event', sessionId, event: f.event } as unknown as MuxFrame)
+        return
+      }
+      case 'assistant-stream': {
+        this.onAssistantStreamFrame(sink, sessionId, f.frame as AssistantStreamFrame | undefined)
+        return
+      }
+      default:
+        // Forward-compatible: an unknown frame is passed through untouched so a
+        // newer host's addition shows up in the event inspector instead of
+        // vanishing.
+        sink.buffer.push(frame as unknown as MuxFrame)
+    }
+  }
+
+  /** Fold one live assistant frame into an `assistant/stream` internal frame. */
+  private onAssistantStreamFrame(sink: ActiveSink, sessionId: SessionId, frame: AssistantStreamFrame | undefined): void {
+    if (frame === undefined || typeof frame !== 'object') return
+    switch (frame.type) {
+      case 'start':
+        this.followAttempts.set(frame.attemptId, { turn: frame.turn, step: frame.step })
+        return
+      case 'chunk': {
+        const at = this.followAttempts.get(frame.attemptId)
+        // A chunk for an attempt we never saw start (mid-stream reconnect) has
+        // no place to land: `applyStreamChunk` keys on turn:step, so guessing
+        // would scatter the text. Drop it — the durable `assistant/message`
+        // that closes the attempt carries the full text anyway.
+        if (at === undefined) return
+        sink.buffer.push({
+          type: 'assistant/stream',
+          sessionId,
+          turn: at.turn,
+          step: at.step,
+          chunk: frame.chunk,
+        } as unknown as MuxFrame)
+        return
+      }
+      case 'end':
+        this.followAttempts.delete(frame.attemptId)
+        return
+      default:
+        return
     }
   }
 
@@ -644,9 +924,14 @@ export class HarnessClient implements Disposable {
     const candidates = innerCandidates(method, req)
     const all = candidates.map((c, i) => ({ c, i }))
     const remembered = this.argShapes.get(method)
+    // The shape that worked last time goes FIRST. It used to go last, which made
+    // every call after the first retry two known-wrong shapes against the live
+    // host before landing on the right one — three round trips per prompt, and a
+    // wire shape that wandered between calls depending on which permissive
+    // attempt a host happened to accept.
     const order = remembered === undefined
       ? all
-      : [...all.filter(x => x.i !== remembered), all[remembered]!]
+      : [all[remembered]!, ...all.filter(x => x.i !== remembered)]
 
     let last: unknown
     for (const { c, i } of order) {
@@ -754,57 +1039,109 @@ export class HarnessClient implements Disposable {
   }
 
   /**
-   * One decoded `$events` frame (the `value` of a Remote stream `item`). The wire
-   * names differ from this plugin's internal vocabulary, so translate the
-   * waterfall events before routing: `approval/request` → `approval/requested`,
-   * `user-questions/request` → `question/requested`. Everything else passes
-   * through to the existing routing unchanged.
+   * One decoded `$events` frame — the `value` of a Remote stream `item`.
+   *
+   * Only two families live here: forwarded `emit` events (session status and
+   * activity, plugin-inventory changes, …) and the answerable `waterfall`
+   * frames (approvals, user questions). The wire names differ from this
+   * plugin's internal vocabulary, so translate the waterfalls before routing:
+   * `approval/request` → `approval/requested`,
+   * `user-questions/request` → `question/requested`.
+   *
+   * The pre-0.2 shape — a bare `{type:'approval/request'}` frame — is still
+   * tolerated so the plugin keeps working against an older host.
    */
-  private onMuxMessage(frame: MuxFrame): void {
-    const f = frame as { type: string; [k: string]: unknown }
+  private onMuxMessage(frame: RemoteEventFrame): void {
+    const f = frame as unknown as { type: string; [k: string]: unknown }
     switch (f.type) {
-      case 'approval/request': {
+      case 'waterfall': {
+        const event = String(f.event ?? '')
         const eventId = String(f.eventId ?? '')
         const req = (f.request ?? {}) as Record<string, unknown>
-        const internal = {
-          type: 'approval/requested',
-          sessionId: typeof req.sessionId === 'string' ? req.sessionId : (this.activeSessionId ?? ''),
-          approvalId: eventId,
-          toolName: typeof req.toolName === 'string' ? req.toolName : undefined,
-          callId: typeof req.callId === 'string' ? req.callId : undefined,
-          reason: typeof req.reason === 'string' ? req.reason : undefined,
-        } as MuxFrame
-        this.approvalFrames.set(eventId, { eventId, sessionId: (internal as { sessionId: string }).sessionId })
-        this.notifyApproval(internal, eventId)
+        if (event === 'approval/request') {
+          this.emitApprovalRequested(eventId, req)
+          return
+        }
+        if (event === 'user-questions/request') {
+          this.notifyApproval({
+            type: 'question/requested',
+            sessionId: typeof req.sessionId === 'string' ? req.sessionId : (this.activeSessionId ?? ''),
+            questions: Array.isArray(req.questions) ? req.questions : [],
+          } as MuxFrame, eventId)
+          return
+        }
+        this.opts.log(`$events: unhandled waterfall "${event}"`)
+        return
+      }
+      case 'cancel':
+        this.opts.log(`$events: waterfall cancelled (${String(f.eventId ?? '')})`)
+        return
+      case 'emit': {
+        // `api-session/status` is the host's own running flag; without it the
+        // Stop button only updates when a full turn/end event arrives.
+        if (f.event === 'api-session/status') {
+          const args = Array.isArray(f.args) ? f.args : []
+          const sessionId = typeof args[0] === 'string' ? args[0] : undefined
+          const running = args[1] === true
+          if (sessionId !== undefined) {
+            this.notifySessionFrame({ type: 'session/status', sessionId, running } as unknown as MuxFrame)
+          }
+          return
+        }
+        // Every other forwarded event is informational for this plugin.
+        return
+      }
+      // ── pre-0.2 compatibility: the same waterfall delivered unwrapped ──
+      case 'approval/request': {
+        this.emitApprovalRequested(String(f.eventId ?? ''), (f.request ?? {}) as Record<string, unknown>)
         return
       }
       case 'user-questions/request': {
-        const eventId = String(f.eventId ?? '')
         const req = (f.request ?? {}) as Record<string, unknown>
-        const internal = {
+        this.notifyApproval({
           type: 'question/requested',
           sessionId: typeof req.sessionId === 'string' ? req.sessionId : (this.activeSessionId ?? ''),
           questions: Array.isArray(req.questions) ? req.questions : [],
-        } as MuxFrame
-        this.notifyApproval(internal, eventId)
+        } as MuxFrame, String(f.eventId ?? ''))
         return
       }
     }
-    this.onMuxFrame(frame)
+    this.onMuxFrame(frame as unknown as MuxFrame)
   }
 
-  /** One decoded mux frame: route approvals to approval listeners, session frames to the active sink. */
+  /** Translate one wire `approval/request` into the internal requested frame. */
+  private emitApprovalRequested(eventId: string, req: Record<string, unknown>): void {
+    const internal = {
+      type: 'approval/requested',
+      sessionId: typeof req.sessionId === 'string' ? req.sessionId : (this.activeSessionId ?? ''),
+      approvalId: eventId,
+      toolName: typeof req.toolName === 'string' ? req.toolName : undefined,
+      callId: typeof req.callId === 'string' ? req.callId : undefined,
+      reason: typeof req.reason === 'string' ? req.reason : undefined,
+    } as MuxFrame
+    this.approvalFrames.set(eventId, { eventId, sessionId: (internal as { sessionId: string }).sessionId })
+    this.notifyApproval(internal, eventId)
+  }
+
+  /** Deliver one session-scoped frame to the active sink when it matches. */
+  private notifySessionFrame(frame: MuxFrame): void {
+    const f = frame as { sessionId?: unknown }
+    if (this.activeSink === undefined || typeof f.sessionId !== 'string') return
+    if (f.sessionId !== this.activeSink.sessionId) return
+    this.activeSink.buffer.push(frame)
+  }
+
+  /**
+   * Route one already-internal frame: approvals to the approval listeners,
+   * session-scoped frames to the active conversation sink. Reached from the
+   * pre-0.2 compatibility paths and from the event inspector's pass-through.
+   */
   private onMuxFrame(frame: MuxFrame): void {
     const f = frame as { type: string; [k: string]: unknown }
     switch (f.type) {
-      case 'approval/requested': {
-        const af = frame as Extract<MuxFrame, { type: 'approval/requested' }>
-        this.notifyApproval(af, af.approvalId)
-        return
-      }
+      case 'approval/requested':
       case 'approval/resolved': {
-        const af = frame as Extract<MuxFrame, { type: 'approval/resolved' }>
-        this.notifyApproval(af, af.approvalId)
+        this.notifyApproval(frame, String(f.approvalId ?? ''))
         return
       }
       case 'question/requested': {
@@ -812,23 +1149,16 @@ export class HarnessClient implements Disposable {
         return
       }
       case 'question/resolved': {
-        const qf = frame as Extract<MuxFrame, { type: 'question/resolved' }>
-        this.notifyApproval(qf, qf.questionRpcId)
+        this.notifyApproval(frame, String(f.questionRpcId ?? ''))
         return
       }
       case 'stream/error': {
         this.activeSink?.buffer.push(frame)
         return
       }
-    }
-    // Session-scoped frames: deliver to the active sink only when it matches.
-    if (
-      this.activeSink !== undefined
-      && f.type.startsWith('session/')
-      && typeof f.sessionId === 'string'
-      && f.sessionId === this.activeSink.sessionId
-    ) {
-      this.activeSink.buffer.push(frame)
+      default: {
+        this.notifySessionFrame(frame)
+      }
     }
   }
 
@@ -841,7 +1171,7 @@ export class HarnessClient implements Disposable {
   // ─── downlink mux lifecycle ─────────────────────────────────────────────────
   private openMux(): void {
     if (this.mux === undefined) {
-      this.mux = new DownlinkSocket<MuxFrame>({
+      this.mux = new DownlinkSocket<RemoteEventFrame>({
         url: () => muxUrl(this.opts.host, this.opts.port, this.profile?.muxPath ?? defaultWireProfile().muxPath),
         headers: () => {
           const origin = `http://${this.opts.host}:${String(this.opts.port)}`
@@ -850,6 +1180,9 @@ export class HarnessClient implements Disposable {
           if (cookie !== undefined) headers['cookie'] = cookie
           return headers
         },
+        endpoint: EVENTS_ENDPOINT,
+        expectReady: true,
+        openArgs: () => ({}),
         onReady: (ready) => { this.onReady(ready) },
         onFrame: (frame) => { this.onMuxMessage(frame) },
         onStatus: (s) => { this.onMuxStatus(s) },

@@ -161,6 +161,14 @@ Content-Type: application/json
 无需改动即可处理流式。持久历史**不**在此通道下发：`getHistory()` 改为调用一元 RPC
 `session/page`（`{ request: { address, throughSeq, beforeSeq?, maxMessages? } }`）。
 
+`throughSeq` 是**日志游标，不是条数**，而且猜不出来。上游（`history.ts`）把 `-1` 解析成
+空页、`0` 解析成"只要第 0 条"、越界则报 `gateway/bad-request … past cursor N`。唯一被认可
+的来源是 **`session/follow` 开场帧里的 `snapshot.cursor`**——`SessionPageRequest.throughSeq`
+的文档注释就是这么写的（"来自对应的 follow 开场帧"）。所以客户端把 follow 流交给它的每个
+游标都记下来（`noteFollowCursor`，单调不回退），而 `getHistory()` 在**还没学到游标时直接返回
+空页、一个请求都不发**。搞错的代价不只是显示问题：原先写死的 `0` 让历史永远是空的，
+而且调用方会把空页折进模型——于是**每次 mux 重连都会把正在看的对话擦掉**。
+
 **审批应答**：`POST /api/$events/result`，带 `client-request` 信封：
 
 ```jsonc
@@ -191,13 +199,18 @@ Host 以第一个应答为准，随便回 `next` 反而会抢在 Web UI 之前�
 `probeCapabilities`），因此面对旧版 host 保持开启也是安全的。在 0.2.0-rc.2 上**存在**的集合是：
 
 `session/fork`、`session/rename`、`session/selectModel`、`session/updateQueue`、
-`workspace/archiveSession`。
+`workspace/archiveSession`、`commands/execute`、`commands/list`、
+`session/search`、`session/attachment`。
 
-（`session/command` 会被探测但 rc.2 **不提供**，所以计划模式 / 权限预设 / 压缩在 rc.2 上仅显示、
-不可写；`agentPreset/*`、`subagent/*`、`host/describe`、`workspace/list`、`llm/models`、
+（`agentPreset/*`、`subagent/*`、`host/describe`、`workspace/list`、`llm/models`、
 `goal/*` 同样不存在，一律门控关闭。）
 
-绝不调用：`settings/*`、`credentials/*`、`commands/*`、`terminal/*`、`directoryPicker/*`，
+这里有一个值得点名的坑：**`session/attachment` 不是上传接口**，它是"按 id 读附件"
+——`{ request: { sessionId, attachmentId } }` → `{ attachment, data: base64 }`。
+早期版本把它当成上传路径、对着它猜内层描述符，结果无论发什么都是
+`boundary validation failed`。真正上传**新文件**根本不走 RPC，也不在这张表里（见 F8）。
+
+绝不调用：`settings/*`、`credentials/*`、`terminal/*`、`directoryPicker/*`，
 或上表之外的任何审批/权限变更操作。
 
 ## 控制面（`src/conversation/control.ts`）
@@ -224,6 +237,49 @@ archive / 模型选择 / 队列调速各有专用端点（`session/fork`、`sess
 `workspace/archiveSession`、`session/selectModel`、`session/updateQueue`），每个都经实时的能力探测
 门控；若宿主不提供，`requireControl` 抛 `HarnessUnsupportedError` 并在消息里点名缺哪个端点——
 于是 UI 表现为「少几个控件」，而不是「几个按了没反应的按钮」。
+
+## 附件（图片内联 / 文件两步，v0.1.3）
+
+选文件发生在扩展宿主（webview 读不到本地磁盘），但**落地走的是两条完全不同的线**。
+v0.1.0 那个"所有东西都 base64 走 `session/attachment`"的猜测两个方向都错了；真实契约是从
+`deepseek-harness@0.2.1-alpha.2` 源码里读出来、再在真机上确认的。
+
+**图片直接内联在 `session/prompt` 里。** `content` 是部件联合，图片部件为
+`{ type: 'image', mediaType, data, name? }`，`mediaType` 取
+`image/png | image/jpeg | image/webp | image/gif`。上游准入上限：单张 20 MiB、单条消息
+20 张、单条消息合计 200 MiB。
+
+**非图片文件根本不走 RPC**，而是一条裸 HTTP 路由：
+
+```
+POST /api/session/uploadFileBinary?sessionId=<id>&name=<leaf>
+content-type: application/octet-stream
+<原始字节>                            → { ok: true, value: { receiptId, file } }
+```
+
+随后 prompt 里用 `{ type: 'file', receiptId }` 引用它。注意 receipt 同时绑定**会话**与
+`dsh web` **进程**——宿主重启即失效，所以"已暂存但没发出去"的文件必须重新上传。
+
+**`session/attachment` 是读回路径，不是写入路径。** 给它一个 `attachmentId`（`sha256:<hex>`）
+它返回 `{ attachment, data }`，插件凭这个就能在不重发字节的情况下把已存图片再缩略显示一次。
+
+两个必须由 UI 承担的后果：
+
+- **宿主可能"提升"而非原样存储。** `admitPromptContent` 会把内联图片变成
+  `ImageAttachmentRef`（做归一化、还可能缩放），所以落库的消息带的是 `sha256:…`，
+  不是客户端发过去的字节。真机实测：一张 73 字节的 PNG 经 `session/attachment` 读回来
+  字节一致，但那是**宿主的副本**，不是我们的。
+- **模型能力不发布，因此无法预判。** 不吃图的模型会让 prompt 失败并返回
+  `session/attachment-invalid` + `details.reason === 'MODEL_DOES_NOT_SUPPORT_IMAGES`
+  （`packages/api/session-controller/src/commands.ts`）。`session/modelCatalog` 里
+  对此只字不提，所以唯一诚实的做法是**把宿主的裁决透传**——`describePromptFailure()`
+  把这一条码翻译成"去 Controls 换一个支持图片的模型"，并且**保留**已暂存的附件，
+  让重试不必让用户重新选一遍。
+
+**字节绝不进 `UiState`。** `pushState` 每个流式分片都会触发，所以 `pending` 只放 chip 元数据
+（id / kind / name / 字节数 / mediaType），base64 留在 controller。webview 用本地
+`URL.createObjectURL` 自建缩略图，controller 复用 webview 传来的 `key` 当 chip id——
+预览图片因此永远不会穿过状态桥回传（那也会撞上 CSP）。
 
 ## Workspace 生命周期（v0.0.2：惰性创建）
 
@@ -263,6 +319,29 @@ findHarnessWorkspace()          — 只读：匹配文件夹 ↔ harness workspa
 ## 重连
 
 `MuxStream` 以退避策略重试（250 ms → 5 s）。在 `closed → open` 转换时，`AppController` 调用 `refetchHistory(activeSessionId)` 并重建模型——Harness 文档化的恢复语义是**重建**，不是游标续传。
+
+这道重建有两道保险：`refetchHistory()` **拿到空页绝不清屏**——如果 `session/page` 返回空
+（还没学到游标，或者本来就是空的），它只记一条日志就返回，因为旧行为会在**每次重连时把
+眼前正在看的对话擦掉**；而 `session/follow` 会重发快照，所以模型最终是从宿主的日志折出来的，
+不是从屏幕上的残留拼出来的。
+
+### 手动 Connect（为什么状态行有个 Connect 按钮）
+
+自动连接是尽力而为，也确实会失败——本机实测，在 `dsh web` 一切正常的机器上，
+`auth.init()` 加 `tryMintLocalSession()` 仍可能返回未就绪。把面板的可用性押在一次成功的自动
+连接上，失败时用户面对的就是"没得点、也没得读"。所以 `pushFromClient()` 把连接状态镜像到
+VS Code 上下文键 `deepseekHarness.offline`：
+
+- 状态行渲染一个按钮，文案三态如实反映：`Connect` / `Retry`（上次失败后）/ `Connecting…`
+  （进行中且禁用）；
+- `package.json` 贡献一条 `view/title` 菜单项，`when` 为
+  `view == deepseekHarness.sessionView && deepseekHarness.offline`，于是一个插头图标
+  **只在未连接时**出现在面板标题栏。
+
+上下文键只在**真正变化**时才重估，所以 `syncOfflineContext()` 是边沿触发的——并且在
+`start()` 里就先置成 `true`，让按钮从第一帧起就可见（那时 socket 还不存在）。
+
+至于"auth 为什么会返回未就绪"，目前仍是未解问题；按钮是地板，不是修复。
 
 ## 安全边界
 
@@ -308,9 +387,8 @@ media/
 ├── origin.png                # 源材料（VSIX 排除）
 └── markdown-it.umd.min.js    # VSIX 打包用（114 KB）
 scripts/
-├── protocol-test.ts          # 假 harness 协议测试，83 项断言（无需 dsh web）
+├── protocol-test.ts          # 假 harness 协议测试，178 项断言（无需 dsh web）
 ├── protocol-probe.ts         # 向真实 `dsh web` 询问它实际提供什么
-├── probe-shapes.ts           # `{args}` 写法的临时探针
 ├── integration-test.ts       # 针对真实 dsh 的闭环测试
 └── gen-icon.ts               # 从 origin.png 生成图标
 test/fixtures/                # 脱敏协议快照

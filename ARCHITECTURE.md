@@ -175,6 +175,19 @@ separate `assistant/stream` frame, so `conversation/model.ts`'s existing
 delivered on this socket: `getHistory()` calls the `session/page` unary RPC
 (`{ request: { address, throughSeq, beforeSeq?, maxMessages? } }`) instead.
 
+`throughSeq` is a **journal cursor, not a count** — and it is not guessable.
+Upstream (`history.ts`) resolves `-1` to an empty page, `0` to "just record #0",
+and a value past the end to `gateway/bad-request … past cursor N`. The only
+sanctioned source is the `snapshot.cursor` published in the **opening frame of
+`session/follow`** — the `SessionPageRequest.throughSeq` doc comment says exactly
+that ("obtained from the corresponding follow opening frame"). So the client
+records every cursor the follow stream hands it (`HarnessClient.noteFollowCursor`,
+monotonic — never walks backwards) and `getHistory()` returns an empty page
+*without issuing a request* when no cursor has been learned yet. Getting this
+wrong is not a cosmetic bug: the previous hard-coded `0` made history
+permanently empty, and because the caller then folded an empty page it *erased*
+the live conversation on every mux reconnect.
+
 **Answering an approval** is `POST /api/$events/result` with a `client-request`
 envelope:
 
@@ -211,6 +224,13 @@ leave enabled against an older host. On 0.2.0-rc.2 the **present** set is:
 `session/fork`, `session/rename`, `session/selectModel`, `session/updateQueue`,
 `workspace/archiveSession`, `commands/execute`, `commands/list`,
 `session/search`, `session/attachment`.
+
+One trap worth naming: **`session/attachment` does not upload anything.** It is
+"read an attachment by id" — `{ request: { sessionId, attachmentId } }` →
+`{ attachment: ImageAttachmentRef, data: base64 }`. An earlier build treated it
+as the upload route and guessed inner descriptors at it, which is why it answered
+`boundary validation failed` no matter what was sent. Uploading a *new* file is
+not an RPC at all and never appears in this list — see F8 below.
 
 (`agentPreset/*`, `subagent/*`, `host/describe`,
 `workspace/list`, `llm/models` and `goal/*` are likewise absent and gated off.)
@@ -296,23 +316,58 @@ JSON to the clipboard. Because it rides the existing subscribe path, it costs
 zero extra host requests and cannot desynchronize from what the conversation
 model actually saw.
 
-### F8 — file attachments (`session/attachment`)
+### F8 — attachments (images inline, files two-step)
 
-Multi-select file picker (extension host — the webview cannot read local
-disk) → base64 → `{ request: { sessionId, attachments: [{ name, content }] } }`.
-What is confirmed vs. best-known:
+The picker runs in the extension host (the webview cannot read local disk), but
+staging happens on two completely different wires. The v0.1.0 guess — "everything
+goes through `session/attachment` as base64" — was wrong in both directions; the
+real contract was read out of `deepseek-harness@0.2.1-alpha.2`'s own source and
+then confirmed on a live host.
 
-- **Confirmed empirically**: the endpoint is JSON-only (multipart answers 415
-  `content type must be application/json`) and takes the `{ request }` wrapper
-  (bare fields answer `arguments-invalid: missing "request"`).
-- **Not yet pinned**: the inner descriptor of `request`. Every guessed inner
-  shape answered `boundary validation failed` against the local host, so the
-  shipped shape is the best inference from the surrounding rc.2 schemas, and
-  host errors pass through verbatim to the user. Fixing it once upstream
-  schema is readable is a one-constant change in `innerCandidates`/`client.ts`.
+**Images ride `session/prompt` inline.** `content` is a part union, and an image
+part is `{ type: 'image', mediaType, data, name? }` with `mediaType` one of
+`image/png | image/jpeg | image/webp | image/gif`. The upstream admission limits
+are 20 MiB per image, 20 images per message, 200 MiB total per message.
 
-This mirrors the honesty policy used elsewhere: an unconfirmed wire never
-fails silently.
+**Files do not ride RPC at all.** A non-image attachment is uploaded over a raw
+HTTP route:
+
+```
+POST /api/session/uploadFileBinary?sessionId=<id>&name=<leaf>
+content-type: application/octet-stream
+<raw bytes>                          → { ok: true, value: { receiptId, file } }
+```
+
+The prompt then references the upload as `{ type: 'file', receiptId }`. Note the
+receipt is bound to **both** the session and the `dsh web` process — it does not
+survive a host restart, so a staged-but-unsent file must be re-uploaded.
+
+**`session/attachment` is the read-back path, not the write path.** Given an
+`attachmentId` (`sha256:<hex>`) it returns `{ attachment, data }` — that is how
+the plugin can thumb a stored image again without re-sending bytes.
+
+Two consequences the UI has to own:
+
+- **The host may promote, not store.** `admitPromptContent` turns an inline image
+  into an `ImageAttachmentRef` (normalizing and possibly rescaling it), so the
+  durable message carries `sha256:…`, not the bytes the client sent. Live check:
+  a 73-byte PNG came back byte-identical over `session/attachment`, but that is
+  the host's copy, not ours.
+- **Model capability is not published, so it cannot be pre-checked.** A model
+  that does not accept images fails the prompt with
+  `session/attachment-invalid` + `details.reason === 'MODEL_DOES_NOT_SUPPORT_IMAGES`
+  (`packages/api/session-controller/src/commands.ts`). `session/modelCatalog`
+  says nothing about it, so the only honest design is to pass the host's verdict
+  through — `describePromptFailure()` turns that one code into "switch to an
+  image-capable model in Controls", and the staged attachments are **kept** so
+  the retry doesn't cost the user a re-pick.
+
+**Bytes never touch `UiState`.** `pushState` fires on every streaming chunk, so
+`pending` carries only chip metadata (id / kind / name / bytes-count / mediaType)
+while the base64 lives in the controller. The webview builds its own thumbnail
+from a local `URL.createObjectURL` and the controller reuses the webview's `key`
+as the chip id, so previewing an image never round-trips it through the state
+bridge (which would also trip the CSP).
 
 ## Workspace lifecycle (v0.0.2: lazy create)
 
@@ -403,6 +458,36 @@ failure into the message area, so a broken panel is self-evident instead of sile
 
 `MuxStream` retries with backoff (250 ms → 5 s). On a `closed → open` transition, `AppController` calls `refetchHistory(activeSessionId)` and reloads the model — the documented Harness resume semantic is **rebuild**, not cursor-resume.
 
+Two guards make that rebuild safe. `refetchHistory()` **never clears the
+transcript on an empty page**: if `session/page` returns nothing (no cursor
+learned yet, or actually empty) it logs and returns, because the previous
+behaviour wiped the visible conversation on every reconnect. And because
+`session/follow` re-publishes its snapshot, the model ends up folded from the
+host's journal rather than from whatever happened to be on screen.
+
+### Manual connect (why the panel has a Connect button)
+
+Auto-connect is best-effort and can legitimately fail — locally, `auth.init()`
+plus `tryMintLocalSession()` has been observed to come back not-ready on a
+`dsh web` that is otherwise serving fine. Relying on a working auto-connect made
+the panel a dead end when it didn't: nothing to click, nothing to read. So
+`pushFromClient()` mirrors the connection state into a VS Code context key,
+`deepseekHarness.offline`, and
+
+- the status row renders a button with three honest labels — `Connect` /
+  `Retry` (after a failed attempt) / `Connecting…` (disabled while in flight);
+- `package.json` contributes a `view/title` menu entry gated on
+  `view == deepseekHarness.sessionView && deepseekHarness.offline`, so a plug
+  icon appears in the panel header *only* while disconnected.
+
+Context keys re-evaluate only when the key actually changes, so
+`syncOfflineContext()` is edge-triggered — it is seeded to `true` during
+`start()` so the button is visible from the first paint, before any socket
+exists.
+
+The underlying "why did auth come back not-ready" is still an open question; the
+button is a floor, not a fix.
+
 ## Security boundary
 
 `HarnessClient.connect()` rejects any host not in `{127.0.0.1, localhost, ::1}` with:
@@ -441,9 +526,8 @@ media/
 ├── origin.png                # source material (excluded from VSIX)
 └── markdown-it.umd.min.js    # bundled for VSIX (114 KB)
 scripts/
-├── protocol-test.ts          # fake-harness protocol test, 83 assertions (no dsh web)
+├── protocol-test.ts          # fake-harness protocol test, 178 assertions (no dsh web)
 ├── protocol-probe.ts         # asks a live `dsh web` what it actually serves
-├── probe-shapes.ts           # scratch probe for `{args}` spellings
 ├── integration-test.ts       # closed-loop test against real dsh
 └── gen-icon.ts               # icon generation from origin.png
 test/fixtures/                # sanitized protocol captures

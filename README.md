@@ -1,9 +1,9 @@
-# DeepSeek Harness Connector for VS Code (v0.0.3)
+# DeepSeek Harness Connector for VS Code (v0.1.3)
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
 [![VS Code Marketplace](https://img.shields.io/badge/VS%20Code-Marketplace-blue.svg)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
-[![Version](https://img.shields.io/badge/version-0.0.3-blue.svg)](https://github.com/liangwythu/deepseek-harness-vscode/releases/tag/v0.0.3)
+[![Version](https://img.shields.io/badge/version-0.1.3-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.3)
 
 > Native VS Code client for DeepSeek Harness.
 >
@@ -25,19 +25,25 @@ VS Code ─────┘
 
 VS Code reads the workspaces and sessions the browser already has, and continues the **same** session — so a browser refresh of that session sees exactly what VS Code sent.
 
-## What's new in v0.0.3
+## What's new in v0.1.3
 
-**Diff Review, Approval Workflow & File Context Inlining** — closes the biggest experience gap with Cursor/Cline: code changes can now be reviewed and approved entirely inside VS Code.
+**Replies finally arrive, images finally work, and `@` file references now speak the host's own grammar.**
 
-- **Diff Review & Inline Code Application** — When the agent writes or edits files, a review card appears in the sidebar showing each changed file with `+added`/`-removed` line counts. Click **Diff** to open VS Code's native diff editor. Accept (keep) or Reject (safe revert via `git checkout`) per-file or all at once.
-- **Approval Workflow Integration** — `approval/requested` events now render inline as cards with **Allow once** / **Deny** buttons. No more switching to the browser to approve. A security allowlist restricts which tools can be approved from VS Code; high-risk operations still require the Web UI.
-- **@file Content Inlining** — File references (`@file:path` or `@file:path:L10-L20`) now have their content read and inlined directly into the user message, guaranteeing the agent can see file content. Context metadata (active file, selection) is only sent on the first prompt of a session.
-- **Context Menu Integration** — Right-click a file in the explorer → **Add to Harness Chat**. Select text in the editor → right-click → **Send Selection to Harness**. Both use workspace-relative paths.
+- **Fixed: the sidebar connected and then went silent.** The transport was modelled as "one `$events` stream carries everything". On a real host (`0.2.1-alpha.2`) `$events` is a fixed forwarded-event allowlist: it sends `ready` (so the panel honestly reported *Connected*) and then **no conversation traffic at all**. Conversation rides a *second* logical stream, `session/follow` (`snapshot` → `event` → live `assistant-stream`). Both streams are now opened and translated on their own vocabularies.
+- **Images work: paste, drag-and-drop, or attach.** A clipboard image, a drag onto the composer, or `DeepSeek Harness: Attach File to Session` stages the attachment as a chip above the input — with a local thumbnail — and it rides `session/prompt` as an inline image part. Sending an image with no text is fine; so is sending several. (The composer's chip is a *staging* area: nothing is sent until you hit send.)
+- **Non-image files now actually reach the agent.** The old build pushed bytes at `session/attachment`, which is not the upload route — it is *read an attachment by id*. Real uploads go over `POST /api/session/uploadFileBinary` (raw bytes) and the prompt references the returned receipt. One caveat the UI states plainly: a receipt is bound to the session *and* the `dsh web` process, so it does not survive a host restart.
+- **`@` references no longer paste file bodies.** It used to be `@file:path` plus `readFileSync` inlining — a plugin invention. Now: `@path`, `@"path with spaces"`, `@dir/`, optionally with a `:L<n>` or `:L<n>-L<m>` line-range suffix, completed from the host's own `fileReferences/list`. Picking a candidate attaches nothing; the agent reads the file itself. (Besides aligning with the host, inlining was poisoning the KV cache: it changed the prompt prefix on every send.)
+- **Fixed: history was permanently empty — and worse, reconnects erased your conversation.** `session/page` was called with a hard-coded `throughSeq: 0`, which is a *journal cursor*, not a count. The cursor is only published in the opening frame of `session/follow`; the client now learns it from there. The empty page was then folded as fact, so every socket reconnect blanked the transcript. An empty page no longer clears the screen.
+- **Fixed: a `Connect` button exists when auto-connect fails.** Auto-connect is best-effort and has been observed to fail locally (`auth` comes back not-ready) on a host that is otherwise healthy — which left the panel with nothing to click. The status row now shows `Connect` / `Retry` / `Connecting…`, and a plug icon appears in the panel header only while disconnected.
+- **Removed `DeepSeek Harness: Set Session Token from Launch URL`.** Minting locally from `$DSH_HOME/.credentials.yaml` is the only path anyone actually uses; a token that rotates with every `dsh web` process was pure maintenance cost.
+- **Fixed a misdiagnosis.** "No such method" (HTTP 404) and "that workspace does not exist" (200 + `workspace/not-found`) were collapsed into one bucket, so an ordinary business error advised you to *upgrade the host*.
+- **Fixed an argument-shape retry that made every call slower.** The remembered-correct endpoint shape was being tried *last*, so each call burned two failing round-trips first and the wire shape could drift depending on host leniency. Remembered shapes are now tried first.
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full diff.
 
 ### Previous releases
 
+- **v0.0.3** — Diff review & inline code application, approval workflow, and context-menu integration (right-click → **Add to Harness Chat** / **Send Selection to Harness**, now inserting host-syntax mentions).
 - **v0.0.9** — Interaction loop: model + reasoning-effort picker, approval auto-approve, sandbox switching, queued/steer messages, slash-command palette, token-usage panel with cache-hit %.
 - **v0.0.2** — Conversation UX & Architecture Baseline: Assistant Markdown rendering, tool card merging, system message collapsing, lazy workspace/session creation, streaming render fix, architecture hardening.
 - **v0.0.1** — First public release: prove VS Code and the browser share the same Harness session.
@@ -61,9 +67,9 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full diff.
 - **Session search (F6, `session/search`)** — a 🔍 panel in the sidebar: type a full-text query, get matching sessions with title + hit snippet, click one to jump straight into it. Request shape `{ request: { query } }`, empirically confirmed against a live host.
   - **Deployment honesty**: some `dsh web` deployments ship with search **disabled** (the local one does — the host answers `gateway/internal: session search is disabled`). There the panel shows a clear notice instead of an error; on a search-enabled deployment it just works.
 - **Live event inspector (F7, zero new protocol)** — a 📡 panel that lists **every mux frame** the plugin receives (`session/event`, `assistant/stream`, `stream/error`, …) with seq / time / type / one-line summary. Click any row to copy the full raw JSON (truncated to 2 KB). A 300-frame ring buffer with a Clear button. Data comes entirely from the event stream the plugin already consumes — no extra host traffic — so debugging "why did the agent do X" no longer requires the Web UI.
-- **File attachments (F8, `session/attachment`)** — a 📎 toolbar button and the command `DeepSeek Harness: Attach File to Session`: pick local files (multi-select) and they are sent base64-encoded via `{ request: { sessionId, attachments: [{ name, content }] } }` for the agent to consume in later turns.
-  - **Shape honesty**: the `{request}` wrapper is empirically confirmed, but the inner descriptor could **not** be pinned by blind probing (every guessed shape answered `boundary validation failed`; multipart was rejected 415, so it is JSON-only). The plugin ships the best-known shape and passes host errors through verbatim — a shape mismatch is a visible, actionable error, never a silent one.
-- All three are capability-gated: a host that does not serve the endpoint shows the why, never a dead button.
+- **Attachments (F8)** — a 📎 toolbar button and the command `DeepSeek Harness: Attach File to Session` (multi-select).
+  - **Correction (v0.1.3):** this bullet used to claim attachments were sent base64-encoded through `{ request: { sessionId, attachments: [{ name, content }] } }`. That wire never existed. `session/attachment` is *read an attachment by id*; images ride `session/prompt` inline and real files go through `POST /api/session/uploadFileBinary`. See [What's new in v0.1.3](#whats-new-in-v013).
+- Search and the inspector are capability-gated: a host that does not serve the endpoint shows the why, never a dead button.
 
 ## What v0.0.9 adds
 
@@ -117,7 +123,9 @@ For your safety, the following remain out of scope:
    # → http://127.0.0.1:3080/?token=<43-char token>
    ```
 
-   Recent Harness builds print a **launch URL with a one-shot token**. Copy it.
+   Recent Harness builds print a **launch URL with a one-shot token**. You do not
+   need it for VS Code — use it to open the Web UI in a browser if you want both
+   surfaces side by side.
 
    Older builds serve `/api/*` unauthenticated and need no token at all — the
    plugin detects which it is talking to, so if no launch URL appears you can
@@ -129,10 +137,10 @@ For your safety, the following remain out of scope:
    code --install-extension lucasliang.harness-connector-deepseek
    ```
 
-   Or install the VSIX from [GitHub Releases](https://github.com/liangwythu/deepseek-harness-vscode/releases):
+   Or install the VSIX from [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases):
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.1.2.vsix
+   code --install-extension harness-connector-deepseek-0.1.3.vsix
    ```
 
 3. Nothing to configure. The extension auto-connects: it reads the browser-session
@@ -145,50 +153,53 @@ For your safety, the following remain out of scope:
 
 6. **No matching workspace?** Just type a prompt and hit Send — the workspace and session are created automatically.
 
-7. **Attach file context** — type `@file:src/main.ts` or right-click a file in the explorer and choose **Add to Harness Chat**. Select text in the editor, right-click, and choose **Send Selection to Harness** for line-range references.
+7. **Reference a file with `@`** — type `@` in the input and a completion list appears; pick one and it is inserted as a mention (`@src/main.ts`). Right-click a file in the explorer and choose **Add to Harness Chat**, or select text in the editor and choose **Send Selection to Harness** to insert `@src/main.ts:L10-L20`. Nothing is pasted into your message: the mention is a *pointer*, and the host tells the agent to open the file itself. That keeps your prompt text (and its KV cache) stable no matter how large the file is.
 
 8. Open the same session in your browser at `http://127.0.0.1:3080/` — both surfaces see the same turn.
 
-> The manual command **`DeepSeek Harness: Set Session Token from Launch URL`** still
-> exists as a fallback — it is the only sanctioned path when the credential store
-> cannot be read (see below).
+> There is no "set session token" command. The cookie is minted locally from
+> `$DSH_HOME/.credentials.yaml` on every connect — nothing to paste (see below).
 
 ### How the session is obtained
 
 Cookie-gated Harness builds reject every `/api/*` call without a browser-session
-cookie, and the sanctioned way to get one is exchanging the per-process launch
-token. Nothing writes that token to disk, so officially you must paste it.
+cookie. Upstream, the sanctioned way to get one is exchanging the per-process
+launch token — but nothing writes that token to disk, so officially you have to
+copy it out of the terminal by hand, and it rotates every time `dsh web` starts.
 
-But the cookie carries no trace of the token: it is an HMAC over
+The cookie itself carries no trace of the token: it is an HMAC over
 `{version, authority, issuedAt, expiresAt}` keyed by a secret persisted in
 `$DSH_HOME/.credentials.yaml` (`client-connection/browser-session`), created once
 and reused by every later `dsh web` process. Anything that can read that file can
 therefore mint a byte-identical cookie — so the extension does, and you never
-have to paste anything.
+have to paste anything. This is the **only** path the plugin offers: the
+paste-the-launch-URL command was removed, because a token that rotates per
+process is a support burden with no upside once the local mint works.
 
 **Is this safe?** The file is written owner-only (`0600`) and holds your model API
 keys, so being able to read it already implies full authority over this harness
 home. Minting from it is *permission-equivalent*, not an escalation. It does skip
 the per-process token gate, but that gate defends against remote callers
-(rebinding, CSRF) — not against code already running as you. Set
-`deepseekHarness.autoSession = false` to require the manual exchange instead.
+(rebinding, CSRF) — not against code already running as you.
 
-The plugin log records which path was used on every connect.
+The plugin log records the mint on every connect.
 
-### When manual entry is unavoidable
+### When the local mint cannot run
 
-| Situation | Why |
+The extension says so in the connect error, naming the file it looked for. There
+is no manual fallback any more; fix the cause instead.
+
+| Situation | What to do |
 | --- | --- |
-| `$DSH_HOME` points elsewhere and you have not set the env var | nothing can be found to read |
-| `dsh web` has never run in this harness home | no `client-connection/browser-session` record exists yet; run it once |
-| You set `deepseekHarness.autoSession = false` | you asked for the sanctioned exchange |
+| `$DSH_HOME` points elsewhere and the env var is not set | set `DSH_HOME` for the VS Code process, or start `dsh web` with the default home |
+| `dsh web` has never run in this harness home | run it once — the `client-connection/browser-session` record is created then |
+| You set `deepseekHarness.autoSession = false` | turn it back on: that setting now means "refuse to mint", not "ask me for a token" |
 
-A cookie granted either way then lives its own life: the extension stores it in VS
+A cookie minted this way still lives its own life: the extension stores it in VS
 Code's secret storage (OS keychain — never `settings.json`), it survives `dsh web`
 restarts, and it is only re-derived when it expires or you change `host`/`port`
 (the cookie name is `dsh-auth-<sha256(host:port)>`, so it is bound to the
-authority that minted it). If it ever lapses, the extension tells you which
-command to run instead of just reporting `401`.
+authority that minted it).
 
 ## Configuration
 
@@ -197,13 +208,13 @@ command to run instead of just reporting `401`.
 | `deepseekHarness.host` | `127.0.0.1` | **v0.0.x only allows `127.0.0.1` or `localhost`.** Any other value is refused. |
 | `deepseekHarness.port` | `3080` | The default `dsh web` port. Override if you started `dsh web --port <n>`. |
 | `deepseekHarness.showSystemMessages` | `false` | Show plugin-injected system messages (runtime context, approval notices). Hidden by default; toggle live with the `SYS` button in the webview header. |
+| `deepseekHarness.autoSession` | `true` | Mint the browser-session cookie locally from `$DSH_HOME/.credentials.yaml`. Turning it off leaves the extension unauthenticated — it is a security switch, not a convenience toggle. |
 | `deepseekHarness.autoApproveApprovals` | `false` | **v0.0.9+** Automatically answer incoming approval requests with `allowed-once`. Off by default — enabling it means tools run without per-call confirmation. |
 
 ## Commands
 
 - `DeepSeek Harness: Connect` / `Disconnect`
-- `DeepSeek Harness: Set Session Token from Launch URL` — paste the `dsh web` launch URL to obtain the browser-session cookie
-- `DeepSeek Harness: Clear Session Token` — drop the stored cookie (e.g. before switching `dsh web` instances)
+- `DeepSeek Harness: Clear Session Token` — drop the stored cookie and reconnect (a fresh one is minted; use it before switching `dsh web` instances)
 - `DeepSeek Harness: New Session` (in the active workspace)
 - `DeepSeek Harness: Refresh Sessions`
 - `DeepSeek Harness: Move to Right Side Bar` — dock the view in the secondary side bar (like Chat) so it stops competing with the file explorer. Also available via the ⇲ button in the webview header.
@@ -213,7 +224,7 @@ command to run instead of just reporting `401`.
 - `DeepSeek Harness: Fork Session` — branch off the current session and switch to the fork
 - `DeepSeek Harness: Rename Session` — pin a title (stops automatic regeneration)
 - `DeepSeek Harness: Archive Session` — archive it out of the active workspace list
-- `DeepSeek Harness: Attach File to Session` — pick local files and upload them to the active session (`session/attachment`) — also available via the 📎 button
+- `DeepSeek Harness: Attach File to Session` — stage local images/files for the next prompt (images ride `session/prompt` as inline parts; other files upload to `POST /api/session/uploadFileBinary` and are referenced by receipt) — also available via the 📎 button and by pasting or dropping into the composer
 - `DeepSeek Harness: Open Web UI`
 - `DeepSeek Harness: Show Logs` (the `DeepSeek Harness` output channel)
 
@@ -228,8 +239,13 @@ instead of buttons that would fail.
 
 ### Context menu actions
 
-- **Add to Harness Chat** (explorer right-click) — inserts `@file:<relative-path>` into the chat input.
-- **Send Selection to Harness** (editor right-click, requires selection) — inserts `@file:<relative-path>:L<start>-L<end>` into the chat input.
+- **Add to Harness Chat** (explorer right-click) — inserts an `@<relative-path>` mention into the chat input.
+- **Send Selection to Harness** (editor right-click, requires selection) — inserts `@<relative-path>:L<start>-L<end>`.
+
+Both insert a *mention*, not file content: the host's mention grammar is
+`@path`, `@"path with spaces"`, `@dir/`, with an optional `:L<n>`/`:L<n>-L<m>`
+suffix. Picking a candidate from the `@` completion list attaches nothing either —
+the agent reads the file itself.
 
 ## Architecture
 
@@ -246,19 +262,24 @@ No credentials, API keys, or real prompt content are stored — only the JSON sh
 ## Protocol test
 
 A standalone Node script drives the real client code against a **fake** harness
-(no particular version — the plugin negotiates, and so does the fake) — so no
-`dsh web` is needed:
+that implements the `0.2.1-alpha.2` server half exactly — so no `dsh web` is
+needed:
 
 ```bash
-npm run protocol-test    # 83 assertions: wire negotiation (dot/slash, cookie
-                         # gating, event socket), auth, cookie derivation,
-                         # {args} payloads, approval waterfall, assistant
-                         # stream, removed-endpoint 404 handling, control-surface
-                         # capability probing and the whole-value control fold
+npm run protocol-test    # 156 assertions: the two-stream transport split
+                         # ($events allowlist vs session/follow), wire negotiation
+                         # (dot/slash, cookie gating, event socket), auth and cookie
+                         # derivation, {args} payloads (wrapped vs bare), the approval
+                         # waterfall, assistant stream start/chunk/end (including
+                         # orphan-chunk rejection), missing-method vs business-not-found
+                         # classification, removed-endpoint 404 handling,
+                         # control-surface capability probing, the whole-value control
+                         # fold, the @-completion state contract through the real
+                         # controller, and the webview script's integrity
 ```
 
 To ask your **real** `dsh web` what it actually serves (endpoint style, event
-socket, and which of 29 candidate methods exist):
+socket, and which of 13 candidate methods exist):
 
 ```bash
 npm run protocol-probe            # defaults to 127.0.0.1:3080
@@ -266,9 +287,11 @@ npm run protocol-probe 127.0.0.1 3080
 ```
 
 For a closed loop against your **real** `dsh web`, use the integration test
-(start `dsh web` first):
+(start `dsh web` first — it mints the cookie locally, no token to paste):
 
 ```bash
+npm run integration-test
+# or exercise the token exchange instead:
 DSH_LAUNCH_URL='http://127.0.0.1:3080/?token=<token>' npm run integration-test
 ```
 
@@ -279,8 +302,8 @@ npm install
 npm run build        # esbuild → dist/extension.js
 npm run watch        # rebuild on change
 npm run typecheck
-npm run package      # → harness-connector-deepseek-0.1.2.vsix
-npm run protocol-test      # 108 protocol assertions against a fake harness
+npm run package      # → harness-connector-deepseek-0.1.3.vsix
+npm run protocol-test      # 156 protocol assertions against a fake harness
 npm run protocol-probe     # report what your real dsh web exposes
 ```
 
@@ -290,30 +313,38 @@ Press `F5` in VS Code to launch an Extension Development Host with the extension
 
 - Default `dsh web` port `3080`; the host must be on loopback.
 - **The wire is negotiated, not assumed.** Endpoint style (`session/list` vs
-  `session.list`), cookie gating, and the event socket (`/api/remote.mux` on 0.2.0-rc.2,
-  `/api/events.mux` on older hosts) are all discovered at connect time, so one
-  build works across host releases. Run `npm run protocol-probe` to see what your
-  host actually serves.
+  `session.list`), cookie gating, and the event socket (`/api/remote.mux` on
+  0.2.0-rc.2, `/api/events.mux` on older hosts) are all discovered at connect
+  time, so one build works across host releases. Run `npm run protocol-probe` to
+  see what your host actually serves.
+- **Conversation traffic is not on the event socket.** On `0.2.1-alpha.2` the
+  multiplexed socket carries *two* logical streams with different vocabulary:
+  `$events` (a fixed allowlist of forwarded host events — session status,
+  approvals, plugin inventory) and `session/follow` (one session's records and
+  live assistant deltas). Coding against a single "everything arrives on
+  `$events`" stream is what made an earlier build connect and then go silent.
+  Both streams are opened separately; the shapes are pinned in
+  `scripts/protocol-test.ts`.
 
 ## Limitations
 
 - Loopback only — no remote / LAN / WSL-bridged hosts.
-- Text prompts only (no image attachments).
+- **Images depend on the model.** Whether a model accepts images is not published in `session/modelCatalog`, so the plugin can only pass the host's verdict through: a non-vision model fails the prompt with `MODEL_DOES_NOT_SUPPORT_IMAGES`, and the panel tells you to switch models in Controls. Your staged attachments are kept for the retry.
+- **Staged files are process-bound.** An upload receipt is tied to the session *and* the running `dsh web` process, so a file staged across a host restart must be re-picked.
 - History loads the last ~50 messages; "load older" is a future feature.
 - Session deep-links in "Open Web UI" are intentionally not guessed — only the Harness home opens.
 - Unknown harness event types are ignored (the protocol is merge-extensible); they do not crash the client but also do not render.
 - Diff review revert uses `git checkout` — uncommitted changes to the target file will be lost on Reject.
 
-## Roadmap (v0.1.3+)
+## Roadmap (v0.1.4+)
 
-- Pin the `session/attachment` inner descriptor once upstream schema is readable (single-constant fix)
+- Auto-connect: find out why `auth.init()` + `tryMintLocalSession()` can come back not-ready against a healthy local `dsh web` (today the manual `Connect` button is the workaround, not a fix)
 - Inspector: filter box / type highlight / export as JSONL
 - Search: scope to workspace, pagination, highlight rendering
 - Inline Completion
 - VS Code filesystem provider
 - Terminal integration
 - LSP / ACP integration
-- Image attachments
 
 ## License
 

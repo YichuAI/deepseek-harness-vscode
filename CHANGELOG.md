@@ -5,6 +5,152 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] — 2026-10-10
+
+Tagline: **修好了"能连上但收不到回话"，补上了图片与真正的文件上传，顺手拔掉两个静默 bug。**
+Tagline (EN): **fix: the sidebar connected and then went silent; plus inline images, real file uploads, and two silent bugs.**
+
+### Fixed
+
+- **"Connected" 之后一片安静：会话流走的是另一条逻辑流。** 插件一直把传输层建模成
+  "一条 `$events` 承载所有帧"。真机（`0.2.1-alpha.2`）上这个假设错得很隐蔽：`$events`
+  确实会发一个 `ready` 帧（所以面板老老实实显示 "Connected"），然后**一条对话流量都没有**
+  ——因为 `$events` 是一份固定的转发白名单（`api-session/status`、`approval/request`、
+  `user-questions/request`、插件清单……）。对话在**另一条**逻辑流 `session/follow` 上，
+  词汇表完全不同：`snapshot`（积压记录）→ `event`（持久记录）→ 实时 `assistant-stream`
+  （`start`/`chunk`/`end`）。两条流现在各开一条 socket，`DownlinkSocket` 从"events 专用"
+  改成通用的单逻辑流载体（`endpoint` / `openArgs` / `expectReady`）。真机验证：30 帧，
+  `p` + `ong` → `pong`，模型快照 `Turn 1 — started / user / assistant pong / Turn 1 — completed`。
+  *EN:* Conversation rides `session/follow`, not `$events`; the two streams are now opened
+  separately and translated on their own vocabularies.
+- **一条没有 `start` 的 `chunk` 会被丢弃，而不是猜个归属。** 只有 `start` 带
+  `turn`/`step`，而 chunk 是进程内的（从不进持久日志），所以孤儿 chunk 没有正确落点——
+  猜错就是把文本拼到别的回合上。
+- **`api-session/status` 不再被丢掉。** 它从 `$events` 的转发帧翻译成 `session/status`，
+  Stop 按钮的状态才对得上。
+- **"没有这个方法"和"这个 workspace 不存在"被混为一谈。** 在真机上量出来的事实是：
+  方法不存在 → **HTTP 404**（body 甚至不是 JSON 信封）；而 `session/rename` 指向一个已删除的
+  会话 → 200 + `code: session/not-found`，`session/create` 拿到一个过期的 workspaceId →
+  200 + `code: workspace/not-found`。`MISSING_METHOD_CODE` 里那个裸的 `/not-found/` 把后两者
+  塌进了第一类，于是普通的业务错误被抛成
+  *"this harness does not serve `session/create` — upgrade the host"*。现在只认
+  dispatch 层的码（`gateway/method-unavailable`、`gateway/unsupported`、`unknown_method`、
+  `method-not-found`、`unimplemented`）；带域命名空间的一律按业务错误处理，
+  原样把宿主的措辞交给调用方。附带两个效果：参数形状的重试逻辑不再提前放弃；
+  一个过期 id 不会再劝用户去升级宿主。
+  *EN:* A bare `/not-found/` made the client report business errors
+  (`workspace/not-found`, `session/not-found`) as missing capabilities. Narrowed to
+  dispatch-layer codes.
+- **`@` 浮层曾根本打不开。** `queryFileReferences` 拿 `UiState.refQuery`（**上一次回复**
+  所回答的查询，初始是 `undefined`）当陈旧守卫，于是第一次敲 `@`（查询为空串）就被自己的
+  守卫挡掉，什么都没发布；即便绕过了守卫，成功分支也只写 `refCandidates` 而不写
+  `refQuery`，而 composer 只接受能匹配上查询的那批结果——菜单永远是关着的，还一声不响。
+  现在守卫比的是"最近一次请求的查询"（单独跟踪的 `refQueryLatest`），且两个字段**一起**
+  发布。这个 bug 的教训是：协议层断言再多也抓不到"某个字段压根没写"，
+  所以新增的断言直接检查**发布出去的 state**，并用真控制器 + 真 client 打假宿主。
+  *EN:* The `@` completion menu could never open: the staleness guard compared against
+  the query the last *reply* answered (initially `undefined`), so a bare `@` swallowed
+  its own request, and the success path published candidates without the matching query.
+- **历史永远是空的——而且每次重连都会把对话擦掉。** `session/page` 一直写死
+  `throughSeq: 0`。但 `throughSeq` 是**日志游标**，不是条数：上游 `history.ts` 把 `-1`
+  解析成空页、`0` 解析成"只要第 0 条"、越界则报 `gateway/bad-request … past cursor N`。
+  唯一被认可的来源是 `session/follow` **开场帧**里的 `snapshot.cursor`
+  （`SessionPageRequest.throughSeq` 的文档注释原话就是"来自对应的 follow 开场帧"）。
+  现在客户端记录 follow 流交给它的每个游标（单调不回退），而 `getHistory()` 在还没学到
+  游标时**直接返回空页、一个请求都不发**。更要命的是第二层：调用方会把空页当事实折进模型，
+  于是**每次 socket 重连都会把眼前正在看的对话清空**——现在空页只记一条日志，绝不清屏。
+  *EN:* `throughSeq` is a journal cursor, not a count; the hard-coded `0` made history
+  permanently empty and the resulting empty page erased the live transcript on every
+  reconnect. The cursor now comes from the `session/follow` opening frame, and an empty
+  page no longer clears the screen.
+- **参数形状重试把记住的正确形状排在最后试。** `rpc()` 的候选顺序是
+  `[...all.filter(没记住的), 记住的那个]`，于是**每次调用都先白烧两次失败往返**才轮到对的那个；
+  更糟的是最终停在哪个 `inner` 形状取决于宿主的宽容度，同一个会话里可能漂移。
+  改为**记住的形状优先**（`[all[remembered], ...其余]`）。这条是修上面那条历史问题时
+  被顺带照出来的：断言在"历史为空"的假象下暴露了 `inner` 停在 `_request` 形状。
+  *EN:* The remembered endpoint shape was tried *last*, so every call burned two failing
+  round-trips first and the wire shape could drift with host leniency. Now tried first.
+
+### Added
+
+- **图片支持：粘贴 / 拖拽 / 选文件 → 待发 chip → 内联进 `session/prompt`。**
+  剪贴板图片、往输入区拖拽、或 `Attach File to Session` 命令，都会在输入框上方排成一条
+  待发附件（带本地缩略图）；点发送时图片作为内联部件
+  `{ type: 'image', mediaType, data, name? }`（`png/jpeg/webp/gif`）随 prompt 发出。
+  只发图片不发文字是合法的。契约不是猜的——是从
+  `deepseek-harness@0.2.1-alpha.2` 源码读出来、再在真机上跑通的：宿主上限为单张 20 MiB、
+  单条 20 张、合计 200 MiB；`admitPromptContent` 会把内联图片**提升**为
+  `ImageAttachmentRef`（做归一化、可能缩放），所以落库的是 `sha256:…` 而不是客户端发去的字节。
+  **模型能力不发布、无法预判**：不吃图的模型会让 prompt 失败并返回
+  `session/attachment-invalid` + `details.reason === 'MODEL_DOES_NOT_SUPPORT_IMAGES`，
+  `describePromptFailure()` 把这一条码翻译成"去 Controls 换个支持图片的模型"，
+  并且**保留**已暂存附件让重试不必重选。
+  *EN:* Images ride `session/prompt` as inline parts (paste / drop / picker → staging chips);
+  model image support is unpublished, so the host's refusal code is translated and the
+  staged attachments are kept for the retry.
+- **非图片文件走真实上传路径。** 旧代码把字节往 `session/attachment` 上怼，但那根本不是上传
+  接口——它是"按 id 读附件"`{ request: { sessionId, attachmentId } }` →
+  `{ attachment, data }`，这也正是当初无论发什么都是 `boundary validation failed` 的原因。
+  真正的上传是裸 HTTP：`POST /api/session/uploadFileBinary?sessionId=<id>&name=<leaf>`，
+  `content-type: application/octet-stream`，body 是原始字节，返回
+  `{ ok: true, value: { receiptId, file } }`；prompt 里用 `{ type: 'file', receiptId }` 引用。
+  注意回执同时绑定**会话**与 `dsh web` **进程**，宿主重启即失效。
+  *EN:* File upload goes over `POST /api/session/uploadFileBinary` (raw bytes → receipt);
+  `session/attachment` is the read-back path, which is what the old code got wrong.
+- **自动连接失败时有得点了：状态行 `Connect` 按钮 + 标题栏插头图标。**
+  自动连接是尽力而为，本机实测在宿主一切正常时 `auth` 也可能返回未就绪——把可用性押在
+  一次成功的自动连接上，失败时用户面对的就是"没得点、也没得读"。现在状态行按钮三态如实
+  （`Connect` / `Retry` / `Connecting…`，进行中禁用），并在 `package.json` 里贡献一条
+  `view/title` 菜单，`when` 为 `view == deepseekHarness.sessionView && deepseekHarness.offline`，
+  于是插头图标**只在未连接时**出现。上下文键边沿触发，`start()` 里先置 `true`，
+  按钮从第一帧起就可见。（"auth 为什么返回未就绪"仍是未解问题——按钮是地板，不是修复。）
+  *EN:* A manual `Connect` button (status row, three honest labels) plus a context-key-gated
+  `view/title` plug icon, so a failed auto-connect is no longer a dead end.
+- **附件字节永不进 `UiState`。** `pushState` 每个流式分片都会触发，所以 `pending` 只携带
+  chip 元数据（id / kind / name / 字节数 / mediaType），base64 留在 controller；
+  webview 用本地 `URL.createObjectURL` 自建缩略图，controller 复用 webview 传来的 `key`
+  当 chip id——预览图片因此永远不穿过状态桥回传（那也会撞上 CSP）。
+- **`@` 引用改用宿主自己的语法，且不再粘贴正文。** 原来的 `@file:path` + `readFileSync`
+  内联是插件自己发明的：宿主早就有一套，语法不同，还自带补全源。现在支持
+  `@path`、`@"含空格的 path"`、`@dir/`，可带 `:L<n>` / `:L<n>-L<m>`；
+  `someone@example.com` 不会被误判成引用（必须行首或空白之后才触发）。补全走
+  `fileReferences/list`，它的描述符是位置的 `(agentId, query)`——**内层 args 是裸对象，
+  没有 `request` 包装**。除了对齐，还有个实际收益：内联会让提示随文件大小变长、并且每轮
+  都改动前缀，等于每次发送都作废 KV cache。
+- **`@` 补全浮层。** 90ms 防抖、陈旧响应丢弃、`mousedown` 而非 `click` 选中，引用文本的
+  转义与宿主的 `formatFileMention` 逐字节一致。回复里的查询只有是当前 token 的**前缀**时
+  才继续沿用（正常快速输入的情形），否则等自己的回复——避免每敲一个字就闪一次空，
+  又不会拿无关的结果顶上去。
+
+### Removed
+
+- **`DeepSeek Harness: Set Session Token from Launch URL` 命令及其标题栏菜单项。**
+  从 `$DSH_HOME/.credentials.yaml` 本地自签已经是实际唯一可用的路径；一个每次 `dsh web`
+  重启都换的 token 只剩维护成本。连接失败时的报错改为点名那个凭据文件和 `autoSession`
+  设置（后者的含义现在是"拒绝自签"，不再是"弹个框问我要 token"）。
+
+### Verified
+
+- 回归门 **108 → 178 项**。假宿主按 `0.2.1-alpha.2` 重建（`$events` 白名单 + `session/follow`
+  流），新增断言把两条流的 open payload、快照回放、`api-session/status` 翻译、`waterfall`
+  审批信封、"孤儿 / 迟到 chunk 必须被丢弃"，以及"业务级 `x/not-found` 不是能力缺失"全部钉死。
+  本轮又补了四组：`session/attachment` **读图**形状 vs. 暂存两条路、三种 prompt content 组合
+  （纯文本 / 图+文 / 纯图）、`session/page` "无游标不发请求、有游标才透传"、
+  `session/follow` 快照教会客户端游标；假宿主也补上了 `uploadFileBinary` 的**原始字节**路由
+  （连 415/400 边界一起）。第 G 组新增六条 Connect 按钮断言（已连接时隐藏、断开时显示可点的
+  `Connect`、失败后显示 `Retry`、连接中显示 `Connecting…` 且禁用）。
+- **真机集成测试 16 → 21 项全绿**，新增的 08b 段落跑的是**真图闭环**：遍历 `modelCatalog`
+  找到肯收图的模型路由（默认 `deepseek-v4-flash` 被拒、`deepseek-flash` 收下）→ 内联发图
+  → 落库后经 `session/page` 找到持久的图片引用（`sha256:97a3a410…`）→
+  `session/attachment` 读回 73 字节并校验 PNG 签名 → `uploadFileBinary` 拿到回执 →
+  再发一条引用该回执的 prompt 并被准入。顺带修掉了测试自身的两个问题：① 原先硬要求
+  `DSH_LAUNCH_URL`（一个得从终端里手动复制、且随进程失效的 token），现在默认走本地自签，也就是扩展实际用的
+  那条路，启动 URL 换 token 保留为可选路径；② 第 03 步把 `listWorkspaces()` 派生的
+  **路径形** `workspaceId` 直接喂给了 `session/create`。workspace 是两步的：先从
+  `session/list` 派生，再用 `workspace/create` 归一化——这正是
+  `ensureHarnessWorkspace()` 做的事，现在测试也照做。
+- 仓库链接 `liangwythu` → `YichuAI`（仓库已迁移）。
+
 ## [0.1.2] — 2026-10-09
 
 Tagline: **修复：webview 脚本自 v0.0.4 起就是语法错误的——面板其实从未启动过。**
@@ -54,6 +200,8 @@ Tagline (EN): **fix: the webview script had been invalid JavaScript since v0.0.4
   `render(state) → status-text = "Connected"`。
 
 
+
+## [0.1.1] — 2026-10-09
 
 Tagline: **修复：工作区发现恒为空导致面板永远显示 Disconnected。**
 Tagline (EN): **fix: workspace discovery always returned empty, so the panel stayed "Disconnected".**
@@ -128,6 +276,10 @@ v0.0.9 补齐了交互闭环；v0.1.0 把三类"会话级工具"接入侧栏：�
   The `{request}` wrapper is empirically confirmed; the inner descriptor could
   not be pinned by blind probing and is documented as best-known-shape with
   verbatim error passthrough.
+  - **更正（见 [0.1.3]）**：上面这条描述的上传线**从未存在过**。
+    `session/attachment` 是"按 id **读**附件"，不是上传接口；图片内联在 `session/prompt`，
+    真正的文件上传走 `POST /api/session/uploadFileBinary`。
+    *EN:* The upload wire described here never existed — see [0.1.3].
 
 ### Changed
 
@@ -681,4 +833,4 @@ Same Workspace. Same Session. Same Agent Runtime.
 - Unknown harness event types are ignored (the protocol is merge-extensible);
   they do not crash the client but also do not render.
 
-[0.0.1]: https://github.com/liangwythu/deepseek-harness-vscode/releases/tag/v0.0.1
+[0.0.1]: https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.0.1

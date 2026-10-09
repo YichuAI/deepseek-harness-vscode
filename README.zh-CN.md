@@ -1,9 +1,9 @@
-# DeepSeek Harness Connector for VS Code (v0.0.4)
+# DeepSeek Harness Connector for VS Code (v0.1.3)
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
 [![VS Code Marketplace](https://img.shields.io/badge/VS%20Code-Marketplace-blue.svg)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
-[![Version](https://img.shields.io/badge/version-0.0.3-blue.svg)](https://github.com/liangwythu/deepseek-harness-vscode/releases/tag/v0.0.3)
+[![Version](https://img.shields.io/badge/version-0.1.3-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.3)
 
 > DeepSeek Harness 的原生 VS Code 客户端。
 >
@@ -25,6 +25,46 @@ VS Code ─────┘
 
 VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**会话——所以浏览器刷新该会话时能看到 VS Code 发送的内容。
 
+## v0.1.3 新特性
+
+**回话终于能收到了，图片终于能发了，`@` 引用改用宿主自己的语法。**
+
+> 中文版 README 的"新特性"长期停在 v0.0.3；0.0.9 ~ 0.1.2 的完整记录见英文版
+> [README.md](./README.md) 与 [CHANGELOG.md](./CHANGELOG.md)，本段只记 0.1.3。
+
+- **修好了"能连上但收不到回话"。** 插件一直把传输层建模成"一条 `$events` 承载所有帧"。
+  真机（`0.2.1-alpha.2`）上 `$events` 是一份固定的转发白名单：它会发一个 `ready`
+  （所以面板老老实实显示 Connected），然后**一条对话流量都没有**。对话在**另一条**逻辑流
+  `session/follow` 上（`snapshot` → `event` → 实时 `assistant-stream`）。两条流现在各开一条，
+  各按自己的词汇表翻译。
+- **图片支持：粘贴、拖拽、选文件都行。** 剪贴板里的图、拖进输入区、或走
+  `DeepSeek Harness: Attach File to Session` 命令，都会变成输入框上方的一个待发 chip（带本地缩略图），
+  发送时作为内联图片部件走 `session/prompt`。只发图片、不发文字可以；一次发多张也可以。
+  （chip 是**暂存**区，没点发送之前什么都不会发出去。）
+- **非图片文件现在真的能送到 agent 手里。** 旧版本把字节往 `session/attachment` 上怼，
+  但那根本不是上传接口——它是"按 id 读附件"。真正上传走
+  `POST /api/session/uploadFileBinary`（原始字节），prompt 里用返回的 receipt 引用。
+  一个必须说清的限制：receipt 同时绑定会话**和** `dsh web` 进程，宿主重启即失效。
+- **`@` 引用不再粘贴文件正文。** 原来的 `@file:path` + `readFileSync` 内联是插件自己发明的。
+  现在支持 `@path`、`@"含空格的 path"`、`@dir/`，可带 `:L<n>` / `:L<n>-L<m>`，
+  补全走宿主自己的 `fileReferences/list`。选中候选**不附任何东西**，文件由 agent 自己去读。
+  （除了对齐宿主，内联还有个实际代价：它每轮都改动提示前缀，等于每次发送都作废 KV cache。）
+- **修好了"历史永远是空的"——而且更糟：每次重连都会把对话擦掉。** `session/page` 原先写死
+  `throughSeq: 0`，但那是个**日志游标**，不是条数。游标只在 `session/follow` 的开场帧里发布，
+  现在客户端从那里学。空页原先会被当成事实折进模型，于是每次 socket 重连都清空一次记录。
+  现在空页不再清屏。
+- **自动连接失败时有 `Connect` 按钮可点了。** 自动连接是尽力而为，本机实测在宿主一切正常的情况下
+  `auth` 也可能返回未就绪——那时面板"没得点、也没得读"。现在状态行会显示
+  `Connect` / `Retry` / `Connecting…`，并且**只在未连接时**在面板标题栏显示一个插头图标。
+- **移除 `DeepSeek Harness: Set Session Token from Launch URL`。** 从 `$DSH_HOME/.credentials.yaml`
+  本地自签已经是实际唯一可用路径；一个每次 `dsh web` 重启都换的 token 只剩维护成本。
+- **修掉一处误诊。** "没有这个方法"（HTTP 404）和"这个 workspace 不存在"
+  （200 + `workspace/not-found`）曾被混为一谈，于是普通业务错误会劝你去**升级宿主**。
+- **修掉一个让每次调用都变慢的参数形状重试。** 记住的正确形状原先被排在**最后**试，
+  于是每次调用先白烧两次失败往返，wire 形状还会因宿主宽容度而漂移。现在记住的形状优先。
+
+完整 diff 见 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
+
 ## v0.0.3 新特性
 
 **Diff 审查、审批工作流 & 文件内容内联** —— 补齐与 Cursor/Cline 最大的体验差距：代码变更可以在 VS Code 内完成审查和审批，无需切换到 Web UI。
@@ -32,6 +72,9 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 - **Diff 审查与内联代码应用** —— Agent 写入或编辑文件时，侧边栏自动出现审查卡片，展示每个变更文件的 `+新增`/`-删除` 行数。点击 **Diff** 打开 VS Code 原生 diff 编辑器。支持逐文件 Accept（保留）/ Reject（通过 `git checkout` 安全回退），也可批量操作。
 - **审批工作流集成** —— `approval/requested` 事件现在以内联卡片形式展示，带 **Allow once** / **Deny** 按钮。不再需要切浏览器审批。安全允许列表限制哪些工具可以在 VS Code 内审批，高风险操作仍需 Web UI。
 - **@file 内容内联** —— 文件引用（`@file:path` 或 `@file:path:L10-L20`）的内容现在被直接读取并内联到用户消息中，确保 agent 始终能看到文件内容。`context` 元数据（活动文件、选区）仅在会话首次发送时附带。
+  - **已在 v0.1.3 更正：** `@file:path` 这套语法和"内联正文"都是插件自己发明的，宿主另有语法。
+    现在改用 `@path` / `@"含空格的 path"` / `@dir/`（可带 `:L<n>` 行号后缀），
+    **并且不再粘贴正文**——文件由 agent 自己读。详见上面的 v0.1.3 段。
 - **右键菜单集成** —— 在资源管理器中右键文件 → **Add to Harness Chat**。在编辑器中选中文本 → 右键 → **Send Selection to Harness**。均使用工作区相对路径。
 
 详见 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
@@ -85,7 +128,8 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
    # → http://127.0.0.1:3080/?token=<43 位 token>
    ```
 
-   较新的 Harness 会打印一个**带一次性 token 的启动 URL**。复制它。
+   较新的 Harness 会打印一个**带一次性 token 的启动 URL**。VS Code 不需要它——
+   想同时开着网页端对照时，用它打开浏览器即可。
 
    更老的版本则完全不对 `/api/*` 做鉴权、不需要任何 token —— 插件会自行探测所连的是哪一种，
    所以如果没有出现启动 URL，这一步可以直接跳过。
@@ -96,15 +140,17 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
    code --install-extension lucasliang.harness-connector-deepseek
    ```
 
-   或从 [GitHub Releases](https://github.com/liangwythu/deepseek-harness-vscode/releases) 安装 VSIX：
+   或从 [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases) 安装 VSIX：
 
    ```bash
    code --install-extension harness-connector-deepseek-0.0.8.vsix
    ```
 
-3. **把浏览器会话交给扩展。** 在命令面板执行 **`DeepSeek Harness: Set Session Token from Launch URL`**，粘贴启动 URL（或裸 token）。扩展会用它换取 `dsh-auth-…` cookie，并存入 VS Code 的 secret storage（系统钥匙串，**不会**写入 `settings.json`）。
+3. **不用配置任何东西。** 扩展会自动连接：它读取 `dsh web` 写在 `$DSH_HOME/.credentials.yaml` 里的浏览器会话签名密钥，自己签出同一个 `dsh-auth-…` cookie。**没有需要粘贴的 token。**
 
-   需要 cookie 鉴权的 Harness 会对所有 `/api/*` 强制校验该 cookie，因此这一步是必需的。跳过的话 Connect 会报"requires a browser session"，而不是一个光秃秃的 `401`。
+   需要 cookie 鉴权的 Harness 会对所有 `/api/*` 强制校验该 cookie。该文件是 0600 权限、
+   只有你自己能读，所以"能读它"本身就等价于"能完全控制这个 harness home"——自签不是提权。
+   详见下文《浏览器会话是怎么来的》。
 
 4. 在 VS Code 中打开一个你想绑定到 Harness 工作区的文件夹。
 
@@ -112,25 +158,45 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 
 6. **没有匹配的工作区？** 直接输入提示按 Send——工作区和会话会自动创建。
 
-7. **附加文件上下文** —— 输入 `@file:src/main.ts`，或在资源管理器中右键文件选择 **Add to Harness Chat**。在编辑器中选中文本，右键选择 **Send Selection to Harness** 可插入带行范围的引用。
+7. **用 `@` 引用文件** —— 在输入框里打一个 `@`，会弹出补全列表；选中即插入为引用（`@src/main.ts`）。也可以在资源管理器右键文件选 **Add to Harness Chat**，或在编辑器里选中文本后右键选 **Send Selection to Harness**（插入 `@src/main.ts:L10-L20`）。**不会把文件内容贴进消息里**：引用只是一个*指针*，宿主会提示 agent 自己去读该文件。这样无论文件多大，你的提示文本（以及它的 KV cache）都保持稳定。
 
 8. 在浏览器中打开 `http://127.0.0.1:3080/` 的同一会话——两端看到的是同一轮对话。
 
-### 需要每次都重填吗？
+> 没有"设置会话 token"这条命令。cookie 每次连接都从
+> `$DSH_HOME/.credentials.yaml` 本地签发，没有任何需要粘贴的东西。
 
-不用——**重启不需要**。启动 URL 里的 **token** 确实随 `dsh web` 进程消亡，但它换来的
-**cookie** 是用持久化在 `$DSH_HOME/.credentials.yaml` 里的密钥签名的，**默认有效期 30 天**。
-扩展保存的就是这个 cookie，所以 `dsh web` 可以随便重启。
+### 浏览器会话是怎么来的
 
-只有这几种情况才需要重新执行：
+需要 cookie 鉴权的 Harness 会拒绝所有不带浏览器会话 cookie 的 `/api/*` 调用。上游的
+官方做法是拿每个进程一次性生成的 launch token 去换——但那个 token **不落盘**，官方文档
+要求你手动从终端复制；而且每次 `dsh web` 重启都会换一个。
 
-| 情况 | 原因 |
+cookie 本身并不包含 token 的任何痕迹：它是对 `{version, authority, issuedAt,
+expiresAt}` 的 HMAC，密钥持久化在 `$DSH_HOME/.credentials.yaml`
+（`client-connection/browser-session`），只生成一次、之后每个 `dsh web` 进程复用。
+所以任何能读到该文件的东西都能签出**字节级相同**的 cookie——扩展就是这么做的，
+你什么都不用粘。这是插件提供的**唯一**路径：粘贴启动 URL 的命令已经删掉，因为一个
+每次重启都变的 token，在本地自签可用之后只剩下维护成本。
+
+**安全吗？** 该文件权限是 0600（仅属主可读），里面还存着你的模型 API key——
+能读它就已经等于能完全控制这个 harness home。从中签发是*权限等价*，不是提权。
+它确实绕过了那个每进程 token 闸门，但那个闸门防的是**远程调用者**（DNS rebinding、
+CSRF），不是防已经以你的身份运行的代码。
+
+### 本地签发跑不起来的时候
+
+连接失败时扩展会直接在报错里点名它找过的文件，没有手动兜底——请把根因解决掉。
+
+| 情况 | 怎么办 |
 | --- | --- |
-| cookie 超过 30 天有效期 | `expiresAt` 写在被签名的 cookie 载荷里 |
-| 你改了 `deepseekHarness.port`（或 `host`） | cookie 名是 `dsh-auth-<sha256(host:port)>`，绑定签发时的 authority |
-| `$DSH_HOME/.credentials.yaml` 被删或重新生成 | 签名密钥没了，现存 cookie 全部校验失败 |
+| `$DSH_HOME` 指向别处，且没设环境变量 | 给 VS Code 进程设置 `DSH_HOME`，或用默认 home 启动 `dsh web` |
+| 这个 harness home 里从没跑过 `dsh web` | 跑一次——`client-connection/browser-session` 记录是那时才建立的 |
+| 你把 `deepseekHarness.autoSession` 设成了 `false` | 改回 `true`：这个开关现在的含义是"拒绝自签"，而不是"弹个框让我手输 token" |
 
-万一真过期了，扩展会明确告诉你该跑哪条命令，而不是只抛一个 `401`。
+签出来的 cookie 之后有自己的生命周期：扩展把它存进 VS Code 的 secret storage
+（系统钥匙串，**不会**写入 `settings.json`），`dsh web` 重启不会失效，只有在过期或你改了
+`host`/`port` 时才重新签发（cookie 名是 `dsh-auth-<sha256(host:port)>`，绑定签发它的
+authority）。
 
 ## 配置
 
@@ -139,12 +205,13 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 | `deepseekHarness.host` | `127.0.0.1` | **v0.0.x 仅允许 `127.0.0.1` 或 `localhost`。** 其他值会被拒绝。 |
 | `deepseekHarness.port` | `3080` | 默认 `dsh web` 端口。如果你用 `dsh web --port <n>` 启动则需修改。 |
 | `deepseekHarness.showSystemMessages` | `false` | 显示插件注入的系统消息（运行时上下文、审批通知）。默认隐藏；可通过 webview 头部的 `SYS` 按钮实时切换。 |
+| `deepseekHarness.autoSession` | `true` | 从 `$DSH_HOME/.credentials.yaml` 本地签发浏览器会话 cookie。关掉它扩展就没有鉴权了——这是安全开关，不是便利开关。 |
+| `deepseekHarness.autoApproveApprovals` | `false` | **v0.0.9+** 自动用 `allowed-once` 回应所有审批请求。默认关闭——开启意味着工具调用不再逐次确认。 |
 
 ## 命令
 
 - `DeepSeek Harness: Connect` / `Disconnect`（连接 / 断开）
-- `DeepSeek Harness: Set Session Token from Launch URL`（从启动 URL 设置会话 token）——粘贴 `dsh web` 启动 URL 以获取浏览器会话 cookie
-- `DeepSeek Harness: Clear Session Token`（清除会话 token）——删除已存储的 cookie（例如切换 `dsh web` 实例前）
+- `DeepSeek Harness: Clear Session Token`（清除会话 token）——删除已存储的 cookie 并重连（会重新签一个；切换 `dsh web` 实例前用它）
 - `DeepSeek Harness: New Session`（在当前工作区新建会话）
 - `DeepSeek Harness: Refresh Sessions`（刷新会话列表）
 - `DeepSeek Harness: Move to Right Side Bar`（移至右侧边栏）——将视图停靠在辅助侧边栏（像聊天面板一样），不再与文件浏览器争抢左侧空间。也可通过 webview 头部的 ⇲ 按钮触发。
@@ -154,6 +221,7 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 - `DeepSeek Harness: Fork Session`（分叉会话）——从当前会话分叉并切到新会话
 - `DeepSeek Harness: Rename Session`（重命名会话）——固定标题（之后不再自动生成）
 - `DeepSeek Harness: Archive Session`（归档会话）——从当前工作区列表归档
+- `DeepSeek Harness: Attach File to Session`（附加文件到会话）——为下一条提示暂存本地图片/文件（图片走 `session/prompt` 内联部件；其它文件上传到 `POST /api/session/uploadFileBinary` 并按回执引用）。也可通过 📎 按钮、或直接往输入框粘贴/拖拽触发
 - `DeepSeek Harness: Open Web UI`（打开 Web UI）
 - `DeepSeek Harness: Show Logs`（显示日志，即 `DeepSeek Harness` 输出通道）
 
@@ -166,8 +234,12 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 
 ### 右键菜单操作
 
-- **Add to Harness Chat**（资源管理器右键）—— 将 `@file:<相对路径>` 插入聊天输入框。
-- **Send Selection to Harness**（编辑器右键，需选中文本）—— 将 `@file:<相对路径>:L<起始行>-L<结束行>` 插入聊天输入框。
+- **Add to Harness Chat**（资源管理器右键）—— 将 `@<相对路径>` 引用插入聊天输入框。
+- **Send Selection to Harness**（编辑器右键，需选中文本）—— 插入 `@<相对路径>:L<起始行>-L<结束行>`。
+
+两者插入的都是**引用**，不是文件内容。宿主的引用语法为 `@path`、`@"含空格的
+path"`、`@dir/`，可带 `:L<n>` / `:L<n>-L<m>` 后缀；从 `@` 补全列表里选中一项同样
+不附带任何内容——文件是 agent 自己去读的。
 
 ## 架构
 
@@ -231,22 +303,22 @@ npm run protocol-probe     # 报告真实 dsh web 暴露了什么
 ## 限制
 
 - 仅限回环——不支持远程 / 局域网 / WSL 桥接的主机。
-- 仅支持文本提示（不支持图片附件）。
+- **图片能不能用取决于模型。** 模型是否吃图并不在 `session/modelCatalog` 里发布，插件只能把宿主的裁决透传：不吃图的模型会让 prompt 失败并返回 `MODEL_DOES_NOT_SUPPORT_IMAGES`，面板会提示你去 Controls 换模型。已暂存的附件会**保留**，方便重试。
+- **暂存文件绑定进程。** 上传回执同时绑定会话**和**正在运行的 `dsh web` 进程，宿主重启后必须重新选文件。
 - 历史记录加载最近约 50 条消息；"加载更早"是未来版本的计划。
 - "Open Web UI" 中的会话深链接不做猜测——只打开 Harness 首页。
 - 未知的 harness 事件类型会被忽略（协议是可合并扩展的）；它们不会导致客户端崩溃，但也不会渲染。
 - Diff 审查的 Reject 使用 `git checkout` 回退——目标文件上未提交的本地修改会在 Reject 时丢失。
 
-## 路线图（v0.0.7+）
+## 路线图（v0.1.4+）
 
-- 由 `session/selectModel` 与 `llm/models` 驱动的模型 / 推理强度选择器
-- 子代理控制（`subagent/interrupt`、排队消息转向）
-- 历史分页「加载更早」
+- 自动连接：查清为什么面对一个健康的本地 `dsh web`，`auth.init()` + `tryMintLocalSession()` 仍可能返回未就绪（如今手动 `Connect` 按钮是兜底，不是修复）
+- 检查器：过滤框 / 类型高亮 / 导出 JSONL
+- 搜索：限定工作区、分页、命中高亮
 - 内联补全（Inline Completion）
 - VS Code 文件系统提供器
 - 终端集成
 - LSP / ACP 集成
-- 图片附件
 
 ## 许可证
 

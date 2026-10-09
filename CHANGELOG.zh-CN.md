@@ -5,6 +5,74 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.3] — 2026-10-10
+
+版本定位：**修好了"能连上但收不到回话"，补上了图片与真正的文件上传，顺手拔掉两个静默 bug。**
+
+> 中文版此前停在 0.0.8；0.0.9 ~ 0.1.2 的完整记录见英文版 [CHANGELOG.md](./CHANGELOG.md)，
+> 本段只记 0.1.3。
+
+### 修复
+
+- **"Connected" 之后一片安静。** 插件一直把传输层建模成"一条 `$events` 承载所有帧"。
+  真机（`0.2.1-alpha.2`）上 `$events` 只发一个 `ready`（所以面板显示 Connected）然后
+  **一条对话流量都没有**——它是一份固定的转发白名单。对话在另一条逻辑流
+  `session/follow` 上：`snapshot` → `event` → 实时 `assistant-stream`。两条流现在各开一条
+  socket。真机验证：`p` + `ong` → `pong`，模型快照 4 项。
+- **没有 `start` 的 `chunk` 直接丢弃**，不猜归属（猜错就是把文本拼到别的回合上）。
+- **`api-session/status` 不再被丢掉**，翻译成 `session/status`，Stop 按钮状态才对得上。
+- **"没有这个方法"与"这个 workspace/会话不存在"被混为一谈。** 真机事实：方法不存在是
+  **HTTP 404**，业务错误是 200 + `workspace/not-found`。原先过宽的正则会劝用户去"升级宿主"。
+- **`@` 浮层曾根本打不开**：陈旧守卫拿的是"上一次回复所回答的查询"（初始 `undefined`），
+  第一次敲 `@` 就被自己挡掉；且成功分支只写候选不写查询，而 composer 要求两者匹配。
+- **历史永远是空的，而且每次重连都会把对话擦掉。** `session/page` 一直写死 `throughSeq: 0`，
+  但它是**日志游标**不是条数（上游 `history.ts`：`-1` = 空页，`0` = 只要第 0 条，越界报
+  `past cursor N`）。唯一来源是 `session/follow` **开场帧**的 `snapshot.cursor`——现在客户端
+  记录该游标（单调不回退），没学到游标时**直接返回空页、不发请求**。第二层更致命：
+  调用方把空页当事实折进模型，于是**每次 socket 重连都清空一次正在看的对话**；
+  现在空页只记日志，绝不清屏。
+- **参数形状重试把记住的正确形状排在最后试。** 每次调用先白烧两次失败往返，wire 形状还会
+  因宿主宽容度而漂移。改为**记住的形状优先**。
+
+### 新增
+
+- **图片支持：粘贴 / 拖拽 / 选文件 → 待发 chip → 内联进 `session/prompt`。** 图片作为内联部件
+  `{ type: 'image', mediaType, data, name? }`（`png/jpeg/webp/gif`）随 prompt 发出；
+  只发图片不发文字合法。契约从 `deepseek-harness@0.2.1-alpha.2` 源码 + 真机双侧钉死：
+  宿主上限单张 20 MiB / 单条 20 张 / 合计 200 MiB；`admitPromptContent` 会把内联图片**提升**为
+  `ImageAttachmentRef`（归一化、可能缩放），落库的是 `sha256:…`。
+  **模型能力不发布、无法预判**：不吃图的模型返回
+  `session/attachment-invalid` + `details.reason === 'MODEL_DOES_NOT_SUPPORT_IMAGES`，
+  面板把它翻译成"去 Controls 换模型"，并**保留**已暂存附件方便重试。
+- **非图片文件走真实上传路径。** `session/attachment` 其实是"按 id **读**附件"
+  （`{ request: { sessionId, attachmentId } }`），旧代码把它当上传接口，所以怎么发都是
+  `boundary validation failed`。真正上传是裸 HTTP：
+  `POST /api/session/uploadFileBinary?sessionId=<id>&name=<leaf>`，原始字节 body，
+  返回 `{ ok: true, value: { receiptId, file } }`；prompt 里用 `{ type: 'file', receiptId }` 引用。
+  回执同时绑定会话与 `dsh web` 进程，宿主重启即失效。
+- **自动连接失败时有得点了：状态行 `Connect` 按钮 + 标题栏插头图标。** 按钮三态
+  （`Connect` / `Retry` / `Connecting…`，进行中禁用）；`package.json` 贡献一条 `view/title`
+  菜单，`when` 为 `view == deepseekHarness.sessionView && deepseekHarness.offline`，
+  插头图标**只在未连接时**出现。（"auth 为什么返回未就绪"仍是未解问题，按钮是地板不是修复。）
+- **附件字节永不进 `UiState`。** `pushState` 每个流式分片都触发，所以 `pending` 只放 chip 元数据；
+  base64 留在 controller，webview 用本地 `URL.createObjectURL` 自建缩略图并复用其 `key` 当 chip id。
+- **`@` 引用改用宿主自己的语法，且不再粘贴正文。** 支持 `@path`、`@"含空格的 path"`、
+  `@dir/`，可带 `:L<n>` / `:L<n>-L<m>`；补全走 `fileReferences/list`（内层 args 是
+  **裸对象**，没有 `request` 包装）。`someone@example.com` 不会被误判成引用。
+
+### 移除
+
+- **`DeepSeek Harness: Set Session Token from Launch URL` 命令及其标题栏菜单项。**
+  本地自签已是实际唯一可用路径。
+
+### 验证
+
+- 回归门 **108 → 178 项**全绿；真机集成测试 **16 → 21 项**全绿，新增 08b 段落跑真图闭环：
+  遍历 `modelCatalog` 找到肯收图的模型路由（默认 `deepseek-v4-flash` 被拒、`deepseek-flash` 收下）
+  → 内联发图 → 经 `session/page` 找到持久图片引用（`sha256:97a3a410…`）→
+  `session/attachment` 读回 73 字节并校验 PNG 签名 → `uploadFileBinary` 拿到回执 →
+  再发一条引用该回执的 prompt 并被准入。
+
 ## [0.0.8] — 2026-09-19
 
 版本定位：**真实的线缆契约——DeepSeek Harness `0.2.0-rc.2`。**
@@ -362,4 +430,4 @@ VS Code ─────┘
 - 未知的 harness 事件类型会被忽略（协议是可合并扩展的）；
   不会导致客户端崩溃，但也不会渲染。
 
-[0.0.1]: https://github.com/liangwythu/deepseek-harness-vscode/releases/tag/v0.0.1
+[0.0.1]: https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.0.1

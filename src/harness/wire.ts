@@ -62,7 +62,7 @@ export interface NegotiateOptions {
 
 /** Namespaces whose methods are converted between `ns/method` and `ns.method`. */
 const CONVERTIBLE_NAMESPACES = new Set([
-  'session', 'workspace', 'host', 'agentPreset', 'goal', 'llm', 'subagent', 'skill', 'settings', 'credentials', 'commands',
+  'session', 'workspace', 'host', 'agentPreset', 'goal', 'llm', 'subagent', 'skill', 'settings', 'credentials', 'commands', 'fileReferences',
 ])
 
 /** Event-socket candidates, 0.2.0-rc.2 first (WS upgrade, not a GET route). */
@@ -90,6 +90,7 @@ export const CONTROL_METHODS = [
   'commands/list',
   'session/search',
   'session/attachment',
+  'fileReferences/list',
 ] as const
 
 export type ControlMethod = (typeof CONTROL_METHODS)[number]
@@ -97,13 +98,37 @@ export type ControlMethod = (typeof CONTROL_METHODS)[number]
 /**
  * Business error codes meaning "I do not serve that method".
  *
- * A 404 answers this at the HTTP level. Some builds answer 200 with a typed error
- * instead. The codes below are the ones observed upstream
- * (`gateway/method-unavailable`, `not_found`, `unknown_method`, `unimplemented`);
- * the match is deliberately broad because a false positive only hides a control,
- * while a false negative would render a dead button.
+ * A 404 answers this at the HTTP level, and that is how the live host answers a
+ * method it does not have — the body is not even a JSON envelope. Some builds
+ * answer 200 with a typed error instead; the codes below are the ones observed
+ * upstream (`gateway/method-unavailable`, `unknown_method`, `unimplemented`).
+ *
+ * The match is deliberately NARROW, because the two error families overlap in
+ * wording and only one of them is about dispatch:
+ *
+ *   gateway/method-unavailable → no such method        (a control is absent)
+ *   workspace/not-found        → the call was understood and refused
+ *   session/not-found          → same
+ *
+ * A broad `/not-found/` used to swallow both, so passing a stale workspace id to
+ * `session/create` surfaced as "this harness does not serve session/create —
+ * upgrade the host". Both real errors would then be answered with the same
+ * wrong advice. A namespaced `x/not-found` is a *business* error and must reach
+ * the caller with the host's own message.
+ *
+ * The rule, then: a missing method is either scoped to the dispatch layer
+ * (`gateway/…`) or an unscoped code that explicitly names a method —
+ * `unimplemented` being the bare gRPC leftover for exactly this case. Anything
+ * carrying a domain namespace is a business error, by construction.
  */
-const MISSING_METHOD_CODE = /gateway\/(method|service|definition|invocation)-unavailable|not[_-]?found|unknown[_-]?method|unimplemented|unsupported|no[_-]?such|method[_-]?not[_-]?found/i
+const MISSING_METHOD_CODE = new RegExp(
+  '^gateway/(method|service|definition|invocation)-unavailable$'
+  + '|^gateway/(unsupported|unknown-method|method-not-found)$'
+  + '|^(unknown|missing|no-such|unsupported)[-_]?method$'
+  + '|^method[-_]not[-_]found$'
+  + '|^unimplemented$',
+  'i',
+)
 
 /**
  * Business error codes meaning "the arguments do not match my declared

@@ -6,7 +6,7 @@
  */
 
 import type { MuxStatus } from '../harness/events.ts'
-import type { CommandDescriptor, ModelCatalog, QueueItemView, SessionSearchResult, SessionSummary, WorkspaceView } from '../harness/protocol.ts'
+import type { CommandDescriptor, FileReferenceCandidate, ModelCatalog, QueueItemView, SessionSearchResult, SessionSummary, WorkspaceView } from '../harness/protocol.ts'
 import type { SessionSnapshot } from '../conversation/types.ts'
 import type { ControlState } from '../conversation/control.ts'
 import type { SessionUsageState } from '../conversation/usage.ts'
@@ -36,6 +36,23 @@ export interface SearchState {
   error?: string
   /** Host reported search as disabled for this deployment. */
   disabled?: boolean
+}
+
+/**
+ * One attachment the composer is holding for the next prompt.
+ *
+ * Metadata only — the bytes stay in the controller. Pushing base64 through
+ * `UiState` would re-send every attachment on every `pushState`, and
+ * `pushState` fires on every streamed chunk of a running turn.
+ */
+export interface PendingChip {
+  id: string
+  kind: 'image' | 'file'
+  name: string
+  /** Byte length of the original file. */
+  bytes: number
+  /** Raster media type for images; the host admits png/jpeg/webp/gif only. */
+  mediaType?: string
 }
 
 export type ConnectionKind = 'disconnected' | 'connecting' | 'connected' | 'error'
@@ -81,6 +98,12 @@ export interface UiState {
   search?: SearchState | null
   /** F7: ring buffer of recently observed mux frames (newest last). */
   eventLog?: InspectorFrame[]
+  /** `@` completion candidates for the active session (`fileReferences/list`). */
+  refCandidates?: FileReferenceCandidate[]
+  /** The path text these candidates answer for; also the stale-response guard. */
+  refQuery?: string
+  /** Attachments queued for the next prompt (chips only; bytes live in the controller). */
+  pending?: PendingChip[]
   /** Auto-approve incoming approval requests (setting mirror). */
   autoApprove: boolean
   /** Monotonically increasing. Bumps whenever any UiState field changes,

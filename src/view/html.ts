@@ -18,6 +18,7 @@ export const HTML_SKELETON = /* html */ `
     <div class="status">
       <span id="dot" class="dot disconnected"></span>
       <span id="status-text">Disconnected</span>
+      <button id="connect" class="secondary icon" title="Connect to dsh web" style="display:none;">Connect</button>
     </div>
     <div id="host-info" class="muted" style="margin-top:2px;"></div>
     <div id="mux-status" class="muted"></div>
@@ -69,8 +70,10 @@ export const HTML_SKELETON = /* html */ `
 
   <div id="input-area">
     <div id="queue-bar" style="display:none;"></div>
+    <div id="attach-bar" class="attach-bar" style="display:none;"></div>
+    <div id="at-popup" style="display:none;"></div>
     <div id="slash-popup" style="display:none;"></div>
-    <textarea id="input" placeholder="Send a prompt… (Enter to send, / for commands, Shift+Enter for newline)" rows="3"></textarea>
+    <textarea id="input" placeholder="Send a prompt… (Enter to send, / for commands, @ to reference a file, paste an image, Shift+Enter for newline)" rows="3"></textarea>
     <div id="context-bar" class="context-bar" style="display:none;">
       <span id="context-active-file" class="ctx-chip" style="display:none;"></span>
       <span id="context-selection" class="ctx-chip selection" style="display:none;">selection</span>
@@ -83,7 +86,7 @@ export const HTML_SKELETON = /* html */ `
         <input type="checkbox" id="steer" /> Steer
       </label>
     </div>
-    <div id="atfile-hint" class="atfile-hint">Tip: use @file:/path to attach files, /compact /plan /permission for commands</div>
+    <div id="atfile-hint" class="atfile-hint">Tip: type @ to reference a file — the agent reads it itself, nothing is pasted. / for commands.</div>
   </div>
 
   <div id="open-web"><a id="open-web-link">Open in DeepSeek Harness Web UI ↗</a></div>

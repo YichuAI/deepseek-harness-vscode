@@ -1,29 +1,48 @@
 /**
- * events.ts — the Remote event downlink layer (0.2.0-rc.2 Typert Remote Stream).
+ * events.ts — the Remote event downlink layer.
  *
- * `dsh web` 0.2.0-rc.2 exposes ONE multiplexed WebSocket:
+ * `dsh web` exposes ONE multiplexed WebSocket that carries every logical
+ * stream:
  *
  *   ws://host:port/api/remote.mux
  *
- * The client opens it, then sends a single `open` frame to subscribe to the
- * `$events` logical stream:
+ * The client opens it, then sends one `open` frame to subscribe to a logical
+ * stream by endpoint name:
  *
- *   { type:'open', streamId:'<id>', endpoint:'$events', payload:{args:{}} }
+ *   { type:'open', streamId:'<id>', endpoint:'<name>', payload:{ args:{…} } }
  *
  * The Host pushes frames of the shape `{ type:'item'|'end'|'error', streamId, value }`.
- * For the `$events` stream, `value` is a MuxFrame — except the FIRST item, whose
- * `value` is the `ready` frame `{ type:'ready', clientId, host:{ home } }`. That
- * `ready` frame is the only host-identity message; there is no `host.describe`.
+ * Client messages are otherwise a protocol violation — the Host answers any
+ * further traffic with close code 1008 `downlink only`.
  *
- * This is a deliberate break from the pre-0.2 "downlink-only server-request
- * envelope" mental model that the rc.6 rewrite implemented and that made the
- * connect hang waiting for a `ready` frame that never arrived.
+ * Two endpoints matter to this plugin, and they carry DIFFERENT vocabularies:
+ *
+ *  1. `$events` — the forwarded-Host-event stream. Its FIRST item's value is
+ *     `{ type:'ready', clientId, host:{ home } }` (the only host-identity frame,
+ *     and the correlation id later approval answers need). Every later item is
+ *     one forwarded event: `{ type:'emit', event, args }` or a waterfall
+ *     `{ type:'waterfall', event, eventId, agentId, request }`. The forwarded
+ *     set is a fixed allowlist (`alpha-session/*`, `approval/request`,
+ *     `user-questions/request`, plugin-inventory events, …):
+ *     it does NOT carry conversation traffic.
+ *
+ *  2. `session/follow` — one session's conversation. Opening it with
+ *     `{ request: { address:{ kind:'session', sessionId }, assistantStream:true } }`
+ *     yields an opening `{ type:'snapshot', … }`, then durable
+ *     `{ type:'event', event }` records, then live
+ *     `{ type:'assistant-stream', frame }` deltas (start / chunk / end).
+ *     Chunks are process-local, so they never appear in the durable log.
+ *
+ * History: this file used to model a single `$events` stream carrying MuxFrames
+ * (`session/event`, `approval/requested`, …). That was the pre-0.2 shape. On
+ * 0.2.1-alpha.2 the conversation moved to `session/follow`, which is why the
+ * sidebar connected but never received a reply.
  */
 
 import { randomUUID } from 'node:crypto'
 import type { Disposable } from '../disposable.ts'
 import { openWebSocket, WebSocketUpgradeError, type WebSocketHandle } from './ws.ts'
-import type { MuxFrame, ReadyFrame, RemoteStreamServerMessage } from './protocol.ts'
+import type { ReadyFrame, RemoteStreamServerMessage } from './protocol.ts'
 
 export type MuxStatus =
   | { kind: 'idle' }
@@ -37,21 +56,40 @@ export type MuxStatus =
 /** Reconnect backoff: 250ms, 500ms, 1s, 2s, 5s (capped). */
 const BACKOFF_STEPS = [250, 500, 1000, 2000, 5000] as const
 
+/** The endpoint name of the forwarded-Host-event stream. */
+export const EVENTS_ENDPOINT = '$events'
+/** The endpoint name of one session's conversation stream. */
+export const SESSION_FOLLOW_ENDPOINT = 'session/follow'
+
 export interface DownlinkSocketOptions<Frame> {
   /** Build the ws:// URL for this socket. Called on every (re)connect. */
   url: () => string
   /** Handshake headers (the browser-session cookie). Called per attempt. */
   headers: () => Record<string, string>
-  /** The `ready` frame (host identity) — delivered once, before any MuxFrame. */
-  onReady: (ready: ReadyFrame) => void
-  /** One decoded MuxFrame (everything after `ready`) from the Host. */
+  /** Logical stream this socket subscribes to on open (e.g. `session/follow`). */
+  endpoint: string
+  /** Inner `args` of the `open` frame. Called per attempt (it may name a session). */
+  openArgs: () => Record<string, unknown>
+  /** Distinguishes concurrent connections' stream ids in logs/traces. */
+  streamIdPrefix?: string
+  /**
+   * Whether to wait for a `ready` item before treating frames as traffic.
+   * Only the `$events` stream publishes one; a follow stream starts straight
+   * into its `snapshot`.
+   */
+  expectReady?: boolean
+  /** The `ready` frame (host identity) — delivered once, before any other frame. */
+  onReady?: (ready: ReadyFrame) => void
+  /** One decoded frame (the `value` of an `item`) from the Host. */
   onFrame: (frame: Frame) => void
+  /** A transport-level `{ type:'error' }` frame for this stream. */
+  onStreamError?: (error: unknown) => void
   onStatus: (status: MuxStatus) => void
   log: (msg: string) => void
 }
 
 /**
- * One multiplexed Remote-stream WebSocket carrying the `$events` logical stream,
+ * One multiplexed Remote-stream WebSocket carrying a single logical stream,
  * with automatic reconnect. Callers consume frames through `onReady`/`onFrame`
  * and never touch the socket.
  */
@@ -61,11 +99,13 @@ export class DownlinkSocket<Frame> implements Disposable {
   private backoff = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
   private status: MuxStatus = { kind: 'idle' }
-  /** Stable id for the single `$events` stream we open on this socket. */
-  private readonly streamId = `harness-connector-${randomUUID()}`
+  /** Stable id for the one logical stream this socket subscribes to. */
+  private readonly streamId: string
   private readySeen = false
 
-  constructor(private readonly opts: DownlinkSocketOptions<Frame>) {}
+  constructor(private readonly opts: DownlinkSocketOptions<Frame>) {
+    this.streamId = `${opts.streamIdPrefix ?? 'harness-connector-'}${randomUUID()}`
+  }
 
   getStatus(): MuxStatus { return this.status }
 
@@ -75,29 +115,32 @@ export class DownlinkSocket<Frame> implements Disposable {
     if (this.ws !== undefined && this.ws.readyState !== 'closed') return
     this.setStatus({ kind: 'connecting' })
     this.readySeen = false
+    const expected = this.opts.expectReady === true
     const ws = openWebSocket(this.opts.url(), this.opts.headers(), {
       onOpen: () => {
         this.backoff = 0
         this.setStatus({ kind: 'open' })
-        this.opts.log('downlink: socket open; subscribing to $events')
-        // Subscribe to the $events stream immediately.
+        this.opts.log(`downlink[${this.opts.endpoint}]: socket open; subscribing`)
+        // Subscribe to our logical stream immediately. This is the ONLY frame
+        // this socket may ever send: the Host closes any further client traffic
+        // with 1008 `downlink only`.
         ws.send(JSON.stringify({
           type: 'open',
           streamId: this.streamId,
-          endpoint: '$events',
-          payload: { args: {} },
+          endpoint: this.opts.endpoint,
+          payload: { args: this.opts.openArgs() },
         }))
       },
-      onText: (text) => { this.onMessage(text) },
+      onText: (text) => { this.onMessage(text, expected) },
       onClose: (code, reason) => {
         if (this.disposed) return
-        this.opts.log(`downlink: closed (code=${String(code)} reason=${reason || '—'})`)
+        this.opts.log(`downlink[${this.opts.endpoint}]: closed (code=${String(code)} reason=${reason || '—'})`)
         this.setStatus({ kind: 'closed', reason: reason || `code ${String(code)}` })
         this.scheduleReconnect()
       },
       onError: (err) => {
         if (this.disposed) return
-        this.opts.log(`downlink: error — ${err.message}`)
+        this.opts.log(`downlink[${this.opts.endpoint}]: error — ${err.message}`)
         this.setStatus({
           kind: 'error',
           message: err instanceof WebSocketUpgradeError && err.status === 401
@@ -124,12 +167,12 @@ export class DownlinkSocket<Frame> implements Disposable {
 
   dispose(): void { this.close() }
 
-  private onMessage(text: string): void {
+  private onMessage(text: string, expected: boolean): void {
     let message: unknown
     try {
       message = JSON.parse(text) as unknown
     } catch {
-      this.opts.log('downlink: dropped non-JSON frame')
+      this.opts.log(`downlink[${this.opts.endpoint}]: dropped non-JSON frame`)
       return
     }
     if (typeof message !== 'object' || message === null) return
@@ -138,11 +181,11 @@ export class DownlinkSocket<Frame> implements Disposable {
       const value = (msg as { value?: unknown }).value
       if (value === undefined || typeof value !== 'object') return
       const v = value as { type?: unknown }
-      if (!this.readySeen && v.type === 'ready') {
+      if (expected && !this.readySeen && v.type === 'ready') {
         this.readySeen = true
         const ready = value as ReadyFrame
         this.setStatus({ kind: 'ready' })
-        try { this.opts.onReady(ready) } catch (e) {
+        try { this.opts.onReady?.(ready) } catch (e) {
           this.opts.log(`downlink: ready handler error — ${e instanceof Error ? e.message : String(e)}`)
         }
         return
@@ -156,7 +199,8 @@ export class DownlinkSocket<Frame> implements Disposable {
     }
     if (msg.type === 'error' && (msg as { streamId?: unknown }).streamId === this.streamId) {
       const err = (msg as { error?: unknown }).error
-      this.opts.log(`downlink: stream error — ${JSON.stringify(err)?.slice(0, 200)}`)
+      this.opts.log(`downlink[${this.opts.endpoint}]: stream error — ${JSON.stringify(err)?.slice(0, 200)}`)
+      try { this.opts.onStreamError?.(err) } catch { /* listener errors must not break the socket */ }
       return
     }
     // 'end' or frames for other streams: ignore.
@@ -166,7 +210,7 @@ export class DownlinkSocket<Frame> implements Disposable {
     if (this.disposed || this.reconnectTimer !== undefined) return
     const delay = BACKOFF_STEPS[Math.min(this.backoff, BACKOFF_STEPS.length - 1)]
     this.backoff += 1
-    this.opts.log(`downlink: reconnecting in ${String(delay)}ms (attempt ${String(this.backoff)})`)
+    this.opts.log(`downlink[${this.opts.endpoint}]: reconnecting in ${String(delay)}ms (attempt ${String(this.backoff)})`)
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined
       this.open()
@@ -179,9 +223,6 @@ export class DownlinkSocket<Frame> implements Disposable {
   }
 }
 
-/** Convenience alias for the $events stream frame type. */
-export type MuxSocket = DownlinkSocket<MuxFrame>
-export type HostSocket = DownlinkSocket<MuxFrame>
 
 /**
  * The ws:// URL for the Remote event socket on a loopback target.

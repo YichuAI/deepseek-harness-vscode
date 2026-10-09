@@ -12,11 +12,9 @@
  */
 
 import type * as vscode from 'vscode'
-import * as path from 'node:path'
-import { readFileSync } from 'node:fs'
-import type { HarnessClient } from '../harness/client.ts'
+import { HarnessRpcError, type HarnessClient } from '../harness/client.ts'
 import type { MuxStatus } from '../harness/events.ts'
-import type { CallId, FileReference, PromptContext, QueueItemView, RpcId, SessionId, SessionSummary, SessionUsageProjection, WorkspaceView } from '../harness/protocol.ts'
+import type { CallId, FileReferenceCandidate, ImageMediaType, QueueItemView, RpcId, SessionId, SessionSummary, SessionUsageProjection, WorkspaceView } from '../harness/protocol.ts'
 import { ConversationModel, sessionLabel } from '../conversation/model.ts'
 import { ControlSurface } from '../conversation/control.ts'
 import { SessionUsage } from '../conversation/usage.ts'
@@ -25,12 +23,12 @@ import {
   findHarnessWorkspace, ensureHarnessWorkspace, pickVsCodeFolder,
   type WorkspaceBinding,
 } from '../workspace/binding.ts'
-import type { UiState, InspectorFrame, SearchState } from './state.ts'
+import type { UiState, InspectorFrame, PendingChip, SearchState } from './state.ts'
 import { connectionToUi, sessionsToUi, workspaceToUi } from './state.ts'
-import type { WebviewAction } from '../view/provider.ts'
+import type { PendingAttachmentPayload, WebviewAction } from '../view/provider.ts'
 import type { HarnessWebviewViewProvider } from '../view/provider.ts'
 import { CompositeDisposable } from '../disposable.ts'
-import { collectEditorContext, mergeContext, parseAtFileReferences, renderContextBlock } from '../context/collector.ts'
+import { formatMention } from '../context/collector.ts'
 import { ReviewController } from '../review/controller.ts'
 import { ReviewVirtualDocumentProvider } from '../review/virtualDocument.ts'
 import { ApprovalStore } from '../approval/store.ts'
@@ -40,6 +38,7 @@ export interface ControllerDeps {
   vscodeAPI: {
     window: typeof vscode.window
     workspace: typeof vscode.workspace
+    commands: typeof vscode.commands
   }
   getState: () => UiState
   setState: (patch: Partial<UiState>) => void
@@ -51,6 +50,113 @@ export interface ControllerDeps {
   moveToSecondarySideBar: () => Promise<void>
   log: { info: (m: string) => void; error: (m: string) => void }
   provider?: HarnessWebviewViewProvider
+}
+
+/**
+ * Raster formats the host's attachment store admits. Mirrors upstream
+ * `attachment-local`, which pins exactly these four.
+ */
+const IMAGE_MEDIA_TYPES: readonly ImageMediaType[] = ['image/png', 'image/jpeg', 'image/webp', 'image/gif']
+/** Upstream `DEFAULT_MAX_IMAGE_BYTES`. Checked here so the failure is local and legible. */
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024
+/** Upstream `DEFAULT_MAX_IMAGES_PER_MESSAGE`. */
+const MAX_IMAGES_PER_MESSAGE = 20
+
+/** One attachment held in the composer, bytes included. */
+interface HeldAttachment {
+  id: string
+  kind: 'image' | 'file'
+  name: string
+  bytes: number
+  mediaType?: ImageMediaType
+  /** Base64 for images (sent as-is); base64 of the raw bytes for files. */
+  data: string
+}
+
+let attachmentSeq = 0
+function nextAttachmentId(): string {
+  attachmentSeq += 1
+  return `att-${String(attachmentSeq)}`
+}
+
+/** Byte length of a base64 payload without materializing the decoded buffer. */
+function base64ByteLength(data: string): number {
+  const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0
+  return Math.floor(((data.length - padding) * 3) / 4)
+}
+
+const EXTENSION_MEDIA_TYPES: Readonly<Record<string, ImageMediaType>> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+  gif: 'image/gif',
+}
+
+/**
+ * The media type to declare for one raster file.
+ *
+ * A clipboard image arrives with a type the browser guessed; a file from the
+ * picker usually arrives with none, so the extension is the fallback. Anything
+ * outside the four admitted formats is refused rather than guessed at, because
+ * the host validates the declared type against fully decoded bytes.
+ */
+function normalizeImageMediaType(declared: string | undefined, name: string): ImageMediaType | undefined {
+  const trimmed = declared?.toLowerCase().split(';', 1)[0]?.trim()
+  if (trimmed !== undefined && (IMAGE_MEDIA_TYPES as readonly string[]).includes(trimmed)) {
+    return trimmed as ImageMediaType
+  }
+  const dot = name.lastIndexOf('.')
+  if (dot < 0) return undefined
+  return EXTENSION_MEDIA_TYPES[name.slice(dot + 1).toLowerCase()]
+}
+
+function defaultAttachmentName(kind: 'image' | 'file', mediaType: string | undefined): string {
+  if (kind === 'file') return 'attachment'
+  const ext = (mediaType ?? 'image/png').slice('image/'.length)
+  return `pasted-image.${ext === 'jpeg' ? 'jpg' : ext}`
+}
+
+/**
+ * How one local file should be sent: a raster the host admits travels inline as
+ * an image part (the model sees the pixels), anything else is staged as a file.
+ */
+export function attachmentKindFor(name: string): 'image' | 'file' {
+  const dot = name.lastIndexOf('.')
+  if (dot < 0) return 'file'
+  return EXTENSION_MEDIA_TYPES[name.slice(dot + 1).toLowerCase()] === undefined ? 'file' : 'image'
+}
+
+function formatMiB(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/** Stand-in transcript text for a prompt that is pictures and files only. */
+function attachmentEcho(held: readonly HeldAttachment[]): string {
+  const images = held.filter((p) => p.kind === 'image').length
+  const files = held.length - images
+  const parts: string[] = []
+  if (images > 0) parts.push(`${String(images)} image${images === 1 ? '' : 's'}`)
+  if (files > 0) parts.push(`${String(files)} file${files === 1 ? '' : 's'}`)
+  return `(${parts.join(' + ')})`
+}
+
+/**
+ * Turn a prompt rejection into a sentence that says what to do next.
+ *
+ * The case worth translating is a text-only model. The host's own message
+ * ("Model X does not support image input.") is accurate but leaves the user
+ * holding a screenshot with nowhere to go; the host's `reason` code says
+ * exactly what the remedy is, so it is spelled out. Everything else is passed
+ * through verbatim — the host's wording is the authority.
+ */
+export function describePromptFailure(e: unknown): string {
+  const details = e instanceof HarnessRpcError ? (e.details as { reason?: unknown } | null) : null
+  if (details !== null && typeof details === 'object' && details.reason === 'MODEL_DOES_NOT_SUPPORT_IMAGES') {
+    return `${e instanceof Error ? e.message : String(e)} `
+      + 'Pick an image-capable model from the Controls panel, or remove the image and send the text alone.'
+  }
+  return e instanceof Error ? e.message : String(e)
 }
 
 export class AppController {
@@ -73,14 +179,37 @@ export class AppController {
   /** F7: ring buffer of every mux frame seen (newest last). */
   private eventLog: InspectorFrame[] = []
   private eventLogSeq = 0
-  /** Tracks which sessions have already received their first prompt (with context). */
-  private firstPromptSent = new Set<SessionId>()
+  /**
+   * The most recent `@` query the composer asked for.
+   *
+   * This has to be tracked separately from `UiState.refQuery`, because that field
+   * means "the query these candidates answer" — it is written only AFTER a reply
+   * lands. Using it as the staleness guard deadlocks the very first keystroke:
+   * `refQuery` starts undefined, so a bare `@` (query `''`) failed its own guard
+   * and nothing was ever published; the popup could not open at all.
+   */
+  private refQueryLatest: string | undefined = undefined
+  /** Last value pushed to the `deepseekHarness.offline` context key. */
+  private offlineContext: boolean | undefined = undefined
+  /**
+   * Attachments held for the next prompt.
+   *
+   * The bytes live here and never in `UiState` — `pushState` fires on every
+   * streamed chunk, so a screenshot's base64 has no business riding it. Images
+   * are kept as base64 because that is exactly what the prompt needs; files are
+   * kept as bytes because they are staged by a separate raw route at send time
+   * (a receipt would be stale if the user sat on the composer).
+   */
+  private pending: HeldAttachment[] = []
 
   constructor(private readonly d: ControllerDeps) {}
 
   start(): vscode.Disposable {
     // Wire client state → UiState
     this.disposables.add(this.d.client.onStateChange(() => this.pushFromClient()))
+    // Start life as "not connected" so the manual Connect affordances exist
+    // before the first auto-connect attempt resolves (or fails).
+    this.syncOfflineContext(true)
     let prevMuxKind: MuxStatus['kind'] | undefined
     this.disposables.add(this.d.client.onMuxStatusChange((s) => {
       const reopened = prevMuxKind !== undefined && prevMuxKind !== 'open' && s.kind === 'open'
@@ -122,7 +251,7 @@ export class AppController {
       case 'selectSession': await this.selectSession(action.sessionId); break
       case 'newSession': await this.newSession(); break
       case 'refreshSessions': await this.refreshSessions(); break
-      case 'sendPrompt': await this.sendPrompt(action.text, action.context, { steer: action.steer === true }); break
+      case 'sendPrompt': await this.sendPrompt(action.text, { steer: action.steer === true }); break
       case 'stop': await this.stopActive(); break
       case 'openWebUI': this.d.openHarnessHome(); break
       case 'toggleSystemMessages': this.toggleSystemMessages(); break
@@ -145,6 +274,12 @@ export class AppController {
       case 'queueRemove': await this.queueAction(action.itemId, { kind: 'remove' }); break
       case 'searchSessions': await this.doSearch(action.query); break
       case 'searchClear': this.search = null; this.d.setState({ search: null }); break
+      case 'refsQuery': await this.queryFileReferences(action.query); break
+      // The webview reads the bytes (it already has them from the paste) and
+      // hands them up once; the chips come back through UiState.
+      case 'pendingAdd': this.addPendingItems(action.items); break
+      case 'pendingRemove': this.removePending(action.id); break
+      case 'pendingClear': this.clearPending(); break
       case 'inspectorClear': this.eventLog = []; this.eventLogSeq = 0; this.d.setState({ eventLog: [] }); break
     }
   }
@@ -175,7 +310,6 @@ export class AppController {
     this.sessions = []
     this.binding = null
     this.noFolder = undefined
-    this.firstPromptSent.clear()
     this.usage.reset()
     this.d.setState({ snapshot: undefined, activeSessionId: undefined, sessions: [], workspace: undefined, reviews: undefined, approvals: undefined, queue: [], sessionUsage: this.usage.snapshot() })
     this.d.pushState()
@@ -255,6 +389,14 @@ export class AppController {
     if (!this.model) return
     const h = await this.d.client.getHistory(sessionId, { maxMessages: 50 })
     const events = h.events.map(e => e.event)
+    // `loadHistory` clears the model before replaying. An empty page must never
+    // wipe a conversation that is already on screen: on first open the follow
+    // stream has not published its cursor yet, so the page is legitimately
+    // empty and the follow snapshot is about to deliver the same records.
+    if (events.length === 0) {
+      this.d.log.info('history: no page for this cursor yet — keeping the current transcript')
+      return
+    }
     this.model.loadHistory(events)
     // The control surface is a log fold: replaying history re-derives plan
     // mode, presets, todos and goal exactly as the host would.
@@ -293,6 +435,15 @@ export class AppController {
       this.d.setState({ snapshot: this.model.snapshot() })
       const snap = this.d.getState().snapshot
       this.d.setState({ canStop: snap?.running === true })
+      return
+    }
+    // The host's own running flag (`api-session/status`, forwarded on `$events`).
+    // Durable `turn/start` / `turn/end` also flip this, but they arrive a beat
+    // later — and not at all when another client drove the turn.
+    if (f.type === 'session/status' && f.sessionId === this.activeSessionId) {
+      const running = (frame as { running?: unknown }).running === true
+      this.model?.setRunning(running)
+      this.d.setState({ snapshot: this.model?.snapshot(), canStop: running })
       return
     }
     // DSH 0.1.6+ carries assistant deltas outside the durable journal, so they
@@ -437,21 +588,26 @@ export class AppController {
     }
   }
 
-  /** Send a prompt. Implements lazy workspace+session create (v0.0.2 UX):
+  /**
+   * Send a prompt. Implements lazy workspace+session create:
    *  1. If no folder → tell user.
    *  2. If no harness workspace → ensureHarnessWorkspace (no modal).
    *  3. If no session → create session.
-   *  4. Parse @file refs from text (strip tokens → cleaned text).
-   *  5. Read file content and inline into prompt text (always).
-   *  6. Only on the FIRST prompt of a session, also attach `context` metadata
-   *     (active file, selection). Subsequent prompts rely on inlined content.
-   *  7. Optimistic echo (user text only) → send prompt.
+   *  4. Send the text as typed, `@` mentions and all.
+   *
+   * Why nothing is extracted from the text any more: an `@path` mention is
+   * ordinary prompt text that the HOST understands (`$DSH_HOME` installs
+   * `FILE_REFERENCE_PROMPT` guidance telling the model to read a referenced
+   * file with a filesystem tool). v0.0.3…v0.1.2 read the referenced file here
+   * and pasted its bytes into the message instead — every re-send duplicated
+   * the file, broke the KV prefix, and contradicted the web composer, which
+   * has always sent the mention alone.
    *
    * v0.0.9: a leading `/` routes through `commands/execute` (the rc.2 slash
    * write path); `opts.steer` sends with mode `'steer'` to inject into the
    * running turn instead of queueing.
    */
-  async sendPrompt(rawText: string, _webviewContext?: PromptContext, opts: { steer?: boolean } = {}): Promise<void> {
+  async sendPrompt(rawText: string, opts: { steer?: boolean } = {}): Promise<void> {
     this.d.setState({ sending: true })
     this.d.pushState()
     try {
@@ -472,79 +628,44 @@ export class AppController {
       }
       if (!this.activeSessionId) return
 
+      const text = rawText.trim()
+      // An image with no words is a legitimate prompt; the host only refuses a
+      // prompt whose every part is blank.
+      if (text === '' && this.pending.length === 0) return
+
       // Slash-command routing: a leading `/` is a command admission, not a
       // user message (the host durably logs the lifecycle as command/run+done).
-      if (rawText.startsWith('/')) {
-        await this.runControl(() => this.d.client.runCommand(this.activeSessionId!, rawText), 'command')
+      if (text.startsWith('/')) {
+        await this.runControl(() => this.d.client.runCommand(this.activeSessionId!, text), 'command')
         return
       }
 
-      // 4: parse @file references (strips tokens from text)
-      const { cleanedText, files: atFileRefs } = parseAtFileReferences(rawText)
-      const resolvedRefs = this.resolveFileRefs(atFileRefs)
+      // Stage files (images need no staging) before the optimistic echo, so a
+      // failed upload leaves the composer and the transcript in agreement.
+      const held = this.pending
+      const staged = await this.stagePending(this.activeSessionId)
 
-      // Build display text for the optimistic echo (user-visible, no file content)
-      let displayText = cleanedText
-      if (!displayText && resolvedRefs.length > 0) {
-        const names = resolvedRefs.map(f => {
-          const parts = f.path.split('/')
-          const name = parts[parts.length - 1] ?? f.path
-          const range = f.lineStart ? `:L${f.lineStart}${f.lineEnd ? `-L${f.lineEnd}` : ''}` : ''
-          return `${name}${range}`
-        })
-        displayText = `(See: ${names.join(', ')})`
-      }
-
-      // 5: read file content for each @file ref and inline into prompt text.
-      //    File content ALWAYS goes into `content` (the user message), because
-      //    the backend does not reliably process the `context` field.
-      let promptText = displayText
-      if (resolvedRefs.length > 0) {
-        const fileBlocks: string[] = []
-        for (const ref of resolvedRefs) {
-          try {
-            const raw = readFileSync(ref.path, 'utf8')
-            const lines = raw.split('\n')
-            const start = ref.lineStart ? ref.lineStart - 1 : 0
-            const end = ref.lineEnd ?? lines.length
-            const excerpt = lines.slice(start, end).join('\n')
-            const label = ref.lineStart
-              ? `${ref.path}:L${ref.lineStart}${ref.lineEnd ? `-L${ref.lineEnd}` : ''}`
-              : ref.path
-            fileBlocks.push(`<file path="${label}">\n${excerpt}\n</file>`)
-          } catch (e) {
-            this.d.log.error(`sendPrompt: failed to read @file ${ref.path} — ${e instanceof Error ? e.message : String(e)}`)
-          }
-        }
-        if (fileBlocks.length > 0) {
-          promptText = fileBlocks.join('\n\n') + '\n\n' + displayText
-        }
-      }
-
-      // 6: only attach editor context on the first prompt of this session — on
-      //    later prompts the file content is already inlined above. DSH 0.1.6
-      //    removed `payload.context`, so the metadata is rendered into the text.
-      const isFirstPrompt = !this.firstPromptSent.has(this.activeSessionId)
-      if (isFirstPrompt) {
-        const editorCtx = collectEditorContext(this.d.vscodeAPI.window)
-        const contextBlock = renderContextBlock(mergeContext(editorCtx, resolvedRefs))
-        if (contextBlock) promptText = `${promptText}\n\n${contextBlock}`
-        this.firstPromptSent.add(this.activeSessionId)
-      }
-
-      // 7: optimistic echo (user text only) → send prompt with inlined content
-      this.model?.optimisticUserEcho(displayText)
+      // 4: optimistic echo (the text as typed, or the attachment summary when
+      // the message is pictures only) → send the text unchanged.
+      this.model?.optimisticUserEcho(text !== '' ? text : attachmentEcho(held))
       this.d.setState({ snapshot: this.model?.snapshot() })
       this.d.pushState()
       await this.d.client.prompt(
         this.activeSessionId,
-        promptText,
+        text,
         Intl.DateTimeFormat().resolvedOptions().timeZone,
-        { mode: opts.steer === true ? 'steer' : 'queue' },
+        {
+          mode: opts.steer === true ? 'steer' : 'queue',
+          images: staged.images,
+          files: staged.files,
+        },
       )
+      // Held attachments are consumed by this prompt; a failure above keeps them
+      // so the user can fix the cause (switch to a vision model, shrink a file)
+      // and press send again instead of re-attaching everything.
+      if (held.length > 0) this.clearPending()
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      this.d.notifyError(msg)
+      this.d.notifyError(describePromptFailure(e))
     } finally {
       this.d.setState({ sending: false })
       this.d.pushState()
@@ -588,39 +709,67 @@ export class AppController {
     }
   }
 
-  /** Append an @file reference to the webview input (called from explorer/context menu).
-   *  Uses workspace-relative path for readability. */
+  /** Insert an `@path` mention for one file (explorer context menu / commands).
+   *  Workspace-relative, because that is what the host resolves mentions against. */
   addToChat(uri: vscode.Uri): void {
-    const relPath = this.d.vscodeAPI.workspace.asRelativePath(uri)
-    const token = `@file:${relPath.replace(/\\/g, '/')} `
-    this.d.provider?.postToWebview({ kind: 'appendInput', text: token })
+    this.insertMention(uri)
   }
 
-  /** Append an @file reference (path + line range) for the current selection to the chat input.
-   *  Uses workspace-relative path for readability. */
+  /** Insert an `@path:L<n>-L<m>` mention targeting the current selection. */
   sendSelection(): void {
     const editor = this.d.vscodeAPI.window.activeTextEditor
     if (!editor || editor.selection.isEmpty) {
       this.d.notifyError('No text selected in the active editor.')
       return
     }
-    const relPath = this.d.vscodeAPI.workspace.asRelativePath(editor.document.uri)
-    const filePath = relPath.replace(/\\/g, '/')
-    const startLine = editor.selection.start.line + 1
-    const endLine = editor.selection.end.line + 1
-    const range = startLine === endLine ? `:L${startLine}` : `:L${startLine}-L${endLine}`
-    const token = `@file:${filePath}${range} `
-    this.d.provider?.postToWebview({ kind: 'appendInput', text: token })
+    this.insertMention(editor.document.uri, {
+      lineStart: editor.selection.start.line + 1,
+      lineEnd: editor.selection.end.line + 1,
+    })
   }
 
-  /** Resolve relative @file paths to absolute (backend needs absolute paths to read files). */
-  private resolveFileRefs(refs: FileReference[]): FileReference[] {
-    const wsRoot = this.binding?.folder?.uri.fsPath
-    if (!wsRoot) return refs
-    return refs.map(ref => ({
-      ...ref,
-      path: path.isAbsolute(ref.path) ? ref.path : path.resolve(wsRoot, ref.path).replace(/\\/g, '/'),
-    }))
+  /**
+   * Append a mention token to the composer input.
+   *
+   * Quotes when the path needs it (whitespace), so the inserted text is valid
+   * under the grammar the host completes against.
+   */
+  private insertMention(uri: vscode.Uri, range: { lineStart?: number; lineEnd?: number } = {}): void {
+    const relPath = this.d.vscodeAPI.workspace.asRelativePath(uri)
+    const mention = formatMention(relPath, { ...range })
+    if (mention === undefined) {
+      this.d.notifyError(`Cannot reference ${relPath}: the path cannot be written as an @ mention.`)
+      return
+    }
+    this.d.provider?.postToWebview({ kind: 'appendInput', text: `${mention} ` })
+  }
+
+  // ─── `@` completion (host-served fileReferences/list) ──────────────────────
+
+  /** Query the host for `@` candidates. Answers go to UiState.refCandidates. */
+  async queryFileReferences(query: string): Promise<void> {
+    // Record the request BEFORE awaiting: the guard below compares the reply's
+    // query against this, not against the last query that happened to land.
+    this.refQueryLatest = query
+    const sid = this.activeSessionId
+    if (sid === undefined || !this.d.client.supports('fileReferences/list')) {
+      this.d.setState({ refCandidates: [], refQuery: query })
+      return
+    }
+    let candidates: FileReferenceCandidate[]
+    try {
+      candidates = await this.d.client.listFileReferences(sid, query)
+    } catch (e) {
+      this.d.log.error('fileReferences/list: ' + (e instanceof Error ? e.message : String(e)))
+      candidates = []
+    }
+    // Stale-response guard: a slow early query must not overwrite the list a
+    // later keystroke already replaced.
+    if (this.refQueryLatest !== query) return
+    // `refQuery` and `refCandidates` must be published TOGETHER — the composer
+    // only draws a batch whose query matches the token it is asking about, so
+    // updating the candidates without the query leaves the menu hidden.
+    this.d.setState({ refCandidates: candidates.slice(0, 50), refQuery: query })
   }
 
   // ─── v0.0.9 surfaces (catalog / commands / projections) ──────────────────
@@ -808,23 +957,103 @@ export class AppController {
     this.d.setState({ search: this.search })
   }
 
-  /** F8: attach local files (base64 payloads) to the active session. */
-  async uploadAttachment(attachments: Array<{ name: string; content: string }>): Promise<void> {
-    const sid = this.activeSessionId
-    if (sid === undefined) return
-    if (attachments.length === 0) return
-    if (!this.d.client.supports('session/attachment')) {
-      this.d.notifyError('This host does not serve session/attachment.')
-      return
+  // ─── composer attachments ──────────────────────────────────────────────────
+
+  /** The chips the webview renders. Metadata only — see {@link HeldAttachment}. */
+  private pendingChips(): PendingChip[] {
+    return this.pending.map((p) => ({
+      id: p.id,
+      kind: p.kind,
+      name: p.name,
+      bytes: p.bytes,
+      ...(p.mediaType === undefined ? {} : { mediaType: p.mediaType }),
+    }))
+  }
+
+  /**
+   * Take attachments handed up by the composer (paste, drop, or the file
+   * picker) and hold them for the next prompt.
+   *
+   * Validated here rather than at the host: the four admitted raster formats,
+   * the 20 MiB per-image ceiling and the 20-images-per-message ceiling are all
+   * upstream constants, so a bad pick fails immediately with a sentence instead
+   * of after a round trip.
+   */
+  addPendingItems(items: readonly PendingAttachmentPayload[]): void {
+    let images = this.pending.filter((p) => p.kind === 'image').length
+    for (const item of items) {
+      const bytes = base64ByteLength(item.data)
+      const name = item.name.trim() === '' ? defaultAttachmentName(item.kind, item.mediaType) : item.name.trim()
+      const reuse = item.key !== undefined
+        && !this.pending.some((p) => p.id === item.key)
+        && !items.some((other) => other !== item && other.key === item.key)
+      const id = reuse ? (item.key as string) : nextAttachmentId()
+      if (item.kind === 'image') {
+        const mediaType = normalizeImageMediaType(item.mediaType, name)
+        if (mediaType === undefined) {
+          this.d.notifyError(`${name}: only PNG, JPEG, WebP and GIF images can be sent to the harness.`)
+          continue
+        }
+        if (bytes > MAX_IMAGE_BYTES) {
+          this.d.notifyError(`${name} is ${formatMiB(bytes)} — the host caps a single image at 20 MB.`)
+          continue
+        }
+        if (images >= MAX_IMAGES_PER_MESSAGE) {
+          this.d.notifyError(`At most ${String(MAX_IMAGES_PER_MESSAGE)} images fit in one message.`)
+          break
+        }
+        images += 1
+        this.pending.push({ id, kind: 'image', name, bytes, mediaType, data: item.data })
+        continue
+      }
+      this.pending.push({ id, kind: 'file', name, bytes, data: item.data })
     }
-    try {
-      const res = await this.d.client.uploadAttachment(sid, attachments)
-      this.d.notifyInfo(`DeepSeek Harness: attached ${String(attachments.length)} file(s).`)
-      this.d.log.info('attachment result: ' + JSON.stringify(res))
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      this.d.notifyError('Attachment failed: ' + msg)
+    this.d.log.info(`attachments: holding ${String(this.pending.length)} item(s)`)
+    this.d.setState({ pending: this.pendingChips() })
+    this.d.pushState()
+  }
+
+  removePending(id: string): void {
+    const next = this.pending.filter((p) => p.id !== id)
+    if (next.length === this.pending.length) return
+    this.pending = next
+    this.d.setState({ pending: this.pendingChips() })
+    this.d.pushState()
+  }
+
+  clearPending(): void {
+    if (this.pending.length === 0) return
+    this.pending = []
+    this.d.setState({ pending: [] })
+    this.d.pushState()
+  }
+
+  /**
+   * Everything the prompt needs, or a throw the caller reports verbatim.
+   *
+   * Images need nothing extra: they ride the prompt as base64 parts and the host
+   * promotes them to durable refs during admission. Files are staged first, over
+   * a route of their own — a prompt part can only ever carry a receipt, never
+   * bytes.
+   */
+  private async stagePending(sessionId: SessionId): Promise<{
+    images: { mediaType: ImageMediaType; data: string; name: string }[]
+    files: { receiptId: string }[]
+  }> {
+    const images: { mediaType: ImageMediaType; data: string; name: string }[] = []
+    const files: { receiptId: string }[] = []
+    for (const held of this.pending) {
+      if (held.kind === 'image') {
+        images.push({ mediaType: held.mediaType ?? 'image/png', data: held.data, name: held.name })
+        continue
+      }
+      const value = await this.d.client.uploadFile(sessionId, held.name, Buffer.from(held.data, 'base64'))
+      if (value.receiptId === undefined) {
+        throw new Error(`The host accepted ${held.name} but returned no receipt.`)
+      }
+      files.push({ receiptId: value.receiptId })
     }
+    return { images, files }
   }
 
   /** Ask the host to compact the session's context. */
@@ -908,7 +1137,21 @@ export class AppController {
       // What the host serves decides which controls the panel may offer.
       capabilities: { ...this.d.client.capabilities() },
     })
+    this.syncOfflineContext(conn.connection !== 'connected')
     this.d.pushState()
+  }
+
+  /**
+   * Mirror "not connected" into a context key.
+   *
+   * The view-title Connect button is gated on it (package.json > menus >
+   * view/title). VS Code evaluates when-clauses only when a context key
+   * actually changes, so this must be set rather than just rendered.
+   */
+  private syncOfflineContext(offline: boolean): void {
+    if (this.offlineContext === offline) return
+    this.offlineContext = offline
+    void this.d.vscodeAPI.commands.executeCommand('setContext', 'deepseekHarness.offline', offline)
   }
 }
 

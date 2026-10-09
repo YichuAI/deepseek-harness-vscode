@@ -20,6 +20,9 @@ body {
 .toggle-badge { font-size: 9px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); border-radius: 8px; padding: 0 4px; margin-left: 2px; }
 .row { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
 .status { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+/* The manual connect/retry affordance rides in the status row, right-aligned so
+   it reads as an action on the status rather than another toolbar icon. */
+.status #connect { margin-left: auto; padding: 2px 8px; font-size: 11px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .dot.disconnected { background: var(--vscode-disabledForeground, #888); }
 .dot.connecting { background: var(--vscode-charts-yellow, #ca9c2e); animation: pulse 1s infinite; }
@@ -236,18 +239,41 @@ textarea { resize: none; min-height: 60px; max-height: 200px; width: 100%; }
 .t-review .review-actions button { flex: 1; padding: 3px 10px; font-size: 11px; }
 
 /* ── v0.0.9: queued messages / slash completion / usage panel ───────────── */
-#queue-bar { border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.25)); border-radius: 4px; margin-bottom: 6px; padding: 5px 7px; }
-#queue-bar .queue-title { font-size: 10px; color: var(--vscode-descriptionForeground); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .4px; }
+#queue-bar { border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.25)); border-radius: 4px; margin-bottom: 6px; padding: 5px 7px; }#queue-bar .queue-title { font-size: 10px; color: var(--vscode-descriptionForeground); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .4px; }
 #queue-bar .queue-item { display: flex; align-items: center; gap: 5px; padding: 3px 0; }
 #queue-bar .queue-item + .queue-item { border-top: 1px dashed var(--vscode-panel-border, rgba(128,128,128,.2)); }
 #queue-bar .queue-text { flex: 1; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-charts-yellow, #ca9c2e); }
 #queue-bar .queue-item button { padding: 1px 6px; font-size: 10px; flex: 0 0 auto; }
+
+/* Composer attachments: chips above the textarea. Images that were pasted get a
+   local blob thumbnail, so the preview never travels as base64. */
+.attach-bar { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 6px; }
+.attach-chip { display: flex; align-items: center; gap: 5px; max-width: 100%; padding: 3px 5px 3px 3px; border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.3)); border-radius: 4px; background: var(--vscode-input-background); }
+.attach-thumb { width: 26px; height: 26px; border-radius: 3px; object-fit: cover; flex: 0 0 auto; background: var(--vscode-editorWidget-background, #222); }
+.attach-glyph { width: 26px; height: 26px; border-radius: 3px; flex: 0 0 auto; display: flex; align-items: center; justify-content: center; font-size: 13px; background: var(--vscode-editorWidget-background, #222); }
+.attach-name { font-size: 11px; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-size { font-size: 10px; color: var(--vscode-descriptionForeground); flex: 0 0 auto; }
+.attach-chip .attach-x { padding: 0 4px; font-size: 10px; flex: 0 0 auto; background: transparent; color: var(--vscode-descriptionForeground); }
+.attach-chip .attach-x:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,.2)); }
+#input-area.drag-over { outline: 1px dashed var(--vscode-focusBorder); outline-offset: -3px; }
+
 
 #slash-popup { position: relative; border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.3)); border-radius: 4px; margin-bottom: 4px; background: var(--vscode-editorWidget-background, var(--vscode-input-background)); box-shadow: 0 2px 8px rgba(0,0,0,.35); max-height: 180px; overflow-y: auto; z-index: 5; }
 #slash-popup .slash-row { display: flex; gap: 8px; align-items: baseline; padding: 4px 8px; cursor: pointer; }
 #slash-popup .slash-row.active { background: var(--vscode-list-activeSelectionBackground, rgba(128,128,128,.25)); color: var(--vscode-list-activeSelectionForeground, inherit); }
 #slash-popup .slash-name { font-family: var(--vscode-editor-font-family, monospace); font-weight: 600; font-size: 11.5px; flex: 0 0 auto; }
 #slash-popup .slash-desc { font-size: 10.5px; color: var(--vscode-descriptionForeground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── @file mention completion (host fileReferences/list) ─────────────────── */
+/* Deliberately the same visual grammar as the slash popup: both are composer
+   completions sitting directly above the textarea, and a user who has learned
+   one should not have to learn the other. */
+#at-popup { position: relative; border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.3)); border-radius: 4px; margin-bottom: 4px; background: var(--vscode-editorWidget-background, var(--vscode-input-background)); box-shadow: 0 2px 8px rgba(0,0,0,.35); max-height: 200px; overflow-y: auto; z-index: 5; }
+#at-popup .at-row { display: flex; gap: 8px; align-items: baseline; padding: 4px 8px; cursor: pointer; }
+#at-popup .at-row.active { background: var(--vscode-list-activeSelectionBackground, rgba(128,128,128,.25)); color: var(--vscode-list-activeSelectionForeground, inherit); }
+#at-popup .at-glyph { flex: 0 0 auto; font-size: 11px; opacity: .85; }
+#at-popup .at-path { font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+#at-popup .at-kind { flex: 0 0 auto; font-size: 10px; color: var(--vscode-descriptionForeground); }
 
 .steer-wrap { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--vscode-descriptionForeground); cursor: pointer; flex: 0 0 auto; margin-left: auto; }
 .steer-wrap input { width: auto; margin: 0; }

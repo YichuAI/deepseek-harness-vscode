@@ -39,12 +39,12 @@ npm run typecheck          # → tsc --noEmit, exit 0
 npm run build              # → dist/extension.js
 
 # 1.3 protocol test (fake harness — no dsh web needed)
-npm run protocol-test      # → all 50 assertions ✓
+npm run protocol-test      # → all 178 assertions ✓
 
 # 1.4 integration test (writes a session — needs dsh web running)
 #     start dsh web first in another terminal:
 #       cd ../deepseek-harness && npm run dsh -- web
-npm run integration-test   # → 11/11 checks ✓, closed loop OK
+npm run integration-test   # → 21/21 checks ✓, closed loop OK
 
 # 1.6 package the VSIX
 npm run package            # → harness-connector-deepseek-<ver>.vsix
@@ -58,14 +58,15 @@ Manual checks:
       `ARCHITECTURE.md` / `RELEASE.md` has been mirrored into its `*.zh-CN.md`
       twin. This is a standing rule, not a per-release judgement call.
 - [ ] `CHANGELOG.md` and `ARCHITECTURE.md` still quote the **current** assertion
-      count from `npm run protocol-test` (it has grown 50 → 64 → 98 → 83 as the
-      rc.2 rewrite replaced the rc.6 fake harness; stale counts are the most common
-      doc drift here).
+      count from `npm run protocol-test` (it has grown 50 → 64 → 98 → 83 → 156 →
+      178 as the rc.2 rewrite replaced the rc.6 fake harness; stale counts are the
+      most common doc drift here).
 - [ ] `LICENSE` present (MIT).
 - [ ] No secrets / API keys / real prompt content in `test/fixtures/`
       (fixtures must use `<redacted:...>` placeholders).
-- [ ] `.vscodeignore` excludes `src/`, `scripts/`, `test/`, configs
-      (only `dist/`, `media/`, docs, `package.json`, `LICENSE` ship in the VSIX).
+- [ ] `.vscodeignore` excludes `src/`, `scripts/`, `test/`, configs **and
+      `.workbuddy/`** (only `dist/`, `media/`, docs, `package.json`, `LICENSE`
+      ship in the VSIX).
 - [ ] `git status` clean (no uncommitted changes).
 
 ---
@@ -77,21 +78,27 @@ Manual checks:
 unzip -l harness-connector-deepseek-<ver>.vsix
 ```
 
-Expected (v0.0.1 ≈ 8 files, ~18 KB):
+Expected (v0.1.3 = 14 files, ~239 KB):
 
 ```
 [Content_Types].xml
 extension.vsixmanifest
 extension/ARCHITECTURE.md
+extension/ARCHITECTURE.zh-CN.md
+extension/CHANGELOG.zh-CN.md
 extension/LICENSE.txt
+extension/README.zh-CN.md
+extension/changelog.md
 extension/package.json
 extension/readme.md
 extension/dist/extension.js
+extension/media/icon.png
 extension/media/icon.svg
+extension/media/markdown-it.umd.min.js
 ```
 
-If `src/`, `scripts/`, `test/`, `node_modules/`, or `*.map` appear, the
-`.vscodeignore` is wrong — fix it and re-package.
+If `src/`, `scripts/`, `test/`, `node_modules/`, `.workbuddy/`, or `*.map`
+appear, the `.vscodeignore` is wrong — fix it and re-package.
 
 ---
 

@@ -1,158 +1,121 @@
 /**
- * Context collector — gathers VS Code editor state into a PromptContext.
+ * Context collector — `@file` mention handling for the composer.
  *
- * Two responsibilities:
- *   1. Parse @file references from the prompt text.
- *      Syntax: @file:/abs/path          → whole file
- *              @file:/abs/path:L10      → single line
- *              @file:/abs/path:L10-L20  → line range
- *      The @file tokens are STRIPPED from the prompt text so they don't
- *      pollute the conversation KV cache.
+ * The grammar is the harness's own, not this plugin's invention
+ * (`@deepseek-ai/dsh-file-reference/grammar`, shared by the terminal and the
+ * web composer):
  *
- *   2. Collect active editor state (selection, active file path).
- *      Only non-empty selections are included. The active file is always
- *      included when an editor is open.
+ *   @path                  a mention at the start of input or after whitespace
+ *   @"path with spaces"    quoting is required when the path contains whitespace
+ *   @dir/                  a directory keeps its trailing slash
  *
- * KV cache consistency: until DSH 0.1.6 the context travelled in
- * `payload.context`, a separate field the backend treated as ephemeral
- * metadata. That field was removed from `SessionPromptRequest`, so the
- * context is now rendered into the prompt *text* by `renderContextBlock()`
- * instead — placed after the message so the user's own words stay the stable
- * prefix of the turn.
+ * A mention is ordinary prompt text. Nothing is attached and nothing is read:
+ * the host's `FILE_REFERENCE_PROMPT` guidance tells the model to call a
+ * filesystem tool when it wants the contents. This module used to inline the
+ * referenced file's bytes into the message instead, which is what "add to chat
+ * pasted the whole file" was — it made every re-send of the same mention a
+ * fresh, uncacheable copy of the file.
+ *
+ * This module owns two things only:
+ *   1. `findMentions` — what the composer is currently pointing at, for the
+ *      chip preview. It never rewrites the text.
+ *   2. `formatMention` — the exact string a pick or a context-menu command
+ *      should insert.
+ *
+ * There is a second, deliberately duplicated copy of the grammar inside the
+ * webview script (`src/view/client.ts`), because the webview cannot import
+ * extension-host code. Both are pinned by the protocol tests.
  */
 
-import type * as vscode from 'vscode'
-import type {
-  ActiveFileContext, FileReference, PromptContext, SelectionContext,
-} from '../harness/protocol.ts'
-
-/** Regex matching @file:path, @file:path:L10, @file:path:L10-L20.
- *  Path may contain any chars except whitespace; line ranges use L<digits>.
- *  The negative lookahead (?!L\d) prevents :L<digits> from being consumed
- *  as part of the path (critical for Windows paths like e:\folder\file.ts:L10). */
-const AT_FILE_RE = /@file:([^\s:]+(?::(?!L\d)\\?[^\s:]*)*)(?::L(\d+)(?:-L(\d+))?)?/g
-
-/**
- * Extract @file references from prompt text. Returns the cleaned text
- * (with @file tokens removed) and the parsed FileReference array.
- */
-export function parseAtFileReferences(text: string): {
-  cleanedText: string
-  files: FileReference[]
-} {
-  const files: FileReference[] = []
-  const cleanedText = text.replace(AT_FILE_RE, (_match, rawPath: string, lineStartStr?: string, lineEndStr?: string) => {
-    // Normalize path: handle Windows drive letters (C:\... stays as-is)
-    const filePath = rawPath.replace(/\\/g, '/')
-    const ref: FileReference = { path: filePath }
-    if (lineStartStr) {
-      ref.lineStart = parseInt(lineStartStr, 10)
-      if (lineEndStr) ref.lineEnd = parseInt(lineEndStr, 10)
-    }
-    files.push(ref)
-    return '' // strip the @file token from the prompt text
-  }).replace(/\s{2,}/g, ' ').trim()
-
-  return { cleanedText, files }
+/** One `@` mention found in composer text. */
+export interface FileMention {
+  /** Path exactly as typed, without the leading `@` and without line-range suffix. */
+  path: string
+  /** Whether the mention was written in the quoted form. */
+  quoted: boolean
+  /** 1-indexed inclusive start line, when the mention carried `:L<n>` / `:L<n>-L<m>`. */
+  lineStart?: number
+  /** 1-indexed inclusive end line, when the mention carried a range. */
+  lineEnd?: number
+  /** Index of the `@` in the source text. */
+  start: number
+  /** Index just past the whole mention. */
+  end: number
 }
 
 /**
- * Collect context from the active VS Code editor.
- * Returns undefined if there's no meaningful context to attach.
+ * `@"…"` or `@bare`, each optionally followed by `:L<n>` / `:L<n>-L<m>`.
+ *
+ * The bare form excludes `"` so a quoted mention cannot be swallowed by it, and
+ * the range suffix is matched outside the closing quote so
+ * `@"my file.ts":L10-L20` parses as one mention.
  */
-export function collectEditorContext(vscodeWindow: typeof vscode.window): PromptContext | undefined {
-  const editor = vscodeWindow.activeTextEditor
-  if (!editor) return undefined
-  // Skip non-file documents (Output panel, Settings, etc.) — their URIs are not file paths
-  if (editor.document.uri.scheme !== 'file') return undefined
+const MENTION_RE = /@(?:"([^"\n]*)"|([^\s"]+))(?::L(\d+)(?:-L(\d+))?)?/g
 
-  const ctx: PromptContext = {}
-
-  // Active file
-  const activeFile: ActiveFileContext = {
-    path: editor.document.uri.fsPath.replace(/\\/g, '/'),
-  }
-  ctx.activeFile = activeFile
-
-  // Selection (only non-empty)
-  const sel = editor.selection
-  if (!sel.isEmpty) {
-    const selectedText = editor.document.getText(sel)
-    if (selectedText.trim()) {
-      const selection: SelectionContext = {
-        text: selectedText,
-        path: activeFile.path,
-        lineStart: sel.start.line + 1, // 1-indexed
-        lineEnd: sel.end.line + 1,
-      }
-      ctx.selection = selection
-    }
-  }
-
-  return ctx
+/** True when `@` at `index` is a mention trigger (start of text or after whitespace). */
+function triggersAt(text: string, index: number): boolean {
+  if (index === 0) return true
+  const prev = text[index - 1] ?? ''
+  // An `@` inside another token (an email address is the common case) is not a
+  // mention: the grammar only fires at the start of input or after whitespace.
+  return /\s/u.test(prev)
 }
 
 /**
- * Merge @file references into an existing PromptContext (from editor state).
- * @file refs take priority — they're explicit user intent.
+ * Find every `@` mention in the composer text.
+ *
+ * Read-only: unlike the old `@file:` parser this never strips anything, because
+ * the mention *is* the payload the model should see.
  */
-export function mergeContext(
-  editorCtx: PromptContext | undefined,
-  atFileRefs: FileReference[],
-): PromptContext | undefined {
-  if (atFileRefs.length === 0 && !editorCtx) return undefined
-
-  const merged: PromptContext = { ...editorCtx }
-
-  if (atFileRefs.length > 0) {
-    // Deduplicate by path+range
-    const existing = new Set(
-      (merged.files ?? []).map(f => `${f.path}:${f.lineStart ?? ''}:${f.lineEnd ?? ''}`)
-    )
-    const newRefs = atFileRefs.filter(f => {
-      const key = `${f.path}:${f.lineStart ?? ''}:${f.lineEnd ?? ''}`
-      return !existing.has(key)
-    })
-    merged.files = [...(merged.files ?? []), ...newRefs]
+export function findMentions(text: string): FileMention[] {
+  const found: FileMention[] = []
+  const re = new RegExp(MENTION_RE.source, 'g')
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text)) !== null) {
+    if (!triggersAt(text, m.index)) continue
+    const quoted = m[1] !== undefined
+    const path = (quoted ? m[1] : m[2]) ?? ''
+    if (path === '') continue
+    const mention: FileMention = {
+      path,
+      quoted,
+      start: m.index,
+      end: m.index + m[0].length,
+    }
+    if (m[3] !== undefined) {
+      mention.lineStart = parseInt(m[3], 10)
+      if (m[4] !== undefined) mention.lineEnd = parseInt(m[4], 10)
+    }
+    found.push(mention)
   }
+  return found
+}
 
-  return merged
+export interface FormatMentionOptions {
+  /** Directory candidates keep a trailing slash (and stay quoted if quoted). */
+  kind?: 'file' | 'directory'
+  /** Retain an explicitly opened quote even when the path would not need one. */
+  preserveQuote?: boolean
+  /** 1-indexed line or line range to append as `:L<n>` / `:L<n>-L<m>`. */
+  lineStart?: number
+  lineEnd?: number
 }
 
 /**
- * Render a PromptContext as a text block appended to the prompt.
+ * Render a path as prompt text, mirroring the host's `formatFileMention`.
  *
- * DSH 0.1.6 removed the `context` field from `SessionPromptRequest`, so editor
- * metadata has to travel inside the message. The block is appended *after* the
- * user's own words: the turn's stable prefix therefore stays the user's text,
- * and successive prompts with the same preamble keep a shared KV prefix.
- *
- * @param ctx - collected editor/@file context, or undefined.
- * @returns the block, or an empty string when there is nothing to say.
+ * @returns the mention, or `undefined` for a path the grammar cannot express
+ *          safely (a control character, or an embedded double quote).
  */
-export function renderContextBlock(ctx: PromptContext | undefined): string {
-  if (!ctx) return ''
-  const lines: string[] = []
-  if (ctx.activeFile?.path) {
-    lines.push(`- Active file: ${ctx.activeFile.path}`)
-  }
-  if (ctx.files && ctx.files.length > 0) {
-    for (const f of ctx.files) {
-      const range = f.lineStart
-        ? `:L${String(f.lineStart)}${f.lineEnd ? `-L${String(f.lineEnd)}` : ''}`
-        : ''
-      lines.push(`- Referenced file: ${f.path}${range}`)
-    }
-  }
-  if (ctx.selection) {
-    const { path, lineStart, lineEnd, text } = ctx.selection
-    lines.push(
-      `- Selection in ${path}:L${String(lineStart)}-L${String(lineEnd)}:`,
-      '```',
-      text,
-      '```',
-    )
-  }
-  if (lines.length === 0) return ''
-  return `<context>\n${lines.join('\n')}\n</context>`
+export function formatMention(filePath: string, opts: FormatMentionOptions = {}): string | undefined {
+  const normalized = filePath.replace(/\\/g, '/')
+  const withSlash = opts.kind === 'directory' && !normalized.endsWith('/') ? `${normalized}/` : normalized
+  if (/[\u0000-\u001f\u007f-\u009f"]/u.test(withSlash)) return undefined
+  const quoted = opts.preserveQuote === true || /\s/u.test(withSlash)
+  const head = quoted ? `@"${withSlash}"` : `@${withSlash}`
+  if (opts.lineStart === undefined) return head
+  const range = opts.lineEnd === undefined || opts.lineEnd === opts.lineStart
+    ? `:L${String(opts.lineStart)}`
+    : `:L${String(opts.lineStart)}-L${String(opts.lineEnd)}`
+  return head + range
 }

@@ -27,6 +27,12 @@
  * `local-credentials.ts` for why that is permission-equivalent rather than an
  * escalation. Both paths produce the exact cookie shape the host verifies; gated
  * behind `allowLocalMint` so a deployment can force the token exchange.
+ *
+ * In practice the extension only ever uses the local mint: the harness rotates
+ * its launch token per process, so asking the user to paste a line that `dsh web`
+ * printed is a fragile detour. {@link BrowserSessionAuth.adoptLaunchUrl} is kept
+ * because it is the contract of record (and is still exercised by the protocol
+ * tests), but no command exposes it any more.
  */
 
 import { createHash, createHmac } from 'node:crypto'

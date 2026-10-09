@@ -1,29 +1,38 @@
 /**
  * protocol-test.ts — drives the REAL transport code against a fake harness.
  *
- * The runtime we actually target is DSH `0.2.0-rc.2` (the version installed
- * locally; verified against the bundled `@deepseek-ai/dsh-*` source and a live
- * `dsh web` on this machine). The script implements the *server half* of that
- * contract exactly and points the production client at it, so the handshake is
- * exercised end to end without a real `dsh web`.
+ * The runtime we actually target is DSH `0.2.1-alpha.2` (the version running on
+ * this machine; verified against the workspace source and a live `dsh web`). The
+ * script implements the *server half* of that contract exactly and points the
+ * production client at it, so the handshake is exercised end to end without a
+ * real `dsh web`.
  *
- * What rc.2 looks like (and therefore what this file proves):
+ * What that contract looks like (and therefore what this file proves):
  *   • endpoints are `POST /api/<ns>/<method>` (slash style), payload is wrapped:
  *     `{ args: <inner> }`. The `<inner>` field is the Typert parameter wire name —
- *     `session/list` uses `_request`, almost everything else uses `request`, and a
- *     few arg-less methods take `{}`.
- *   • the event socket is a multiplexed Remote-stream WebSocket
- *     `ws://…/api/remote.mux`. The client opens it, sends ONE `open` frame
- *     `{ type:'open', streamId, endpoint:'$events', payload:{args:{}} }`, and the
- *     Host replies with frames `{ type:'item'|'end'|'error', streamId, value }`.
- *     The FIRST item's value is `{ type:'ready', clientId, host:{home} }` — that
- *     is the only host-identity frame; there is NO `host.describe` in rc.2.
+ *     `session/list` uses `_request`, most methods use `request`, and a few
+ *     (`commands/*`, `fileReferences/list`) take a bare object.
+ *   • the event carrier is ONE multiplexed Remote-stream WebSocket per logical
+ *     stream, `ws://…/api/remote.mux`. The client sends exactly one `open` frame
+ *     `{ type:'open', streamId, endpoint, payload:{args} }` and the Host replies
+ *     with `{ type:'item'|'end'|'error', streamId, value }`. Any further client
+ *     message is a protocol violation (the Host closes 1008 `downlink only`).
+ *   • endpoint `$events` carries a *fixed allowlist* of forwarded Host events —
+ *     `{ type:'emit', event, args }` and the answerable
+ *     `{ type:'waterfall', event, eventId, agentId, request }` — and nothing else.
+ *     Its first item is `{ type:'ready', clientId, host:{home} }`, the only
+ *     host-identity frame (there is NO `host.describe`).
+ *   • endpoint `session/follow` carries one session's conversation:
+ *     `{type:'snapshot'}` → `{type:'event', event}` → live
+ *     `{type:'assistant-stream', frame}` (start/chunk/end). This split is the
+ *     whole point: `$events` stopped carrying conversation traffic, which is why
+ *     the sidebar used to connect and then never receive a reply.
  *   • history is `session/page` (unary), not `session/history`.
- *   • approvals arrive as `approval/request` (a "waterfall" event) and are settled
- *     via `POST /api/$events/result` with `{ clientId, eventId, outcome }` —
- *     NOT `/api/respond`.
- *   • rc.2 REQUIRES a browser-session cookie (401 without one); the autoSession /
- *     token-exchange auth machinery is exercised in step E.
+ *   • approvals arrive as the `approval/request` waterfall on `$events` and are
+ *     settled via `POST /api/$events/result` with `{ clientId, eventId, outcome }`
+ *     — NOT `/api/respond`.
+ *   • the host REQUIRES a browser-session cookie (401 without one); the
+ *     autoSession / token-exchange auth machinery is exercised in step E.
  *
  * Run:  npx tsx scripts/protocol-test.ts
  */
@@ -36,7 +45,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Duplex } from 'node:stream'
 import { BrowserSessionAuth } from '../src/harness/auth.ts'
-import { HarnessClient } from '../src/harness/client.ts'
+import { HarnessClient, HarnessRpcError } from '../src/harness/client.ts'
 import type { MuxFrame, ReadyFrame, RemoteEventResult } from '../src/harness/protocol.ts'
 // The webview script is a plain template string, so tsc never looks inside it.
 // These two give the regression gate eyes on it (see step G).
@@ -44,7 +53,7 @@ import { CLIENT_SCRIPT } from '../src/view/client.ts'
 import { HTML_SKELETON } from '../src/view/html.ts'
 import { ControlSurface } from '../src/conversation/control.ts'
 import { cookieNameForAuthority } from '../src/harness/auth.ts'
-import { negotiateWire, wireEndpoint } from '../src/harness/wire.ts'
+import { isMissingMethodError, isShapeRejection, negotiateWire, wireEndpoint } from '../src/harness/wire.ts'
 import { findHarnessWorkspace } from '../src/workspace/binding.ts'
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
@@ -78,6 +87,39 @@ function lastOf<T>(a: T[]): T | undefined {
   return a.length > 0 ? a[a.length - 1] : undefined
 }
 
+/**
+ * Import `AppController` in a process where `vscode` does not exist.
+ *
+ * The controller itself only imports VS Code for types, but it reaches
+ * `src/review/materializer.ts`, which calls `vscode.Uri.file` at runtime. That
+ * module is only resolvable inside the extension host, so patch Node's CJS
+ * loader for the duration of this process and load the controller lazily.
+ * Nothing else in this file touches a VS Code API.
+ */
+async function loadControllerWithVscodeStub(): Promise<typeof import('../src/app/controller.ts')> {
+  const moduleApi = await import('node:module')
+  const loadable = (moduleApi.default ?? moduleApi) as unknown as {
+    _load: (request: string, parent: unknown, isMain: boolean) => unknown
+  }
+  const original = loadable._load
+  const stubUri = (p: string): Record<string, unknown> => ({
+    fsPath: p, scheme: 'file', path: p, toString: () => `file://${p}`,
+  })
+  const stub: Record<string, unknown> = {
+    Uri: { file: stubUri, parse: stubUri, joinPath: (base: { fsPath?: string }, ...parts: string[]) => stubUri([base.fsPath ?? '', ...parts].join('/')) },
+    Position: class { constructor(public line: number, public character: number) {} },
+    Range: class { constructor(public start: unknown, public end: unknown) {} },
+    Disposable: class { dispose(): void {} },
+    EventEmitter: class { event = (): void => undefined; fire(): void {}; dispose(): void {} },
+    window: {}, workspace: {}, commands: {}, languages: {}, env: {},
+  }
+  loadable._load = function (request: string, parent: unknown, isMain: boolean): unknown {
+    if (request === 'vscode') return stub
+    return original.call(this, request, parent, isMain)
+  }
+  return import('../src/app/controller.ts')
+}
+
 // ─── webview boot harness (step G) ────────────────────────────────────────────
 type StubEl = Record<string, unknown>
 function makeStubEl(id: string): StubEl {
@@ -102,7 +144,8 @@ function bootWebview(
   script: string,
   skeleton: string,
   markdownItFactory?: () => unknown,
-): { handlerRegistered: boolean; statusText: string; error: string } {
+  connection = 'connected',
+): { handlerRegistered: boolean; statusText: string; connectVisible: boolean; connectLabel: string; connectDisabled: boolean; error: string } {
   const ids = [...skeleton.matchAll(/id="([^"]+)"/g)].map((m) => m[1] as string)
   const els = new Map(ids.map((id) => [id, makeStubEl(id)]))
   let handler: ((e: unknown) => void) | undefined
@@ -113,14 +156,18 @@ function bootWebview(
   // Default: a real-shaped MarkdownIt, as the shipped UMD bundle provides.
   g.MarkdownIt = markdownItFactory
     ?? function () { return { renderer: { rules: {} as Record<string, unknown> }, render: (s: string) => String(s ?? '') } }
+  const fail = (message: string, registered = false) => ({
+    handlerRegistered: registered, statusText: '', connectVisible: false,
+    connectLabel: '', connectDisabled: false, error: message,
+  })
   try {
     new Function(script)()
   } catch (e) {
-    return { handlerRegistered: false, statusText: '', error: (e as Error).message }
+    return fail((e as Error).message)
   }
-  if (typeof handler !== 'function') return { handlerRegistered: false, statusText: '', error: 'no state listener registered' }
+  if (typeof handler !== 'function') return fail('no state listener registered')
   const state = {
-    connection: 'connected', sessions: [], sending: false, canStop: false,
+    connection, sessions: [], sending: false, canStop: false,
     showSystemMessages: false, systemMessageCount: 0, autoApprove: false, renderVersion: 1,
     capabilities: {}, commands: [], queue: [], eventLog: [], search: null,
     workspace: { workspaceId: '/w', title: 'w', path: '/w' },
@@ -128,11 +175,15 @@ function bootWebview(
   try {
     handler({ data: { kind: 'state', state } })
   } catch (e) {
-    return { handlerRegistered: true, statusText: '', error: (e as Error).message }
+    return fail((e as Error).message, true)
   }
+  const btn = els.get('connect') as { textContent: string; disabled: boolean; style: Record<string, string> }
   return {
     handlerRegistered: true,
     statusText: String((els.get('status-text') as { textContent: string }).textContent),
+    connectVisible: btn.style.display !== 'none',
+    connectLabel: String(btn.textContent),
+    connectDisabled: btn.disabled === true,
     error: '',
   }
 }
@@ -202,6 +253,7 @@ const PRESENT_CONTROLS = new Set<string>([
   'session/fork', 'session/rename', 'session/selectModel', 'session/updateQueue',
   'workspace/archiveSession', 'session/page', 'workspace/create', 'session/modelCatalog',
   'commands/execute', 'commands/list', 'session/search', 'session/attachment',
+  'fileReferences/list',
 ])
 
 function okBody(value: unknown): string {
@@ -214,8 +266,12 @@ function failBody(code: string, message: string): string {
 interface FakeMuxState {
   open: boolean
   streamId?: string
+  /** Which logical stream this socket subscribed to. */
+  endpoint?: string
   readySent: boolean
   pending: Record<string, unknown>[]
+  /** Sockets that already received a `session/follow` opening snapshot. */
+  followSnapshotSent: boolean
 }
 
 /** One fake harness. `auth:'none'` = no cookie needed; `'cookie'` = gated host. */
@@ -226,8 +282,15 @@ function makeHarness(auth: AuthMode, controls: Set<string>): {
     responses: RemoteEventResult[]
     muxOpened: boolean
     muxPath: string | undefined
+    /** `open` frames the client sent, one per connected logical stream. */
+    streams: { endpoint?: unknown; streamId?: unknown; payload?: unknown }[]
+    /** Hits on the raw-byte staging route (file attachments). */
+    uploads: { sessionId: string; name: string; mediaType: string; bytes: number; head: string }[]
   }
-  pushFrame: (frame: Record<string, unknown>) => void
+  /** Push one forwarded `$events` frame (emit / waterfall / ready). */
+  pushEvent: (frame: Record<string, unknown>) => void
+  /** Push one `session/follow` frame (snapshot parts / event / assistant-stream). */
+  pushFollow: (frame: Record<string, unknown>) => void
   start: () => Promise<number>
   stop: () => Promise<void>
 } {
@@ -237,6 +300,9 @@ function makeHarness(auth: AuthMode, controls: Set<string>): {
     responses: [] as RemoteEventResult[],
     muxOpened: false,
     muxPath: undefined as string | undefined,
+    streams: [] as { endpoint?: unknown; streamId?: unknown; payload?: unknown }[],
+    /** Raw-byte staging route hits (file attachments do not ride the RPC surface). */
+    uploads: [] as { sessionId: string; name: string; mediaType: string; bytes: number; head: string }[],
   }
   const muxSockets = new Map<Duplex, FakeMuxState>()
 
@@ -277,6 +343,20 @@ function makeHarness(auth: AuthMode, controls: Set<string>): {
         ] }) }
       case 'session/page':
         return controls.has('session/page') ? { status: 200, body: okBody({ records: [{ type: 'event', event: { type: 'user/message', seq: 0, time: 1, data: { content: [{ type: 'text', text: 'hi' }] } } }], hasMore: false }) } : missing()
+      case 'session/create': {
+        if (!controls.has('session/create')) return missing()
+        const inner = (args['request'] as Record<string, unknown> | undefined) ?? args
+        const workspaceId = inner['workspaceId']
+        // Mirrors the live host: the workspaceId must be one the host ISSUED.
+        // `listWorkspaces()` hands back a path, and `workspace/create` is what
+        // turns a path into a real record — so a path here is a business
+        // `workspace/not-found`, not a missing method. That distinction is what
+        // section D2 pins.
+        if (workspaceId !== 'ws-new') {
+          return { status: 200, body: failBody('workspace/not-found', `workspace ${JSON.stringify(workspaceId)} not found`) }
+        }
+        return { status: 200, body: okBody({ sessionId: 'session-new', agentPreset: 'standard' }) }
+      }
       case 'workspace/create': {
         if (!controls.has('workspace/create')) return missing()
         const inner = (args['request'] as Record<string, unknown> | undefined) ?? args
@@ -331,10 +411,29 @@ function makeHarness(auth: AuthMode, controls: Set<string>): {
         return controls.has('session/search')
           ? { status: 200, body: okBody({ results: [{ sessionId: 'session-1', title: 'Session 1', snippet: '…hello…' }], total: 1 }) }
           : missing()
+      // `session/attachment` is a durable image READ — `{sessionId, attachmentId}`
+      // → the stored ref plus its bytes. It has never been an upload path.
       case 'session/attachment':
         return controls.has('session/attachment')
-          ? { status: 200, body: okBody({ accepted: true, attachments: [{ id: 'att-1', name: 'x.txt' }] }) }
+          ? { status: 200, body: okBody({
+            attachment: { attachmentId: 'sha256:abc', mediaType: 'image/png', width: 2, height: 2, bytes: 73 },
+            data: 'aGVsbG8=',
+          }) }
           : missing()
+      // The `@` completion source. Its descriptor is positional
+      // `(agentId, query)`, so the inner args are bare — a `request` wrapper is
+      // a shape rejection here, which is exactly what the assertion in step 12b
+      // pins.
+      case 'fileReferences/list': {
+        if (!controls.has('fileReferences/list')) return missing()
+        if (!('agentId' in args) || !('query' in args) || 'request' in args) {
+          return { status: 200, body: failBody('gateway/arguments-invalid', 'typert gateway: fileReferences/list: args fields do not match the descriptor: missing "agentId", "query"') }
+        }
+        return { status: 200, body: okBody([
+          { path: 'src/foo.ts', kind: 'file' },
+          { path: 'docs notes', kind: 'directory' },
+        ]) }
+      }
       // rc.2 does NOT serve any of these — they must be reported as absent.
       case 'session/command':
       case 'agentPreset/list':
@@ -391,6 +490,37 @@ function makeHarness(auth: AuthMode, controls: Set<string>): {
       return
     }
 
+    // The staged file-upload route: raw `application/octet-stream` bytes plus a
+    // query, answering `{ok, value:{receiptId, file}}`. It is deliberately NOT a
+    // JSON RPC envelope, which is what the old plugin guessed wrong.
+    if (url.pathname === '/api/session/uploadFileBinary') {
+      const raw: Buffer[] = []
+      req.on('data', (c: Buffer) => { raw.push(c) })
+      req.on('end', () => {
+        const body = Buffer.concat(raw)
+        const mediaType = (req.headers['content-type'] ?? '').split(';', 1)[0]?.trim().toLowerCase() ?? ''
+        const sessionId = url.searchParams.get('sessionId') ?? ''
+        const name = url.searchParams.get('name') ?? ''
+        seen.uploads.push({ sessionId, name, mediaType, bytes: body.length, head: body.toString('utf8').slice(0, 32) })
+        if (mediaType !== 'application/octet-stream') {
+          res.writeHead(415, { 'content-type': 'text/plain' })
+          res.end('content type must be application/octet-stream')
+          return
+        }
+        if (sessionId === '') {
+          res.writeHead(400, { 'content-type': 'text/plain' })
+          res.end('sessionId is required')
+          return
+        }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          ok: true,
+          value: { receiptId: 'receipt-1', file: { attachmentId: 'sha256:demo', name, bytes: body.length } },
+        }))
+      })
+      return
+    }
+
     const chunks: Uint8Array[] = []
     req.on('data', (c: Buffer) => { chunks.push(c) })
     req.on('end', () => {
@@ -427,13 +557,30 @@ function makeHarness(auth: AuthMode, controls: Set<string>): {
     wsAccept(socket, req.headers['sec-websocket-key'] as string | undefined)
     seen.muxOpened = true
     seen.muxPath = pathname
-    const st: FakeMuxState = { open: true, readySent: false, pending: [] }
+    const st: FakeMuxState = { open: true, readySent: false, pending: [], followSnapshotSent: false }
     muxSockets.set(socket, st)
     wsReadFrames(socket, (text) => {
-      let msg: { type?: unknown; streamId?: unknown }
-      try { msg = JSON.parse(text) as { type?: unknown; streamId?: unknown } } catch { return }
+      let msg: { type?: unknown; streamId?: unknown; endpoint?: unknown; payload?: unknown }
+      try { msg = JSON.parse(text) as { type?: unknown; streamId?: unknown; endpoint?: unknown; payload?: unknown } } catch { return }
       if (msg.type === 'open' && typeof msg.streamId === 'string') {
         st.streamId = msg.streamId
+        st.endpoint = typeof msg.endpoint === 'string' ? msg.endpoint : undefined
+        seen.streams.push({ endpoint: msg.endpoint, streamId: msg.streamId, payload: msg.payload })
+        if (st.endpoint === 'session/follow') {
+          // A follow stream opens straight into its snapshot — there is no
+          // `ready` on this endpoint (that one belongs to `$events`).
+          if (!st.followSnapshotSent) {
+            st.followSnapshotSent = true
+            wsSend(socket, { type: 'item', streamId: msg.streamId, value: {
+              type: 'snapshot',
+              header: { id: 'session-1', cwd: '/repo/alpha' },
+              cursor: 1,
+              records: [{ type: 'event', event: { type: 'user/message', seq: 0, time: 1, data: { content: [{ type: 'text', text: 'from snapshot' }] } } }],
+              hasMore: false,
+            } })
+          }
+          return
+        }
         if (!st.readySent) {
           st.readySent = true
           wsSend(socket, { type: 'item', streamId: msg.streamId, value: { type: 'ready', clientId: READY_CLIENT_ID, host: { home: HOME } } as ReadyFrame })
@@ -447,16 +594,20 @@ function makeHarness(auth: AuthMode, controls: Set<string>): {
     socket.on('error', drop)
   })
 
+  /** Broadcast one frame to every open socket subscribed to `endpoint`. */
+  const broadcast = (endpoint: string, frameObj: Record<string, unknown>): void => {
+    for (const [socket, st] of muxSockets) {
+      if (!st.open || st.endpoint !== endpoint) continue
+      if (st.streamId === undefined) { st.pending.push(frameObj); continue }
+      wsSend(socket, { type: 'item', streamId: st.streamId, value: frameObj })
+    }
+  }
+
   return {
     secret,
     seen,
-    pushFrame: (frameObj: Record<string, unknown>) => {
-      for (const [socket, st] of muxSockets) {
-        if (!st.open) continue
-        if (st.streamId === undefined) { st.pending.push(frameObj); continue }
-        wsSend(socket, { type: 'item', streamId: st.streamId, value: frameObj })
-      }
-    },
+    pushEvent: (frameObj: Record<string, unknown>) => { broadcast('$events', frameObj) },
+    pushFollow: (frameObj: Record<string, unknown>) => { broadcast('session/follow', frameObj) },
     start: () => new Promise<number>((resolve) => {
       server.listen(0, '127.0.0.1', () => { resolve((server.address() as { port: number }).port) })
     }),
@@ -513,38 +664,120 @@ async function main(): Promise<void> {
     && JSON.stringify(promptRequest['content']) === JSON.stringify([{ type: 'text', text: 'hello' }]),
     JSON.stringify(promptRequest?.['requestId'] !== undefined))
 
-  // 06. history arrives from session/page (a unary RPC), not session/history.
-  const history = await client.getHistory('session-1', { maxMessages: 50 })
+  // 06. History is `session/page` (a unary RPC) — and its `throughSeq` is a log
+  //     cursor, not a count and not `0`. With no follow snapshot yet there is no
+  //     cursor to page from, and inventing one is precisely what used to break
+  //     the panel: `throughSeq: 0` pages up to the first event only, so the page
+  //     came back a single `permission/preset` record, and `loadHistory` — which
+  //     clears the model before replaying — then blanked the transcript on every
+  //     mux reopen.
+  const pagesBefore = harness.seen.rpc.filter((r) => r.endpoint === 'session/page').length
+  const uncursored = await client.getHistory('session-1', { maxMessages: 50 })
+  eq('without a follow cursor there is no page to ask for', uncursored.events, [])
+  eq('...so the client asks the host nothing new',
+    harness.seen.rpc.filter((r) => r.endpoint === 'session/page').length, pagesBefore)
+
+  const history = await client.getHistory('session-1', { maxMessages: 50, throughSeq: 7 })
   eq('session/page returns the events (no session/history)', history.events[0]?.event.type, 'user/message')
   eq('session/page reports hasMore', history.hasMore, false)
   check('the history RPC is session/page, not session/history',
     harness.seen.rpc.some((r) => r.endpoint === 'session/page') && !harness.seen.rpc.some((r) => r.endpoint === 'session/history'))
+  eq('the page carries the cursor through as throughSeq',
+    harness.seen.rpc.filter((r) => r.endpoint === 'session/page').at(-1)?.inner,
+    { request: { address: { kind: 'session', sessionId: 'session-1' }, throughSeq: 7, maxMessages: 50 } })
 
-  // 07. The event stream: multiplexed Remote stream; the client opens `$events`
-  //     and receives `session/event` frames (assistant chunks ride them too).
+  // 07. Conversation transport. `$events` carries host identity and forwarded
+  //     events only; the session's own traffic rides a `session/follow` stream
+  //     on its own carrier. Getting this split wrong is what made the sidebar
+  //     connect and then go silent, so the shape is pinned here.
   const frames: MuxFrame[] = []
   client.subscribe('session-1', (batch) => { frames.push(...batch) })
-  harness.pushFrame({ type: 'session/subscribed', sessionId: 'session-1', lastSeq: 2 })
-  harness.pushFrame({ type: 'session/event', sessionId: 'session-1', event: { type: 'user/message', seq: 0, time: 1, data: { content: [{ type: 'text', text: 'hi' }] } } })
-  harness.pushFrame({ type: 'session/event', sessionId: 'session-1', event: { type: 'assistant/chunk', seq: 1, time: 2, data: { chunk: { type: 'text-delta', index: 0, text: 'po' } } } })
-  harness.pushFrame({ type: 'session/event', sessionId: 'session-1', event: { type: 'assistant/chunk', seq: 2, time: 3, data: { chunk: { type: 'text-delta', index: 0, text: 'ng' } } } })
-  harness.pushFrame({ type: 'session/event', sessionId: 'session-1', event: { type: 'turn/end', seq: 3, time: 4, data: { turn: 1, reason: { kind: 'stop' } } } })
-  await wait(150)
-  check('subscribe replays events as session/event frames',
-    frames.some((f) => f.type === 'session/event' && (f as { event?: { type?: string } }).event?.type === 'user/message'))
-  const chunks = frames.filter((f) => f.type === 'session/event' && (f as { event?: { type?: string } }).event?.type === 'assistant/chunk')
-  check('assistant deltas arrive as session/event assistant/chunk (no separate assistant/stream)', chunks.length === 2, `${String(chunks.length)} chunk frame(s)`)
+  await wait(120)
+  const streamOpens = harness.seen.streams
+  eq('the client opens the $events stream with a payload of {args:{}}',
+    streamOpens.filter((s) => s.endpoint === '$events').map((s) => s.payload),
+    [{ args: {} }])
+  const followOpen = streamOpens.find((s) => s.endpoint === 'session/follow')
+  check('the client opens a session/follow stream for the subscribed session', followOpen !== undefined)
+  eq('session/follow is opened with {request:{address:{kind:session,sessionId},assistantStream:true}}',
+    (followOpen?.payload as { args?: unknown } | undefined)?.args,
+    { request: { address: { kind: 'session', sessionId: 'session-1' }, assistantStream: true } })
 
-  // 08. Approvals: server pushes the WIRE event `approval/request`; the client
-  //     translates it to `approval/requested` and the answer goes to
-  //     POST /api/$events/result (not /api/respond).
+  // The fake host answers a follow open with a snapshot; the client re-offers
+  // those records as session/event frames (the model's seq guard drops the
+  // overlap with session/page).
+  check('the opening snapshot records arrive as session/event frames',
+    frames.some((f) => f.type === 'session/event'
+      && (f as { event?: { type?: string } }).event?.type === 'user/message'))
+  check('snapshot records carry the followed session id',
+    frames.every((f) => (f as { sessionId?: string }).sessionId === 'session-1'))
+
+  // The snapshot is also what publishes the history cursor: `session/page`
+  // cannot be asked for a page without one. This is the fix for the transcript
+  // blanking itself on every mux reopen (see step 06).
+  const afterSnapshot = await client.getHistory('session-1', { maxMessages: 50 })
+  eq('the follow snapshot teaches the client its history cursor',
+    (harness.seen.rpc.filter((r) => r.endpoint === 'session/page').at(-1)?.inner as { request?: { throughSeq?: number } } | undefined)?.request?.throughSeq,
+    1)
+  check('...so a cursor-free page call now returns records', afterSnapshot.events.length > 0,
+    String(afterSnapshot.events.length))
+  eq('and it keeps following the newest durable seq',
+    client.followCursor('session-1'), 1)
+
+  // Durable records.
+  harness.pushFollow({ type: 'event', event: { type: 'user/message', seq: 2, time: 3, data: { content: [{ type: 'text', text: 'hi' }] } } })
+  harness.pushFollow({ type: 'event', event: { type: 'turn/start', seq: 3, time: 4, data: { turn: 1 } } })
+  // Live assistant deltas: `start` carries the turn/step the chunks belong to.
+  harness.pushFollow({ type: 'assistant-stream', frame: { type: 'start', attemptId: 'a1', revision: 1, turn: 1, step: 1 } })
+  harness.pushFollow({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a1', revision: 1, index: 0, time: 5, chunk: { type: 'text-delta', index: 0, text: 'po' } } })
+  harness.pushFollow({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a1', revision: 1, index: 1, time: 6, chunk: { type: 'text-delta', index: 0, text: 'ng' } } })
+  // A chunk for an attempt never seen starting has nowhere to land: dropped,
+  // rather than guessed onto the wrong turn.
+  harness.pushFollow({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'ghost', revision: 1, index: 0, time: 7, chunk: { type: 'text-delta', index: 0, text: 'BOOM' } } })
+  harness.pushFollow({ type: 'assistant-stream', frame: { type: 'end', attemptId: 'a1', revision: 1, index: 2 } })
+  // After `end` the attempt is forgotten, so a late chunk is dropped too.
+  harness.pushFollow({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'a1', revision: 1, index: 3, time: 8, chunk: { type: 'text-delta', index: 0, text: 'LATE' } } })
+  harness.pushFollow({ type: 'event', event: { type: 'turn/end', seq: 4, time: 9, data: { turn: 1, reason: { kind: 'stop' } } } })
+  await wait(150)
+
+  check('follow durable records arrive as session/event frames',
+    frames.some((f) => f.type === 'session/event' && (f as { event?: { type?: string } }).event?.type === 'turn/start'))
+  const deltas = frames.filter((f) => f.type === 'assistant/stream')
+  eq('follow assistant chunks become assistant/stream frames', deltas.length, 2)
+  eq('an assistant chunk carries the turn/step from its start frame',
+    deltas.map((f) => `${String((f as { turn?: number }).turn)}.${String((f as { step?: number }).step)}`),
+    ['1.1', '1.1'])
+  eq('the chunk payload is passed through untouched',
+    (deltas[0] as { chunk?: unknown }).chunk, { type: 'text-delta', index: 0, text: 'po' })
+  check('a chunk whose attempt never started is dropped',
+    !frames.some((f) => JSON.stringify(f).includes('BOOM')))
+  check('a chunk arriving after the attempt ended is dropped',
+    !frames.some((f) => JSON.stringify(f).includes('LATE')))
+
+  // 07b. Forwarded events on `$events`: the host's own running flag becomes a
+  //      session/status frame, which is what keeps the Stop button honest.
+  harness.pushEvent({ type: 'emit', event: 'api-session/status', args: ['session-1', true] })
+  await wait(80)
+  check('api-session/status becomes a session/status frame',
+    frames.some((f) => f.type === 'session/status' && (f as { running?: boolean }).running === true))
+  check('a status frame for another session is not delivered to this sink',
+    !frames.some((f) => f.type === 'session/status' && (f as { sessionId?: string }).sessionId === 'session-9'))
+
+  // 08. Approvals ride `$events` as the `approval/request` WATERFALL, and the
+  //     answer goes to POST /api/$events/result (not /api/respond).
   const approvals: { frame: MuxFrame; eventId: string }[] = []
   client.onApprovalFrame((frame, eventId) => approvals.push({ frame, eventId }))
-  harness.pushFrame({ type: 'approval/request', eventId: 'evt-2', request: { sessionId: 'session-1', toolName: 'write', callId: 'call-2', reason: 'outside workspace' } })
+  harness.pushEvent({ type: 'waterfall', event: 'approval/request', eventId: 'evt-2', agentId: 'session-1', request: { sessionId: 'session-1', toolName: 'write', callId: 'call-2', reason: 'outside workspace' } })
   await wait(80)
   const approval = approvals.find((a) => a.eventId === 'evt-2')
-  check('the wire approval/request reaches the listener as approval/requested', approval?.frame.type === 'approval/requested')
+  check('the wire approval/request waterfall reaches the listener as approval/requested', approval?.frame.type === 'approval/requested')
   check('the translated frame carries the session id', (approval?.frame as { sessionId?: string } | undefined)?.sessionId === 'session-1')
+  check('the translated frame carries the tool name', (approval?.frame as { toolName?: string } | undefined)?.toolName === 'write')
+  // A forwarded event the plugin does not act on must not turn into traffic.
+  const before = frames.length
+  harness.pushEvent({ type: 'emit', event: 'plugin-manager/changed', args: ['whatever'] })
+  await wait(60)
+  eq('an unrelated forwarded event adds no conversation frame', frames.length, before)
   await client.respondApproval('evt-2', 'allowed-once')
   await wait(80)
   eq('the /api/$events/result body carries clientId/eventId/outcome{kind:result}',
@@ -613,19 +846,93 @@ async function main(): Promise<void> {
   check('session/command is never called (rc.2 has no such RPC)',
     !harness.seen.rpc.some((r) => r.endpoint === 'session/command'))
 
-  // 12. F6/F8: session/search + session/attachment ride the {request:{...}} wrapper.
+  // 12. F6/F8: session/search plus the two attachment routes — and the reason
+  //      they are two: `session/attachment` READS a stored image by content
+  //      address, while staging a file is a raw byte POST that never touches the
+  //      RPC surface. The plugin used to send a write-shaped payload to
+  //      `session/attachment` and hope; a fake host that models the real split is
+  //      what keeps that from coming back.
   const found = await client.searchSessions('hello')
   eq('session/search returns results', found.results?.[0]?.sessionId, 'session-1')
   const searchRpc = harness.seen.rpc.filter((r) => r.endpoint === 'session/search').at(-1)
   eq('session/search inner is {request:{query}}', searchRpc?.inner as Record<string, unknown>,
     { request: { query: 'hello' } })
 
-  const att = await client.uploadAttachment('session-1', [{ name: 'x.txt', content: 'aGVsbG8=' }])
-  eq('session/attachment accepts the upload', att.accepted, true)
+  const readBack = await client.readAttachment('session-1', 'sha256:abc')
+  eq('session/attachment answers the stored ref', readBack.attachment.attachmentId, 'sha256:abc')
+  eq('...and the bytes, base64', readBack.data, 'aGVsbG8=')
   const attRpc = harness.seen.rpc.filter((r) => r.endpoint === 'session/attachment').at(-1)
-  eq('session/attachment inner is {request:{sessionId,attachments:[{name,content}]}}',
+  eq('session/attachment inner is {request:{sessionId,attachmentId}}',
     attRpc?.inner as Record<string, unknown>,
-    { request: { sessionId: 'session-1', attachments: [{ name: 'x.txt', content: 'aGVsbG8=' }] } })
+    { request: { sessionId: 'session-1', attachmentId: 'sha256:abc' } })
+
+  const staged = await client.uploadFile('session-1', 'notes.txt', new TextEncoder().encode('hello'))
+  eq('the staging route answers a receipt', staged.receiptId, 'receipt-1')
+  const upload = harness.seen.uploads.at(-1)
+  eq('staging posts application/octet-stream', upload?.mediaType, 'application/octet-stream')
+  eq('...with the session and leaf name on the query',
+    [upload?.sessionId, upload?.name], ['session-1', 'notes.txt'])
+  eq('...and the exact bytes as the body', [upload?.bytes, upload?.head], [5, 'hello'])
+
+  // 12c. Prompt content parts. Images ride the prompt inline (the host promotes
+  //      them to durable refs during admission); files can only be referenced by
+  //      the receipt minted above.
+  await client.prompt('session-1', 'look at this', undefined, {
+    images: [{ mediaType: 'image/png', data: 'aGVsbG8=' }],
+    files: [{ receiptId: 'receipt-1' }],
+  })
+  const promptWithParts = harness.seen.rpc.filter((r) => r.endpoint === 'session/prompt').at(-1)
+    ?.inner as { request?: { content?: unknown } } | undefined
+  eq('a prompt carries text, image and file parts in that order', promptWithParts?.request?.content, [
+    { type: 'text', text: 'look at this' },
+    { type: 'image', mediaType: 'image/png', data: 'aGVsbG8=' },
+    { type: 'file', receiptId: 'receipt-1' },
+  ])
+
+  // The host refuses a prompt whose every part is blank, so a picture-only
+  // message must not carry an empty text part alongside the image.
+  await client.prompt('session-1', '', undefined, { images: [{ mediaType: 'image/png', data: 'aGVsbG8=' }] })
+  const imageOnly = harness.seen.rpc.filter((r) => r.endpoint === 'session/prompt').at(-1)
+    ?.inner as { request?: { content?: unknown } } | undefined
+  eq('an image-only prompt drops the empty text part', imageOnly?.request?.content,
+    [{ type: 'image', mediaType: 'image/png', data: 'aGVsbG8=' }])
+
+  // A text-only prompt keeps its single text part (no behaviour drift).
+  await client.prompt('session-1', 'plain')
+  const textOnly = harness.seen.rpc.filter((r) => r.endpoint === 'session/prompt').at(-1)
+    ?.inner as { request?: { content?: unknown } } | undefined
+  eq('a text-only prompt still sends one text part', textOnly?.request?.content,
+    [{ type: 'text', text: 'plain' }])
+
+  // 12b. The `@` completion source. Unlike the search/attachment pair above,
+  //      `fileReferences/list` declares (agentId, query) positionally: the inner
+  //      args are BARE, with no `request` wrapper. The fake host rejects a
+  //      wrapper with gateway/arguments-invalid, so a regression here shows up
+  //      as a thrown error rather than a silently empty completion list.
+  check('fileReferences/list is discovered as served', caps['fileReferences/list'] === true)
+  const refHits = await client.listFileReferences('session-1', 'src')
+  eq('fileReferences/list returns the raw candidate array',
+    refHits.map((c) => c.path), ['src/foo.ts', 'docs notes'])
+  eq('the directory candidate keeps its kind',
+    refHits.find((c) => c.path === 'docs notes')?.kind, 'directory')
+  const refRpc = harness.seen.rpc.filter((r) => r.endpoint === 'fileReferences/list').at(-1)
+  eq('fileReferences/list inner is bare {agentId,query} — no request wrapper',
+    refRpc?.inner as Record<string, unknown>,
+    { agentId: 'session-1', query: 'src' })
+  // The count is 2, not 1: the connect-time control-surface probe posts every
+  // method once with `{request:{}}`, which the host answers with a shape
+  // rejection (that is how the method is discovered as present at all). The
+  // point of the assertion is that the *real* call did not have to be retried
+  // under a different wrapper — the bare shape is tried first and wins.
+  eq('fileReferences/list is reached on the first try (probe + one real call)',
+    harness.seen.rpc.filter((r) => r.endpoint === 'fileReferences/list').length, 2)
+  check('the real fileReferences/list call carries no wrapper key at all',
+    refRpc !== undefined && !('request' in refRpc.inner) && !('_request' in refRpc.inner))
+  // The whole point of the endpoint: picking a candidate attaches nothing. The
+  // host's FILE_REFERENCE_PROMPT tells the model to open the file itself, so the
+  // RPC must not carry a sessionId/attachment payload of our own invention.
+  eq('the candidate list carries no inlined file content',
+    Object.keys(refHits[0] ?? {}).sort(), ['kind', 'path'])
 
   client.dispose()
   await harness.stop()
@@ -714,6 +1021,149 @@ async function main(): Promise<void> {
   eq('special endpoints keep their own separator', wireEndpoint('dot', '$events/result'), '$events/result')
   eq('an unqualified name is untouched', wireEndpoint('dot', 'session'), 'session')
 
+  // D2. Telling "no such method" apart from "the host refused your arguments".
+  //
+  //     Both families are worded similarly, and conflating them is expensive: a
+  //     namespaced business error would be reported as a missing capability
+  //     ("upgrade your host"), which is the opposite of the truth. Measured on
+  //     the live host: a genuinely absent method answers HTTP 404 (no envelope at
+  //     all), while `session/not-found` and `workspace/not-found` come back as
+  //     200 + ok:false. So the envelope-level classifier must only fire for
+  //     dispatch-layer codes.
+  for (const code of ['gateway/method-unavailable', 'unknown_method', 'method-not-found', 'unimplemented',
+    'gateway/method-not-found', 'no-such-method']) {
+    check(`"${code}" reads as a missing method`, isMissingMethodError(code))
+  }
+  for (const code of ['workspace/not-found', 'session/not-found', 'session/renamed-not-found', 'not-found',
+    'gateway/arguments-invalid', 'gateway/input-invalid', 'gateway/internal',
+    'provider/unsupported', 'workspace/method-unavailable']) {
+    check(`"${code}" is NOT a missing method`, !isMissingMethodError(code))
+  }
+  // A shape rejection is the useful third bucket: proof the method exists.
+  check('gateway/arguments-invalid reads as a shape rejection',
+    isShapeRejection('gateway/arguments-invalid'))
+  check('a business not-found is neither missing-method nor shape rejection',
+    !isMissingMethodError('workspace/not-found') && !isShapeRejection('workspace/not-found'))
+  // The distinction has to survive a full round trip, not just the predicate:
+  // a stale workspace id must reach the caller with the host's own wording.
+  {
+    const stale = makeHarness('none', new Set(['session/create', 'workspace/create']))
+    const stalePort = await stale.start()
+    const staleAuth = new BrowserSessionAuth({
+      host: '127.0.0.1', port: stalePort,
+      store: { load: async () => undefined, save: async () => {} }, log: () => {},
+      allowLocalMint: true,
+    })
+    await staleAuth.init()
+    await staleAuth.tryMintLocalSession()
+    const staleClient = new HarnessClient({ host: '127.0.0.1', port: stalePort, auth: staleAuth, log: () => {} })
+    await staleClient.connect()
+    let message = ''
+    let code = ''
+    try {
+      await staleClient.createSession({ workspaceId: 'not-a-real-workspace' })
+    } catch (e) {
+      message = (e as Error).message
+      code = e instanceof HarnessRpcError ? e.code : `(not HarnessRpcError: ${(e as Error).constructor.name})`
+    }
+    eq('a stale workspace id surfaces the host code, not a capability gap', code, 'workspace/not-found')
+    check('the message quotes what the host actually said',
+      /not found/i.test(message) && !/upgrade the host/i.test(message), message.slice(0, 120))
+    staleClient.dispose()
+    await stale.stop()
+  }
+
+  // D3. The `@` completion round trip, through the REAL controller.
+  //
+  //     Two regressions are pinned here, both of which left the completion menu
+  //     permanently empty with no error to look at:
+  //
+  //       1. `queryFileReferences` guarded staleness against `UiState.refQuery` —
+  //          the query the LAST REPLY answered — which starts `undefined`. So the
+  //          first bare `@` (query `''`) failed its own guard and published
+  //          nothing at all.
+  //       2. On the success path the candidates were published WITHOUT `refQuery`,
+  //          and the composer only accepts a batch whose query it can match. Even
+  //          once the guard was satisfied, the menu stayed shut.
+  //
+  //     Asserting the *published* state is the point: no amount of protocol-level
+  //     coverage catches a field that is simply never written.
+  {
+    const refHost = makeHarness('none', PRESENT_CONTROLS)
+    const refPort = await refHost.start()
+    const refAuth = new BrowserSessionAuth({
+      host: '127.0.0.1', port: refPort,
+      store: { load: async () => undefined, save: async () => {} }, log: () => {},
+      allowLocalMint: true,
+    })
+    await refAuth.init()
+    await refAuth.tryMintLocalSession()
+    const refClient = new HarnessClient({ host: '127.0.0.1', port: refPort, auth: refAuth, log: () => {} })
+    await refClient.connect()
+
+    // AppController reaches `src/review/materializer.ts`, which calls
+    // `vscode.Uri.file` at runtime — a module that only exists inside the
+    // extension host. Stub it for this process and load the controller lazily;
+    // nothing else in this file touches a VS Code API.
+    const { AppController } = await loadControllerWithVscodeStub()
+
+    let ui: Record<string, unknown> = { showSystemMessages: false }
+    const ctrl = new AppController({
+      client: refClient,
+      vscodeAPI: {} as never,
+      getState: () => ui as never,
+      setState: (patch) => { ui = { ...ui, ...patch } },
+      bump: () => {},
+      pushState: () => {},
+      notifyError: () => {},
+      notifyInfo: () => {},
+      openHarnessHome: () => {},
+      moveToSecondarySideBar: async () => {},
+      log: { info: () => {}, error: () => {} },
+    })
+    await ctrl.selectSession('session-1')
+
+    // The exact first keystroke: a bare `@`.
+    await ctrl.queryFileReferences('')
+    eq('the first bare-@ query publishes candidates',
+      (ui['refCandidates'] as { path: string }[]).map((c) => c.path), ['src/foo.ts', 'docs notes'])
+    eq('the reply publishes refQuery alongside the candidates (not undefined)', ui['refQuery'], '')
+
+    // A later keystroke must republish BOTH fields.
+    await ctrl.queryFileReferences('sr')
+    eq('a later query advances refQuery', ui['refQuery'], 'sr')
+    eq('the later candidates replace the earlier batch',
+      (ui['refCandidates'] as { path: string }[]).length, 2)
+    eq('the query actually reached the host as a bare {agentId,query}',
+      refHost.seen.rpc.filter((r) => r.endpoint === 'fileReferences/list').at(-1)?.inner,
+      { agentId: 'session-1', query: 'sr' })
+
+    // A host that does not serve the endpoint must CLEAR the menu while still
+    // publishing the query. Leaving the older batch in place would keep offering
+    // paths for a prefix the host never answered — and because the composer
+    // matches on the prefix, a stale batch is *accepted* and looks plausible.
+    const quietHost = makeHarness('none', new Set())
+    const quietPort = await quietHost.start()
+    const quietAuth = new BrowserSessionAuth({
+      host: '127.0.0.1', port: quietPort,
+      store: { load: async () => undefined, save: async () => {} }, log: () => {},
+      allowLocalMint: true,
+    })
+    await quietAuth.init()
+    await quietAuth.tryMintLocalSession()
+    const quiet = new HarnessClient({ host: '127.0.0.1', port: quietPort, auth: quietAuth, log: () => {} })
+    await quiet.connect()
+    ctrl.replaceClient(quiet)
+    await ctrl.queryFileReferences('zzz')
+    eq('a host without the endpoint still publishes the query (bumping it)', ui['refQuery'], 'zzz')
+    eq('...and drops the batch it cannot stand behind', ui['refCandidates'], [])
+
+    quiet.dispose()
+    await quietHost.stop()
+    refClient.dispose()
+    await refHost.stop()
+  }
+
   // E. Cookie-gated host: the autoSession / token-exchange auth machinery.
   {
     const gated = makeHarness('cookie', PRESENT_CONTROLS)
@@ -733,7 +1183,16 @@ async function main(): Promise<void> {
     let refused = ''
     try { await gatedClient.connect() } catch (e) { refused = (e as Error).message }
     check('connect without a session is refused', /browser session/i.test(refused), refused.slice(0, 90))
-    check('the refusal names the exact command', /Set Session Token from Launch URL/.test(refused))
+    // The paste-a-launch-URL command is gone: the only path is the local mint
+    // from $DSH_HOME/.credentials.yaml, so that is what the refusal must point
+    // at. A regression that reintroduces the command name here would send the
+    // user hunting for a menu item that no longer exists.
+    check('the refusal points at the local credential store',
+      /\.credentials\.yaml/.test(refused), refused.slice(0, 160))
+    check('the refusal names the autoSession setting as the on/off switch',
+      /autoSession/.test(refused))
+    check('the refusal no longer names the removed paste-URL command',
+      !/Set Session Token from Launch URL/.test(refused))
 
     // E2. A wrong token must be rejected.
     let wrong = ''
@@ -947,6 +1406,23 @@ async function main(): Promise<void> {
     const boot = bootWebview(CLIENT_SCRIPT, HTML_SKELETON)
     check('the webview boots and attaches a state listener', boot.handlerRegistered, boot.error)
     eq('a connected state renders the Connected label', boot.statusText, 'Connected')
+
+    // Manual connect: auto-connect fires once at activation, so if dsh web was
+    // not up yet there is nothing left to retry with unless the panel offers it.
+    check('a connected panel hides the manual connect button', !boot.connectVisible)
+
+    const offline = bootWebview(CLIENT_SCRIPT, HTML_SKELETON, undefined, 'disconnected')
+    check('a disconnected panel offers a connect button', offline.connectVisible)
+    eq('...labelled Connect', offline.connectLabel, 'Connect')
+    check('...and it is clickable, not disabled', !offline.connectDisabled)
+
+    const errored = bootWebview(CLIENT_SCRIPT, HTML_SKELETON, undefined, 'error')
+    check('a failed connection offers a retry', errored.connectVisible)
+    eq('...labelled Retry', errored.connectLabel, 'Retry')
+
+    const inFlight = bootWebview(CLIENT_SCRIPT, HTML_SKELETON, undefined, 'connecting')
+    eq('an in-flight connect is labelled Connecting…', inFlight.connectLabel, 'Connecting…')
+    check('...and cannot be pressed twice', inFlight.connectDisabled)
 
     // The degraded path (no markdown-it UMD) must still boot: the extension
     // serves a stub, and an unguarded renderer override used to abort on it.

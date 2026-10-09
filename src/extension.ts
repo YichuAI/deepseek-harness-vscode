@@ -18,8 +18,8 @@ import * as vscode from 'vscode'
 import { readFileSync } from 'node:fs'
 import { HarnessClient } from './harness/client.ts'
 import { BrowserSessionAuth, type AuthStore } from './harness/auth.ts'
-import { AppController } from './app/controller.ts'
-import type { WebviewAction } from './view/provider.ts'
+import { AppController, attachmentKindFor } from './app/controller.ts'
+import type { PendingAttachmentPayload, WebviewAction } from './view/provider.ts'
 import { HarnessWebviewViewProvider, type UiState } from './view/provider.ts'
 import { CompositeDisposable } from './disposable.ts'
 
@@ -106,7 +106,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const controller = new AppController({
     client,
-    vscodeAPI: { window: vscode.window, workspace: vscode.workspace },
+    vscodeAPI: { window: vscode.window, workspace: vscode.workspace, commands: vscode.commands },
     getState,
     setState,
     bump,
@@ -141,47 +141,6 @@ export function activate(context: vscode.ExtensionContext): void {
     () => void controller.dispatch({ type } as WebviewAction)
 
   /**
-   * Adopt a `dsh web` launch URL.
-   *
-   * The harness mints a per-process token and accepts it only at
-   * `GET /?token=…`, answering with the session cookie every later request
-   * needs. The cookie is authority-bound, so a URL on another port also
-   * retargets the plugin.
-   */
-  const setSessionToken = async (): Promise<void> => {
-    const value = await vscode.window.showInputBox({
-      title: 'DeepSeek Harness: Set Session Token',
-      prompt: 'Paste the whole line `dsh web` printed. It looks like: dsh web: http://127.0.0.1:3080/?token=…',
-      placeHolder: 'dsh web: http://127.0.0.1:3080/?token=…',
-      ignoreFocusOut: true,
-      validateInput: (text) => /https?:\/\/\S+/u.test(text) ? undefined : 'No URL found in that text.',
-    })
-    if (value === undefined || value.trim() === '') return
-    try {
-      const origin = await auth.adoptLaunchUrl(value)
-      const next = readConfig()
-      if (origin.host !== next.host || origin.port !== next.port) {
-        const settings = vscode.workspace.getConfiguration(SECTION)
-        await settings.update('host', origin.host, vscode.ConfigurationTarget.Global)
-        await settings.update('port', origin.port, vscode.ConfigurationTarget.Global)
-        cfg.host = origin.host
-        cfg.port = origin.port
-        client.retarget(origin.host, origin.port)
-      }
-      // The previous failure left the mux closed; reconnecting is the fix.
-      client.disconnect()
-      await controller.doConnect()
-      vscode.window.showInformationMessage(
-        `DeepSeek Harness: session acquired for ${origin.host}:${String(origin.port)}.`,
-      )
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      log.error(`setSessionToken: ${msg}`)
-      vscode.window.showErrorMessage(`DeepSeek Harness: ${msg}`)
-    }
-  }
-
-  /**
    * Pick a permission preset.
    *
    * Upstream's preset table is deployment-configurable, so the documented
@@ -210,21 +169,24 @@ export function activate(context: vscode.ExtensionContext): void {
   const clearSessionToken = async (): Promise<void> => {
     await auth.clear()
     client.disconnect()
-    vscode.window.showInformationMessage('DeepSeek Harness: stored session cleared.')
+    vscode.window.showInformationMessage(
+      'DeepSeek Harness: stored session cleared. Reconnecting will mint a fresh one from $DSH_HOME/.credentials.yaml.',
+    )
+    await controller.doConnect()
   }
 
   context.subscriptions.push(
     vscode.commands.registerCommand('deepseekHarness.connect', wireAction('connect')),
     vscode.commands.registerCommand('deepseekHarness.disconnect', wireAction('disconnect')),
-    vscode.commands.registerCommand('deepseekHarness.setSessionToken', setSessionToken),
     vscode.commands.registerCommand('deepseekHarness.clearSessionToken', clearSessionToken),
     vscode.commands.registerCommand('deepseekHarness.openWebUI', () => {
-      // The harness authenticates its web UI per process, so the plain origin no
-      // longer opens anything useful — the token-bearing launch URL does.
+      // The harness authenticates its web UI per process, so a plain origin
+      // opens nothing useful; only the token-bearing launch URL does. That URL
+      // is on the `dsh web` console, and this extension has no way to guess it.
       void vscode.window.showInformationMessage(
-        'The DeepSeek Harness web UI must be opened with the URL printed by `dsh web` '
-        + '(it carries a per-process token). Run "DeepSeek Harness: Set Session Token from Launch URL" '
-        + 'to authenticate this extension with the same URL.',
+        'Open the web UI with the URL `dsh web` printed to its console — it carries the '
+        + 'per-process token the browser needs. The extension itself authenticates on its own, '
+        + 'by minting a session cookie from $DSH_HOME/.credentials.yaml.',
       )
     }),
     vscode.commands.registerCommand('deepseekHarness.showLogs', () => log.show()),
@@ -256,20 +218,23 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('deepseekHarness.attachFile', async () => {
       const picks = await vscode.window.showOpenDialog({
         canSelectMany: true,
-        openLabel: 'Attach to session',
-        title: 'Attach file(s) to the active Harness session',
+        openLabel: 'Attach to prompt',
+        title: 'Attach file(s) or image(s) to the next DeepSeek Harness prompt',
       })
       if (!picks || picks.length === 0) return
-      const attachments: Array<{ name: string; content: string }> = []
+      const items: PendingAttachmentPayload[] = []
       for (const uri of picks) {
         try {
-          const data = readFileSync(uri.fsPath)
-          attachments.push({ name: uri.path.split('/').pop() ?? uri.fsPath, content: data.toString('base64') })
+          const bytes = readFileSync(uri.fsPath)
+          const name = uri.path.split('/').pop() ?? uri.fsPath
+          // Rasters the host admits go inline as images; everything else is
+          // staged as a file and referenced by receipt.
+          items.push({ kind: attachmentKindFor(name), name, data: bytes.toString('base64') })
         } catch (e) {
           vscode.window.showErrorMessage('Could not read ' + uri.fsPath + ': ' + (e instanceof Error ? e.message : String(e)))
         }
       }
-      await controller.uploadAttachment(attachments)
+      controller.addPendingItems(items)
     }),
   )
 
@@ -302,8 +267,9 @@ export function activate(context: vscode.ExtensionContext): void {
     if (next.autoSession !== cfg.autoSession) {
       cfg.autoSession = next.autoSession
       auth.setAllowLocalMint(next.autoSession)
-      // Re-evaluate connectivity: enabling may mint a cookie now; disabling may
-      // leave us without one and must fall back to the launch-URL exchange.
+      // Re-evaluate connectivity: enabling may mint a cookie now; disabling
+      // leaves us without one, and there is no paste-a-URL fallback any more —
+      // the connect failure says so.
       if (auth.cookieHeader() === undefined) {
         client.disconnect()
         void controller.doConnect()
@@ -311,8 +277,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   }))
 
-  // Auto-connect on activation. If no session is stored the connect fails with
-  // an actionable message pointing at the Set Session Token command.
+  // Auto-connect on activation. If no session can be minted the connect fails
+  // with an actionable message pointing at $DSH_HOME/.credentials.yaml and the
+  // `autoSession` setting.
   void controller.doConnect()
 }
 

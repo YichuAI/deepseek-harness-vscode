@@ -303,10 +303,50 @@ export interface SessionSearchResult {
   total?: number
 }
 
-/** Result of `session/attachment` (`{ request: { sessionId, attachments:[{name,content}] } }`). */
-export interface SessionAttachmentResult {
-  accepted?: boolean
-  attachments?: Array<{ id?: string; name: string }>
+/**
+ * Raster formats the host's attachment store admits for inline images.
+ * Mirrors upstream `ImageMediaType` (attachment-local pins the same four).
+ */
+export type ImageMediaType = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
+
+/** A durable image the host has already stored (created by prompt admission). */
+export interface ImageAttachmentRef {
+  /** `sha256:<hex>` — the host's content address, used for read-back. */
+  attachmentId: string
+  mediaType: string
+  width?: number
+  height?: number
+  bytes?: number
+  name?: string
+}
+
+/**
+ * Result of `session/attachment`.
+ *
+ * Despite the name this is a durable image **read**, not an upload:
+ * `{ request: { sessionId, attachmentId } }` → the stored ref plus its bytes,
+ * base64. Uploading is a two-step affair and does not ride this method at all
+ * (see {@link FileUploadValue}).
+ */
+export interface SessionAttachmentValue {
+  attachment: ImageAttachmentRef
+  /** Base64 of the exact stored bytes (the host may have normalized/rescaled). */
+  data: string
+}
+
+/**
+ * Value of `POST /api/session/uploadFileBinary?sessionId=&name=`.
+ *
+ * The route takes raw `application/octet-stream` bytes and answers a receipt;
+ * the receipt is then referenced from a prompt as `{ type: 'file', receiptId }`.
+ * The receipt is scoped to the receiving session and to the current process.
+ */
+export interface FileUploadValue {
+  /** A base64 payload in the Remote fallback shape (unused by the raw route). */
+  readonly data?: string
+  readonly name?: string
+  readonly receiptId?: string
+  readonly file?: { attachmentId?: string; name?: string; bytes?: number }
 }
 
 /** Session-level token/usage projection (`projections.values`). */
@@ -357,10 +397,24 @@ export interface WorkspaceCreateValue {
 }
 
 // ─── prompt content ──────────────────────────────────────────────────────────
-/** One content part of a prompt. The plugin only sends text. */
+/**
+ * One content part of a prompt.
+ *
+ * `image` carries the bytes inline (base64) and the host promotes them to a
+ * durable `ImageAttachmentRef` during admission; `file` carries only the opaque
+ * receipt from an earlier `uploadFileBinary`, because a file's bytes travel on
+ * their own route. Admission limits (upstream defaults): 20 images per message,
+ * 20 MiB per image, 200 MiB per message, `png`/`jpeg`/`webp`/`gif` only, and the
+ * host normalizes/rescales before storing.
+ *
+ * Images are refused with `session/attachment-invalid` + `reason:
+ * MODEL_DOES_NOT_SUPPORT_IMAGES` when the session's current model is text-only.
+ * The model catalog does not publish that capability, so it cannot be checked
+ * up front — the host's verdict is the only authority.
+ */
 export type PromptContentPart =
   | { type: 'text'; text: string }
-  | { type: 'image'; mediaType: string; data: string; name?: string }
+  | { type: 'image'; mediaType: ImageMediaType; data: string; name?: string }
   | { type: 'file'; receiptId: string }
 
 export interface SessionPromptRequest {
@@ -376,37 +430,12 @@ export interface SessionPromptValue {
   accepted: true
 }
 
-/** A file reference extracted from `@file:path` or `@file:path:L10-L20` syntax. */
-export interface FileReference {
-  path: string
-  lineStart?: number
-  lineEnd?: number
-}
-
-/** A text selection from the active editor. */
-export interface SelectionContext {
-  text: string
-  path: string
-  lineStart: number
-  lineEnd: number
-}
-
-/** The active file at the moment the prompt is sent. */
-export interface ActiveFileContext {
-  path: string
-}
-
-/**
- * Structured editor context attached to a prompt. The prompt request is
- * `{requestId, sessionId, mode, content, clientTimeZone}` only; the plugin
- * renders this context into the prompt text itself (see `AppController.sendPrompt`),
- * which keeps the KV cache deterministic because the block is a stable prefix.
- */
-export interface PromptContext {
-  files?: FileReference[]
-  selection?: SelectionContext
-  activeFile?: ActiveFileContext
-}
+// File references have no wire representation any more. A prompt is
+// `{requestId, sessionId, mode, content, clientTimeZone}` and an `@path` is
+// carried inside `content` as ordinary text — the host resolves it against the
+// session cwd and tells the model to read the file itself. The removed
+// `PromptContext` / `FileReference` shapes fed a plugin-side inliner that pasted
+// file bytes into every message.
 
 // ─── SessionEvent — the merge-extensible append-only log entry ───────────────
 export interface SessionEvent {
@@ -508,6 +537,107 @@ export interface AssistantChunkData {
 export function isSessionEventFrame(f: MuxFrame): f is { type: 'session/event'; sessionId: SessionId; event: SessionEvent; view?: ToolEventView } {
   return f.type === 'session/event'
 }
+
+// ─── $events stream: forwarded Host events (0.2.1-alpha.2) ───────────────────
+/**
+ * One forwarded Host event. The `$events` stream carries a fixed allowlist of
+ * these — `api-session/status`, `api-session/activity`, `approval/request`,
+ * `user-questions/request`, plugin-inventory changes, … — and never
+ * conversation traffic, which rides its own `session/follow` stream.
+ */
+export interface RemoteEmitFrame {
+  type: 'emit'
+  event: string
+  args: readonly unknown[]
+}
+
+/** One pending Host waterfall (the answerable frames: approvals, questions). */
+export interface RemoteWaterfallFrame {
+  type: 'waterfall'
+  event: string
+  eventId: string
+  agentId?: string
+  request?: Readonly<Record<string, unknown>>
+}
+
+/** Cancellation of a pending waterfall previously delivered under the same id. */
+export interface RemoteCancellationFrame {
+  type: 'cancel'
+  eventId: string
+}
+
+/** Every item the `$events` stream can publish, `ready` first. */
+export type RemoteEventFrame =
+  | ReadyFrame
+  | RemoteEmitFrame
+  | RemoteWaterfallFrame
+  | RemoteCancellationFrame
+
+// ─── session/follow stream: one session's conversation (0.2.1-alpha.2) ───────
+/** One durable event as it appears in a follow stream or a history page. */
+export interface FollowEventFrame {
+  type: 'event'
+  event: SessionEvent
+}
+
+/** Opening window of a follow stream: history prefix + the live log cut. */
+export interface FollowSnapshotFrame {
+  type: 'snapshot'
+  header: { id: string; cwd?: string; createdAt?: number; agentPreset?: string; [k: string]: unknown }
+  /** Inclusive log cut this stream opened at. */
+  cursor: number
+  records: FollowEventFrame[]
+  hasMore: boolean
+  /** Host projections (title, usage, …) at the cut. */
+  projections?: unknown
+}
+
+/** One live assistant attempt opening (carries the turn/step its chunks belong to). */
+export interface AssistantStreamStart {
+  type: 'start'
+  attemptId: string
+  revision: number
+  turn: number
+  step: number
+}
+
+/** One live delta. These are process-local: they never appear in the durable log. */
+export interface AssistantStreamChunk {
+  type: 'chunk'
+  attemptId: string
+  revision: number
+  index: number
+  time: number
+  chunk: StreamChunk
+}
+
+/** Terminal marker for one attempt (`outcome.committed` names the durable event). */
+export interface AssistantStreamEnd {
+  type: 'end'
+  attemptId: string
+  revision: number
+  index: number
+  outcome?: { kind: 'committed' | 'abandoned'; eventType?: string; seq?: number }
+}
+
+export type AssistantStreamFrame = AssistantStreamStart | AssistantStreamChunk | AssistantStreamEnd
+
+/** An opted-in process-local assistant frame (`assistantStream: true`). */
+export interface FollowAssistantFrame {
+  type: 'assistant-stream'
+  frame: AssistantStreamFrame
+}
+
+/** One frame of a `session/follow` stream. */
+export type SessionFollowFrame = FollowSnapshotFrame | FollowEventFrame | FollowAssistantFrame
+
+// ─── file references (`fileReferences/list`) ─────────────────────────────────
+/** One path-only `@` completion candidate inside the addressed session's cwd. */
+export interface FileReferenceCandidate {
+  path: string
+  kind: 'file' | 'directory'
+}
+
 
 /** Endpoint string for a Remote method: `namespace/method`. */
 export function endpointOf(namespace: string, method: string): string {

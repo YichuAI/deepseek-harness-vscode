@@ -122,7 +122,9 @@ async function main(): Promise<void> {
     if (negotiation.kind === 'unreachable') console.log(`  ${negotiation.message}`)
     if (negotiation.kind === 'auth-required') {
       console.log('  每次 /api/* 都返回 401：宿主要求浏览器会话 cookie。')
-      console.log('  启动 dsh web 后，把打印出的那行 URL 用插件命令 "Set Session Token from Launch URL" 粘进去。')
+      console.log('  插件从 $DSH_HOME/.credentials.yaml 本地自签，所以先确认：')
+      console.log('  ① DSH_HOME 是否指向你那个 harness home；② 该 home 里是否跑过 dsh web；')
+      console.log('  ③ 设置 deepseekHarness.autoSession 是否被关掉了。')
     }
     return
   }

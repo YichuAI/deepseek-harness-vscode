@@ -8,6 +8,10 @@ node_modules/
 Thumbs.db
 .trae/
 
+# Local agent workspace (memory logs) — never shipped, never committed
+.workbuddy/
+pr_body.md
+
 # Secrets — never commit
 .env
 .env.*

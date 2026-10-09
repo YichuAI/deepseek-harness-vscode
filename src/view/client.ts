@@ -50,6 +50,11 @@ export const CLIENT_SCRIPT = /* js */ `
   // Slash completion state
   let slashItems = [];
   let slashIndex = -1;
+  // @file mention completion state
+  let atItems = [];
+  let atIndex = -1;
+  let atToken = null;
+  let atTimer = null;
 
   // ─── markdown renderer (webview-only, html disabled!) ──────────────────────
   const md = new MarkdownIt({ html: false, linkify: true, breaks: false });
@@ -109,6 +114,21 @@ export const CLIENT_SCRIPT = /* js */ `
     currentQueue = state.queue || [];
     currentCatalog = state.modelCatalog || null;
 
+    // @ completion candidates: only accept a batch that answers the token the
+    // composer is asking about right now. A late reply for an abandoned token
+    // would otherwise repopulate a menu the user already closed.
+    //
+    // The reply's query may be a PREFIX of what is typed now — that is the normal
+    // case during fast typing (we asked about "src", the user has since typed
+    // "src/ap"). Showing the older-but-still-plausible list avoids blinking the
+    // menu out on every keystroke. Anything not a prefix is genuinely unrelated
+    // and is ignored until its own reply arrives.
+    if (atToken && typeof state.refQuery === 'string' && atToken.query.startsWith(state.refQuery)) {
+      atItems = Array.isArray(state.refCandidates) ? state.refCandidates : [];
+      if (atIndex >= atItems.length) atIndex = atItems.length > 0 ? 0 : -1;
+      renderAtPopup();
+    }
+
     // Brand bar
     const icon = $('brand-icon');
     if (state.brandIconUri) { icon.src = state.brandIconUri; icon.style.display = ''; }
@@ -127,6 +147,13 @@ export const CLIENT_SCRIPT = /* js */ `
     setDot(conn);
     const labels = { disconnected: 'Disconnected', connecting: 'Connecting…', connected: 'Connected', error: 'Connection error' };
     $('status-text').textContent = labels[conn] || conn;
+    // Manual connect. Auto-connect runs once at activation, so if dsh web was not
+    // listening yet (not started, or bound to another port) nothing ever retries
+    // and the panel used to just sit there with no way to ask again.
+    const connectBtn = $('connect');
+    connectBtn.style.display = conn === 'connected' ? 'none' : '';
+    connectBtn.disabled = conn === 'connecting';
+    connectBtn.textContent = conn === 'connecting' ? 'Connecting…' : (conn === 'error' ? 'Retry' : 'Connect');
     const hi = state.hostInfo;
     const bits = [];
     if (hi) {
@@ -223,8 +250,68 @@ export const CLIENT_SCRIPT = /* js */ `
     $('steer-wrap').style.display = running ? '' : 'none';
     if (!running) $('steer').checked = false;
     renderQueueBar(state);
+    renderPending(state);
     renderSearch(state);
     renderInspector(state);
+  }
+
+  // ─── composer attachments ──────────────────────────────────────────────────
+  // Previews live here, keyed by the chip id the controller echoes back, so a
+  // pasted screenshot is drawn from bytes the browser already holds instead of a
+  // base64 copy riding UiState (which is re-pushed on every streamed chunk).
+  let attPreview = {};
+  let lastPendingSig = null;
+
+  function formatBytes(n) {
+    if (!n) return '';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
+    return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  function renderPending(state) {
+    const bar = $('attach-bar');
+    const items = state.pending || [];
+    const sig = items.map(function (p) { return p.id; }).join('|');
+    if (sig === lastPendingSig) return;
+    lastPendingSig = sig;
+    // Drop previews whose chip is gone (sent, removed, or refused on the way up).
+    Object.keys(attPreview).forEach(function (id) {
+      if (!items.some(function (p) { return p.id === id; })) {
+        try { URL.revokeObjectURL(attPreview[id]); } catch (e) { /* already gone */ }
+        delete attPreview[id];
+      }
+    });
+    bar.innerHTML = '';
+    bar.style.display = items.length > 0 ? '' : 'none';
+    items.forEach(function (p) {
+      const chip = document.createElement('div');
+      chip.className = 'attach-chip';
+      const url = attPreview[p.id];
+      if (url) {
+        const img = document.createElement('img');
+        img.className = 'attach-thumb'; img.src = url; img.alt = '';
+        chip.appendChild(img);
+      } else {
+        const glyph = document.createElement('span');
+        glyph.className = 'attach-glyph';
+        glyph.textContent = p.kind === 'image' ? '🖼' : '📄';
+        chip.appendChild(glyph);
+      }
+      const name = document.createElement('span');
+      name.className = 'attach-name'; name.textContent = p.name; name.title = p.name;
+      chip.appendChild(name);
+      if (p.bytes) {
+        const size = document.createElement('span');
+        size.className = 'attach-size'; size.textContent = formatBytes(p.bytes);
+        chip.appendChild(size);
+      }
+      const remove = document.createElement('button');
+      remove.className = 'attach-x'; remove.textContent = '✕'; remove.title = 'Remove attachment';
+      remove.addEventListener('click', function () { post({ type: 'pendingRemove', id: p.id }); });
+      chip.appendChild(remove);
+      bar.appendChild(chip);
+    });
   }
 
   // ─── F6: session search panel ──────────────────────────────────────────────
@@ -359,6 +446,104 @@ export const CLIENT_SCRIPT = /* js */ `
   }
 
   function closeSlash() { slashItems = []; slashIndex = -1; renderSlashPopup(); }
+
+  // ─── @file mention completion (host-served fileReferences/list) ─────────────
+  // Mirror of the host grammar in src/context/collector.ts: an @path token at
+  // the start of input or after whitespace, quoted as @"path with spaces", with
+  // directories keeping a trailing slash so completion can descend a level.
+  //
+  // NOTE: this entire file is a template literal, so every backslash below is
+  // doubled on purpose — \\s reaches the webview as \s, whereas a single \s
+  // would collapse to plain "s" and silently break the pattern. Same trap as
+  // AT_FILE_RE documented further down.
+  function activeAtToken(text, cursor) {
+    const before = text.slice(0, cursor);
+    const quoted = /(?:^|\\s)(@"([^"]*))$/.exec(before);
+    if (quoted) return { prefix: quoted[1], query: quoted[2], quoted: true };
+    const plain = /(?:^|\\s)(@([^\\s"]*))$/.exec(before);
+    if (!plain) return null;
+    return { prefix: plain[1], query: plain[2], quoted: false };
+  }
+
+  // Byte-for-byte the host's formatFileMention: quote when the path needs it,
+  // and leave a quoted directory's quote OPEN so the next query descends.
+  function formatMention(candidate, preserveQuote) {
+    const path = candidate.kind === 'directory' ? candidate.path + '/' : candidate.path;
+    if (/[\\u0000-\\u001f\\u007f-\\u009f"]/.test(path)) return null;
+    const quoted = preserveQuote === true || /\\s/.test(path);
+    if (!quoted) return '@' + path;
+    if (candidate.kind === 'directory') return '@"' + path;
+    return '@"' + path + '"';
+  }
+
+  function renderAtPopup() {
+    const popup = $('at-popup');
+    if (atItems.length === 0) { popup.style.display = 'none'; popup.innerHTML = ''; return; }
+    popup.style.display = '';
+    popup.innerHTML = '';
+    atItems.forEach((c, i) => {
+      const row = document.createElement('div');
+      row.className = 'at-row' + (i === atIndex ? ' active' : '');
+      const glyph = document.createElement('span');
+      glyph.className = 'at-glyph';
+      glyph.textContent = c.kind === 'directory' ? '📁' : '📄';
+      const path = document.createElement('span');
+      path.className = 'at-path';
+      path.textContent = c.path;
+      const kind = document.createElement('span');
+      kind.className = 'at-kind';
+      kind.textContent = c.kind === 'directory' ? 'folder' : '';
+      row.appendChild(glyph); row.appendChild(path); row.appendChild(kind);
+      // mousedown, not click: blur would close the popup first.
+      row.addEventListener('mousedown', (e) => { e.preventDefault(); applyAt(c); });
+      popup.appendChild(row);
+    });
+  }
+
+  function closeAt() {
+    atItems = []; atIndex = -1; atToken = null;
+    if (atTimer) { clearTimeout(atTimer); atTimer = null; }
+    renderAtPopup();
+  }
+
+  function applyAt(candidate) {
+    const ta = $('input');
+    if (!atToken) return;
+    const insertion = formatMention(candidate, atToken.quoted);
+    if (insertion === null) { closeAt(); return; }
+    const cursor = ta.selectionStart;
+    const start = cursor - atToken.prefix.length;
+    ta.value = ta.value.slice(0, start) + insertion + ta.value.slice(cursor);
+    const caret = start + insertion.length;
+    ta.setSelectionRange(caret, caret);
+    ta.focus();
+    updateContextPreview();
+    if (candidate.kind === 'directory') {
+      // Completion stays open at the new trailing slash — the host lists the
+      // directory's children for the re-queried token.
+      refreshAtCompletion();
+      return;
+    }
+    ta.value = ta.value.slice(0, caret) + ' ' + ta.value.slice(caret);
+    ta.setSelectionRange(caret + 1, caret + 1);
+    closeAt();
+  }
+
+  /** Recompute the active token and ask the host for its candidates. */
+  function refreshAtCompletion() {
+    const ta = $('input');
+    const token = activeAtToken(ta.value, ta.selectionStart);
+    if (token === null) { closeAt(); return; }
+    atToken = token;
+    if (atTimer) { clearTimeout(atTimer); atTimer = null; }
+    if (token.query === '') {
+      // An empty query (a bare @) asks immediately so the menu opens on the
+      // keystroke rather than after a debounce.
+      post({ type: 'refsQuery', query: '' });
+      return;
+    }
+    atTimer = setTimeout(() => { atTimer = null; post({ type: 'refsQuery', query: token.query }); }, 90);
+  }
 
   // ─── control surface ────────────────────────────────────────────────────────
   // The harness ships plan mode, permission presets, sandbox/approval knobs,
@@ -1004,20 +1189,25 @@ export const CLIENT_SCRIPT = /* js */ `
     return String(n);
   }
 
-  // ─── @file parsing (webview-side preview only; authoritative parse is in extension host) ──
-  // NOTE: This code lives inside a template literal. Backslash sequences like \\s must be
-  // doubled (\\\\s) so the output JS receives \s, not s. Without doubling, \s→s and \d→d,
-  // breaking the regex entirely ([^\s:] becomes [^s:] which does NOT exclude whitespace).
-  const AT_FILE_RE = /@file:([^\\s:]+(?::(?!L\\d)\\\\?[^\\s:]*)*)(?::L(\\d+)(?:-L(\\d+))?)?/g;
-  function parseAtFilePreview(text) {
-    const files = [];
+  // ─── @ mention preview ──────────────────────────────────────────────────────
+  // Read-only echo of the mentions currently in the box. The extension host
+  // sends the message text to the agent verbatim — nothing here is stripped,
+  // resolved or inlined.
+  // NOTE: doubled backslashes are load-bearing (template literal), see above.
+  const MENTION_SOURCE = '@(?:"([^"\\n]*)"|([^\\s"]+))(?::L(\\d+)(?:-L(\\d+)))?';
+  function findMentionPreview(text) {
+    const found = [];
+    const re = new RegExp(MENTION_SOURCE, 'g');
     let m;
-    const re = new RegExp(AT_FILE_RE.source, 'g');
     while ((m = re.exec(text)) !== null) {
-      const entry = { path: m[1].replace(/\\\\/g, '/'), lineStart: m[2] ? parseInt(m[2], 10) : undefined, lineEnd: m[3] ? parseInt(m[3], 10) : undefined };
-      files.push(entry);
+      // Only at the start of the text or after whitespace (an email address is
+      // not a mention).
+      if (m.index > 0 && !/\\s/.test(text.charAt(m.index - 1))) continue;
+      const path = m[1] !== undefined ? m[1] : m[2];
+      if (path === undefined || path === '') continue;
+      found.push({ path: path, lineStart: m[3] ? parseInt(m[3], 10) : undefined, lineEnd: m[4] ? parseInt(m[4], 10) : undefined });
     }
-    return files;
+    return found;
   }
 
   function shortPath(p) {
@@ -1029,26 +1219,22 @@ export const CLIENT_SCRIPT = /* js */ `
   function updateContextPreview() {
     const ta = $('input');
     const text = ta.value;
-    const atFiles = parseAtFilePreview(text);
+    const mentions = findMentionPreview(text);
     const bar = $('context-bar');
-    const fileChip = $('context-active-file');
-    const selChip = $('context-selection');
     const filesContainer = $('context-files');
 
-    // @file chips
     filesContainer.innerHTML = '';
-    for (const f of atFiles) {
+    for (const f of mentions) {
       const chip = document.createElement('span');
       chip.className = 'ctx-chip';
       let label = shortPath(f.path);
       if (f.lineStart) label += ':L' + f.lineStart + (f.lineEnd ? '-L' + f.lineEnd : '');
       chip.textContent = label;
+      chip.title = 'The agent reads this file itself — no content is pasted.';
       filesContainer.appendChild(chip);
     }
 
-    // Show/hide bar
-    const hasAny = atFiles.length > 0;
-    bar.style.display = hasAny ? '' : 'none';
+    bar.style.display = mentions.length > 0 ? '' : 'none';
   }
 
   // ─── event wiring ───────────────────────────────────────────────────────────
@@ -1060,6 +1246,8 @@ export const CLIENT_SCRIPT = /* js */ `
       const sep = ta.value.length > 0 && !ta.value.endsWith(' ') ? ' ' : '';
       ta.value += sep + msg.text;
       ta.focus();
+      // The cursor moves to the end, so a half-typed token is no longer active.
+      closeAt();
       updateContextPreview();
     }
   });
@@ -1067,6 +1255,7 @@ export const CLIENT_SCRIPT = /* js */ `
   $('session-select').addEventListener('change', (e) => {
     if (e.target.value) post({ type: 'selectSession', sessionId: e.target.value });
   });
+  $('connect').addEventListener('click', () => post({ type: 'connect' }));
   $('new-session').addEventListener('click', () => post({ type: 'newSession' }));
   $('refresh').addEventListener('click', () => post({ type: 'refreshSessions' }));
   $('send').addEventListener('click', () => sendPrompt());
@@ -1096,7 +1285,25 @@ export const CLIENT_SCRIPT = /* js */ `
   $('inspector-clear').addEventListener('click', () => { lastInspectorSeq = -1; post({ type: 'inspectorClear' }); $('inspector-list').innerHTML = ''; });
   $('btn-attach').addEventListener('click', () => post({ type: 'attachFile' }));
   $('input').addEventListener('keydown', (e) => {
-    // Slash completion keyboard navigation first.
+    // @ mention completion keyboard navigation first.
+    if (atItems.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        atIndex = (atIndex + 1) % atItems.length;
+        renderAtPopup(); return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        atIndex = (atIndex - 1 + atItems.length) % atItems.length;
+        renderAtPopup(); return;
+      }
+      if (e.key === 'Tab' || (e.key === 'Enter' && atIndex >= 0)) {
+        e.preventDefault();
+        applyAt(atItems[atIndex >= 0 ? atIndex : 0]); return;
+      }
+      if (e.key === 'Escape') { e.preventDefault(); closeAt(); return; }
+    }
+    // Slash completion keyboard navigation.
     if (slashItems.length > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -1118,32 +1325,120 @@ export const CLIENT_SCRIPT = /* js */ `
       e.preventDefault(); sendPrompt();
     }
   });
-  // Update context preview as user types @file references (+ slash popup)
+  // Update context preview as user types @ mentions (+ slash popup, @ popup)
   $('input').addEventListener('input', () => {
     updateContextPreview();
+    refreshAtCompletion();
     const text = $('input').value;
     const matches = slashMatches(text.trimStart());
     // Only show while typing the command word itself (no space yet).
     const t = text.trimStart();
     // NOTE: this template literal eats single backslashes, so \\s is required
-    // to hand the webview a real \s. (Same trap documented above for AT_FILE_RE.)
+    // to hand the webview a real \s. (Same trap documented above for the
+    // mention grammar regexes.)
     const typing = t.startsWith('/') && !/\\s/.test(t);
     slashItems = typing ? matches : [];
     slashIndex = slashItems.length > 0 ? 0 : -1;
     renderSlashPopup();
   });
-  $('input').addEventListener('blur', () => setTimeout(closeSlash, 150));
+  // Re-derive the token on caret moves too: arrowing back into a mention should
+  // offer its completion again, and arrowing out should close the menu.
+  $('input').addEventListener('click', () => { refreshAtCompletion(); });
+  $('input').addEventListener('blur', () => setTimeout(() => { closeSlash(); closeAt(); }, 150));
 
-  // Send prompt: the extension host does authoritative @file parsing and
-  // inlines file content into the user message. Steer is read from the
-  // checkbox (only shown while the agent is running).
+  // ─── composer attachments: paste, drop, and the send gate ──────────────────
+  const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+
+  function fileToPayload(file, index) {
+    return new Promise(function (resolve) {
+      const reader = new FileReader();
+      reader.onload = function () {
+        const raw = String(reader.result || '');
+        const comma = raw.indexOf(',');
+        if (comma < 0) { resolve(null); return; }
+        const declared = (file.type || '').toLowerCase();
+        const isImage = IMAGE_TYPES.indexOf(declared) >= 0;
+        const key = 'composer-' + String(Date.now()) + '-' + String(index);
+        if (isImage) {
+          try { attPreview[key] = URL.createObjectURL(file); } catch (e) { /* no thumbnail */ }
+        }
+        resolve({
+          kind: isImage ? 'image' : 'file',
+          name: file.name || ('pasted-image.' + declared.slice('image/'.length)),
+          mediaType: declared,
+          data: raw.slice(comma + 1),
+          key: key,
+        });
+      };
+      reader.onerror = function () { resolve(null); };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function addLocalFiles(files) {
+    const out = [];
+    for (let i = 0; i < files.length; i++) {
+      const payload = await fileToPayload(files[i], i);
+      if (payload) out.push(payload);
+    }
+    if (out.length > 0) post({ type: 'pendingAdd', items: out });
+  }
+
+  function clipboardFiles(clip) {
+    const out = [];
+    if (!clip) return out;
+    if (clip.files && clip.files.length) {
+      for (let i = 0; i < clip.files.length; i++) out.push(clip.files[i]);
+      return out;
+    }
+    const items = clip.items || [];
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].kind !== 'file') continue;
+      const f = items[i].getAsFile();
+      if (f) out.push(f);
+    }
+    return out;
+  }
+
+  // A pasted screenshot is an attachment, not text. Plain text paste is left to
+  // the browser so the textarea keeps behaving normally.
+  $('input').addEventListener('paste', (e) => {
+    const files = clipboardFiles(e.clipboardData);
+    if (files.length === 0) return;
+    e.preventDefault();
+    void addLocalFiles(files);
+  });
+
+  // Drag a file onto the composer to attach it.
+  const dropZone = $('input-area');
+  dropZone.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer) return;
+    e.preventDefault();
+    dropZone.classList.add('drag-over');
+  });
+  dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('drag-over'); });
+  dropZone.addEventListener('drop', (e) => {
+    const files = e.dataTransfer && e.dataTransfer.files ? Array.from(e.dataTransfer.files) : [];
+    dropZone.classList.remove('drag-over');
+    if (files.length === 0) return;
+    e.preventDefault();
+    void addLocalFiles(files);
+  });
+
+  // Send prompt: the text goes to the agent exactly as typed. @ mentions are
+  // ordinary prompt text the host already knows how to hand to the model — the
+  // extension host does not read the file or paste its contents.
   function sendPrompt() {
     const ta = $('input');
     const text = ta.value.trim();
-    if (!text) return;
+    const held = currentState && currentState.pending ? currentState.pending.length : 0;
+    // Pictures with no words are a legitimate prompt; the host only refuses a
+    // prompt whose every part is blank.
+    if (!text && held === 0) return;
     ta.value = '';
     post({ type: 'sendPrompt', text, steer: $('steer').checked === true });
     closeSlash();
+    closeAt();
     updateContextPreview();
   }
 

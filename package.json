@@ -2,7 +2,7 @@
   "name": "harness-connector-deepseek",
   "displayName": "DeepSeek Harness Connector",
   "description": "Native VS Code client for DeepSeek Harness. Connect to your existing local Harness instance and continue the same workspaces and sessions directly inside VS Code.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "lucasliang",
   "license": "MIT",
   "repository": {
@@ -50,16 +50,12 @@
       {
         "command": "deepseekHarness.connect",
         "title": "DeepSeek Harness: Connect",
-        "category": "DeepSeek Harness"
+        "category": "DeepSeek Harness",
+        "icon": "$(plug)"
       },
       {
         "command": "deepseekHarness.disconnect",
         "title": "DeepSeek Harness: Disconnect",
-        "category": "DeepSeek Harness"
-      },
-      {
-        "command": "deepseekHarness.setSessionToken",
-        "title": "DeepSeek Harness: Set Session Token from Launch URL",
         "category": "DeepSeek Harness"
       },
       {
@@ -141,8 +137,8 @@
     "menus": {
       "view/title": [
         {
-          "command": "deepseekHarness.setSessionToken",
-          "when": "view == deepseekHarness.sessionView",
+          "command": "deepseekHarness.connect",
+          "when": "view == deepseekHarness.sessionView && deepseekHarness.offline",
           "group": "navigation@1"
         }
       ],
@@ -186,7 +182,7 @@
         "deepseekHarness.autoSession": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Mint the browser-session cookie locally from `$DSH_HOME/.credentials.yaml` so no launch URL has to be pasted. Disable to require the sanctioned token exchange every time. See the README's 'How the session is obtained' for the security reasoning."
+          "markdownDescription": "Mint the browser-session cookie locally from `$DSH_HOME/.credentials.yaml`, which is how the extension authenticates today (there is no paste-a-launch-URL command any more). Turning this off leaves the extension unauthenticated — it is a security switch, not a convenience toggle. See the README's 'How the session is obtained'."
         }
       }
     }

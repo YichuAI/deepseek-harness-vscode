@@ -27,6 +27,10 @@ function blocksToText(blocks: ContentBlock[] | undefined): string {
     if (b && typeof b === 'object' && 'type' in b) {
       if (b.type === 'text' && typeof b.text === 'string') parts.push(b.text)
       else if (b.type === 'reasoning' && typeof b.text === 'string') { /* handled separately */ }
+      // An image block carries a durable ref, not text. Stand in for it so a
+      // picture in the transcript is visibly there rather than an empty bubble.
+      else if (b.type === 'image') parts.push('[image]')
+      else if (b.type === 'file') parts.push('[file]')
       else if (b.type === 'tool-result') {
         const inner = blocksToText(b.content as ContentBlock[] | undefined)
         if (inner) parts.push(inner)
@@ -129,6 +133,20 @@ export class ConversationModel {
 
   /** Bump renderVersion so the webview re-renders items (used when review/approval state changes). */
   touch(): void { this.bump() }
+
+  /**
+   * Set the running flag from the host's own status relay
+   * (`api-session/status` on the `$events` stream).
+   *
+   * The durable `turn/start` / `turn/end` events also flip this, but they lag by
+   * a round trip — and they never arrive at all when another client drove the
+   * turn, which is exactly when the Stop button must appear.
+   */
+  setRunning(running: boolean): void {
+    if (this.running === running) return
+    this.running = running
+    this.bump()
+  }
 
   loadHistory(events: SessionEvent[]): void {
     this.items = []

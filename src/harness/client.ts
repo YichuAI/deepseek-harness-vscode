@@ -62,7 +62,9 @@ import {
   defaultWireProfile, isMissingMethodError, isShapeRejection, negotiateWire, wireEndpoint, type WireProfile,
 } from './wire.ts'
 import {
+  type ApprovalDecision,
   type ApprovalOutcome,
+  type AskUserQuestionAnswer,
   type AssistantStreamFrame,
   type ClientRequest,
   type CommandDescriptor,
@@ -229,6 +231,12 @@ export class HarnessClient implements Disposable {
   private activeSink: ActiveSink | undefined
   /** Observed approval/request frames, keyed by eventId, for later respond. */
   private readonly approvalFrames = new Map<string, { eventId: string; sessionId: SessionId }>()
+  /**
+   * Observed `user-questions/request` frames, keyed by eventId. Kept separate
+   * from `approvalFrames` so neither responder can answer the other's waterfall
+   * with a shape the Host would resolve into nonsense.
+   */
+  private readonly questionFrames = new Map<string, { eventId: string; sessionId: SessionId }>()
   private readonly sessionListeners = new Set<SessionEventListener>()
   private readonly approvalListeners = new Set<ApprovalFrameListener>()
   private readonly stateListeners = new Set<(s: ConnectionState) => void>()
@@ -702,8 +710,15 @@ export class HarnessClient implements Disposable {
    * Answer one approval waterfall. The `approval/request` frame (seen on the
    * `$events` stream) carries an `eventId`; we POST it to `/api/$events/result`
    * with our `clientId` in a `client-request` envelope.
+   *
+   * The decision string must ride in `outcome.value`, NOT be encoded as
+   * `{kind:'result'}` alone: the value IS the waterfall's return value, so an
+   * omitted one resolves the Host listener with `undefined`, which
+   * `ApprovalService.decide` normalizes to `'unavailable'` — a fail-closed deny
+   * that still writes a plausible-looking `approval/decided` audit entry. A
+   * bare `{kind:'result'}` therefore *looks* accepted and silently refuses.
    */
-  respondApproval(eventId: string, outcome: ApprovalOutcome): Promise<void> {
+  respondApproval(eventId: string, outcome: ApprovalDecision): Promise<void> {
     const frame = this.approvalFrames.get(eventId)
     if (frame === undefined) {
       throw new Error(
@@ -713,9 +728,55 @@ export class HarnessClient implements Disposable {
     const payload: RemoteEventResult = {
       clientId: this.info?.clientId ?? '',
       eventId,
-      outcome: this.outcomeFor(outcome),
+      outcome: { kind: 'result', value: outcome },
     }
     return this.respondToRemoteEvent(payload)
+  }
+
+  /**
+   * Answer one `user-questions/request` waterfall.
+   *
+   * Same envelope rule as {@link respondApproval}: the return value of the Host
+   * waterfall is the whole `AskUserQuestionAnswer` object, so it travels in
+   * `outcome.value` (`{ answers: [{ id, selected, custom? }] }`). Answering any
+   * other way leaves the tool call waiting on a promise that never settles.
+   */
+  respondQuestion(eventId: string, answer: AskUserQuestionAnswer): Promise<void> {
+    if (!this.questionFrames.has(eventId)) {
+      throw new Error(
+        `Cannot answer question ${eventId}: no matching user-questions/request frame was observed for this session.`,
+      )
+    }
+    const payload: RemoteEventResult = {
+      clientId: this.info?.clientId ?? '',
+      eventId,
+      outcome: { kind: 'result', value: answer },
+    }
+    return this.respondToRemoteEvent(payload)
+  }
+
+  /**
+   * Hand a still-open waterfall back to the Host chain without answering it.
+   *
+   * This is a real delegation, not a dismissal: the Host drops our delivery and
+   * the request stays pending for whichever client still holds one (the Web UI).
+   * Only when no delivery is left does it settle the chain with `next()`.
+   */
+  delegateWaterfall(eventId: string): Promise<void> {
+    if (!this.approvalFrames.has(eventId) && !this.questionFrames.has(eventId)) {
+      throw new Error(`Cannot delegate ${eventId}: no matching waterfall frame was observed.`)
+    }
+    const payload: RemoteEventResult = {
+      clientId: this.info?.clientId ?? '',
+      eventId,
+      outcome: { kind: 'next' },
+    }
+    return this.respondToRemoteEvent(payload).then(() => {
+      // We hold no delivery any more, so a second answer from here would be a
+      // silent no-op. Forgetting the frame turns that into a thrown error.
+      this.approvalFrames.delete(eventId)
+      this.questionFrames.delete(eventId)
+    })
   }
 
   // ─── event subscription ─────────────────────────────────────────────────────
@@ -893,14 +954,15 @@ export class HarnessClient implements Disposable {
     }
   }
 
-  private outcomeFor(o: ApprovalOutcome): RemoteEventResult['outcome'] {
-    switch (o) {
-      case 'allowed-once': return { kind: 'result' }
-      case 'rejected': return { kind: 'rejected', error: { name: 'rejected', message: 'Rejected by user' } }
-      case 'cancelled': return { kind: 'rejected', error: { name: 'cancelled', message: 'Cancelled by user' } }
-      case 'unavailable': return { kind: 'rejected', error: { name: 'unavailable', message: 'Unavailable' } }
-    }
-  }
+  // There used to be an `outcomeFor()` here that mapped a decision onto an
+  // envelope, and its `rejected` branch was
+  // `{ kind: 'rejected', error: { name: 'rejected' } }`. That is wrong in the
+  // same way the missing value was: a rejected outcome cancels the Host
+  // waterfall, whose rejection `ApprovalService.decide` then contains and
+  // normalizes to `'unavailable'`. A click on Deny was therefore audited as
+  // "requires approval, but no approval channel is available" instead of
+  // "the user rejected tool X". A deny is a RESULT carrying the vocabulary
+  // string, not a transport error — nothing sends `rejected` any more.
 
   /**
    * Call one method. The request object `req` is wrapped as `{ args: <inner> }`,
@@ -1063,19 +1125,23 @@ export class HarnessClient implements Disposable {
           return
         }
         if (event === 'user-questions/request') {
-          this.notifyApproval({
-            type: 'question/requested',
-            sessionId: typeof req.sessionId === 'string' ? req.sessionId : (this.activeSessionId ?? ''),
-            questions: Array.isArray(req.questions) ? req.questions : [],
-          } as MuxFrame, eventId)
+          this.emitQuestionRequested(eventId, req)
           return
         }
         this.opts.log(`$events: unhandled waterfall "${event}"`)
         return
       }
-      case 'cancel':
-        this.opts.log(`$events: waterfall cancelled (${String(f.eventId ?? '')})`)
+      case 'cancel': {
+        // The Host withdrew a waterfall: either another client answered it, or
+        // the turn ended. Nothing else announces that to a mux client, so
+        // without this the card sits pending forever.
+        const eventId = String(f.eventId ?? '')
+        this.approvalFrames.delete(eventId)
+        this.questionFrames.delete(eventId)
+        this.opts.log(`$events: waterfall withdrawn (${eventId})`)
+        this.notifyApproval({ type: 'waterfall/resolved', eventId } as unknown as MuxFrame, eventId)
         return
+      }
       case 'emit': {
         // `api-session/status` is the host's own running flag; without it the
         // Stop button only updates when a full turn/end event arrives.
@@ -1097,12 +1163,7 @@ export class HarnessClient implements Disposable {
         return
       }
       case 'user-questions/request': {
-        const req = (f.request ?? {}) as Record<string, unknown>
-        this.notifyApproval({
-          type: 'question/requested',
-          sessionId: typeof req.sessionId === 'string' ? req.sessionId : (this.activeSessionId ?? ''),
-          questions: Array.isArray(req.questions) ? req.questions : [],
-        } as MuxFrame, String(f.eventId ?? ''))
+        this.emitQuestionRequested(String(f.eventId ?? ''), (f.request ?? {}) as Record<string, unknown>)
         return
       }
     }
@@ -1120,6 +1181,28 @@ export class HarnessClient implements Disposable {
       reason: typeof req.reason === 'string' ? req.reason : undefined,
     } as MuxFrame
     this.approvalFrames.set(eventId, { eventId, sessionId: (internal as { sessionId: string }).sessionId })
+    this.notifyApproval(internal, eventId)
+  }
+
+  /**
+   * Translate one wire `user-questions/request` into the internal requested
+   * frame.
+   *
+   * `sessionId` is the one field the wire request does not carry: the event is
+   * delivered on an Agent-scoped waterfall, so the session identity is the scope
+   * subject's. `wait.callId` is the tool call the card belongs to and is what
+   * lets the answer be tied back to an `ask_user_question` row; it is absent for
+   * an indefinite wait, which is still answerable, just unattached.
+   */
+  private emitQuestionRequested(eventId: string, req: Record<string, unknown>): void {
+    const wait = (req.wait ?? {}) as Record<string, unknown>
+    const internal = {
+      type: 'question/requested',
+      sessionId: typeof req.sessionId === 'string' ? req.sessionId : (this.activeSessionId ?? ''),
+      questions: Array.isArray(req.questions) ? req.questions : [],
+      callId: typeof wait.callId === 'string' ? wait.callId : undefined,
+    } as MuxFrame
+    this.questionFrames.set(eventId, { eventId, sessionId: (internal as { sessionId: string }).sessionId })
     this.notifyApproval(internal, eventId)
   }
 

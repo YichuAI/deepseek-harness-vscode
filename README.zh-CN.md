@@ -1,9 +1,9 @@
-# DeepSeek Harness Connector for VS Code (v0.1.3)
+# DeepSeek Harness Connector for VS Code (v0.1.4)
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
 [![VS Code Marketplace](https://img.shields.io/badge/VS%20Code-Marketplace-blue.svg)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
-[![Version](https://img.shields.io/badge/version-0.1.3-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.3)
+[![Version](https://img.shields.io/badge/version-0.1.4-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.4)
 
 > DeepSeek Harness 的原生 VS Code 客户端。
 >
@@ -25,12 +25,63 @@ VS Code ─────┘
 
 VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**会话——所以浏览器刷新该会话时能看到 VS Code 发送的内容。
 
+## v0.1.4 新特性
+
+**审批和 Agent 提问现在都能在侧边栏里回答了 —— 而且点"允许"真的等于允许。**
+
+这次的起因只有一句话：*"云端提问题的时候无法在 vscode 里审批。"* 而把它修好，靠的是先把一条
+契约钉死：**`POST /api/$events/result` 上的 `outcome.value` 就是宿主瀑布的返回值。**
+下面五条修复里有三条，其实是同一个事实的三个侧面。
+
+- **修好了 Agent 提问（`user-questions/request`）在 VS Code 里完全没有出口。** 客户端一直把它
+  正确翻译成 `question/requested`，然后控制器把这一帧丢在地上：既不渲染，也无法回答。
+  后果比"少一张卡片"严重——宿主侧 `ask_user_question` **阻塞**着那次工具调用，
+  没人回答，这一轮就停在那里。现在它和审批共用同一个待答面板。
+  - 单问题单选：点选项即作答（与 Web UI 的选项卡片一致）；多问题或复选：显式点 **Answer**
+    一次提交整批，未作答的会就地报错，而不是把一批空答案发上去。
+  - 自由文本始终可用，走 `custom` 字段（不是 `selected`）。
+- **修好了"点'允许'从来没有允许过任何东西"。** 审批的应答体发的是 `{ kind: 'result' }`，
+  **没有 `value`**。但 `value` 就是宿主瀑布的返回值，省略它等于用 `undefined` 结算；
+  而 `ApprovalService.decide` 会把一切不在词表内的返回值（包括 `undefined`）归一化成
+  `'unavailable'` —— 一次**静默的 fail-closed 拒绝**，而且照常写一条看起来完全正常的
+  `approval/decided` 审计。真机实测：裸形状 → `outcome: "unavailable"`，工具报
+  *"requires approval, but no approval channel is available"*；带值形状 →
+  `outcome: "allowed-once"`，命令真的执行了。
+- **修好了"点'拒绝'也被记成'没有可用的审批通道'"。** 原来把拒绝编码成
+  `{ kind: 'rejected', error: … }`，那会**取消**宿主瀑布，`decide` 里的 containment
+  再把它归一化成 `'unavailable'`。拒绝是一个携带词表字符串的 **result**，不是传输层错误。
+- **修好了"在 Web UI 里回答过之后，VS Code 的卡片永远点得动"。** 对 mux 客户端，宿主
+  **只**用一个 `cancel` 帧表示撤销（0.2.1 不转发 `approval/resolved` / `question/resolved`），
+  而旧代码只把它记进日志。现在 `cancel` 会被翻译成 `waterfall/resolved` 并撤掉对应卡片。
+- **修好了"审批卡只在能匹配到工具行时才画得出来"。** 它原来嵌在 ToolItem 里，靠 `callId`
+  匹配；没有匹配行（会话没在前台、工具行还没折进来）就等于不存在。现在待答项有自己的面板，
+  位于输入框上方——正是你准备打字时会看的地方。
+- **改了：审批的放行门槛改成看"理由"，不再看工具名。** 原来的白名单是
+  `write/edit/read/grep/…`——它列的这些名字本机宿主根本没有（shell 工具叫 `pwsh`），
+  于是**每一次真实的 shell 升级都会被拒**，而这条路径恰好最常见。名字本来也说明不了
+  申请有多大权限，理由才说明（*"escalate sandbox to danger-full-access: …"* 是宿主自己
+  写的风险陈述），而且理由现在会**原样显示**在按钮旁边。现在只在理由声明了
+  full/unrestricted access 时不给内联允许；那张卡仍会显示、仍可拒绝、并多一个
+  **Answer in Web UI** 把它交回浏览器。被拒绝的按钮不再没有解释——`blockedBy` 会说明原因。
+- **新增 `delegateWaterfall`** —— 把仍开着的瀑布交回宿主链（`outcome: {kind:'next'}`）。
+  这是真正的委托而不是忽略：我们放弃自己的 delivery，请求继续留给 Web UI；
+  只有当没有别的 delivery 时，宿主才会用 `next()` 结算。
+- 面板不再把"已解决"的请求画出来。
+
+验证：回归门 **190 → 211 项**全绿（新增 G2 组，覆盖面板渲染、Allow/Deny 各自发出的**确切**载荷、
+高危卡不给 Allow 但给交回、单选点击即答（按**标签**而不是下标）、多问题必须显式提交、
+空答案被就地拦下、自由文本走 `custom`、已解决项离开面板）；真机集成 **21 → 25 项**全绿，
+其中两条为新链路实测：宿主把 `user-questions/request` 交付给 mux 客户端且答案回到了被阻塞的
+工具调用；宿主交付 `approval/request` 且"允许"**真的授予了**越界升级（命令执行成功）。
+
+完整 diff 见 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
+
 ## v0.1.3 新特性
 
 **回话终于能收到了，图片终于能发了，`@` 引用改用宿主自己的语法。**
 
 > 中文版 README 的"新特性"长期停在 v0.0.3；0.0.9 ~ 0.1.2 的完整记录见英文版
-> [README.md](./README.md) 与 [CHANGELOG.md](./CHANGELOG.md)，本段只记 0.1.3。
+> [README.md](./README.md) 与 [CHANGELOG.md](./CHANGELOG.md)，本段只记 0.1.3 与 0.1.4。
 
 - **修好了"能连上但收不到回话"。** 插件一直把传输层建模成"一条 `$events` 承载所有帧"。
   真机（`0.2.1-alpha.2`）上 `$events` 是一份固定的转发白名单：它会发一个 `ready`
@@ -71,6 +122,9 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 
 - **Diff 审查与内联代码应用** —— Agent 写入或编辑文件时，侧边栏自动出现审查卡片，展示每个变更文件的 `+新增`/`-删除` 行数。点击 **Diff** 打开 VS Code 原生 diff 编辑器。支持逐文件 Accept（保留）/ Reject（通过 `git checkout` 安全回退），也可批量操作。
 - **审批工作流集成** —— `approval/requested` 事件现在以内联卡片形式展示，带 **Allow once** / **Deny** 按钮。不再需要切浏览器审批。安全允许列表限制哪些工具可以在 VS Code 内审批，高风险操作仍需 Web UI。
+  - **已在 v0.1.4 更正：** 这里的"内联卡片"是靠 `callId` 匹配工具行画出来的，匹配不上就不显示；门槛用的是一份工具名允许列表，
+    而本机宿主的 shell 工具叫 `pwsh`，白名单里没有它——所以每次真实升级都被拒。现在待答项走独立面板，
+    门槛改成读宿主给出的**理由**。详见上面的 v0.1.4 段。
 - **@file 内容内联** —— 文件引用（`@file:path` 或 `@file:path:L10-L20`）的内容现在被直接读取并内联到用户消息中，确保 agent 始终能看到文件内容。`context` 元数据（活动文件、选区）仅在会话首次发送时附带。
   - **已在 v0.1.3 更正：** `@file:path` 这套语法和"内联正文"都是插件自己发明的，宿主另有语法。
     现在改用 `@path` / `@"含空格的 path"` / `@dir/`（可带 `:L<n>` 行号后缀），
@@ -94,7 +148,7 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 - 实时流式传输助手回复，支持 **Markdown 渲染**（代码块、列表、表格、链接）。
 - 将工具调用显示为**折叠卡片**，带语义化标题（`Read src/foo.ts`、`Search "pattern"`、`Run npm test`）。
 - **审查 Agent 代码变更** —— diff 卡片支持逐文件 Accept/Reject，原生 VS Code diff 编辑器，批量 Accept All / Reject All。
-- **审批或拒绝 Agent 操作** —— 内联审批卡片，Allow once / Deny 按钮（安全允许列表强制执行）。
+- **审批或拒绝 Agent 操作** —— 输入框上方的待答面板，带 Allow once / Deny 按钮（门槛看的是宿主给出的**理由**，不是工具名允许列表）。
 - **附加文件上下文** —— 在提示中使用 `@file:path` 或 `@file:path:L10-L20`，文件内容自动读取并内联。右键资源管理器或编辑器可快速插入。
 - 默认隐藏插件注入的系统消息；通过 `SYS` 按钮切换。
 - 停止当前回合。
@@ -109,7 +163,7 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 - 不调用 `commands/execute`，不访问 `credentials` 或 `settings` API。
 - 不切换模型。
 - 不做内联补全、终端/LSP 集成。
-- 高风险审批（如带不可信输入的 `bash`）不能在 VS Code 内批准——卡片显示"Review in Web UI"。
+- 理由中声明了 full/unrestricted access 的审批不能在侧边栏内放行——卡片只给 Deny 和一个 **Answer in Web UI** 交回入口。
 - 不建立第二份会话数据库——Harness Session 是**唯一**的真相源。
 - 不自动安装/启动/升级 `dsh`。
 - 不 fork 或修改 Harness 源码。
@@ -143,7 +197,7 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
    或从 [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases) 安装 VSIX：
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.0.8.vsix
+   code --install-extension harness-connector-deepseek-0.1.4.vsix
    ```
 
 3. **不用配置任何东西。** 扩展会自动连接：它读取 `dsh web` 写在 `$DSH_HOME/.credentials.yaml` 里的浏览器会话签名密钥，自己签出同一个 `dsh-auth-…` cookie。**没有需要粘贴的 token。**
@@ -258,14 +312,17 @@ path"`、`@dir/`，可带 `:L<n>` / `:L<n>-L<m>` 后缀；从 `@` 补全列表�
 一个独立的 Node 脚本用真实客户端代码驱动一个**假**的 harness（不预设具体版本——插件是协商的，这个假实现也是）—— 不需要 `dsh web`：
 
 ```bash
-npm run protocol-test    # 83 项断言：线缆协商（点分/斜杠、cookie 门禁、
+npm run protocol-test    # 211 项断言：双流传输拆分（$events 白名单 vs
+                         # session/follow）、线缆协商（点分/斜杠、cookie 门禁、
                          # 事件套接字）、认证、cookie 派生、{args} payload、
-                         # 审批瀑布、assistant 流、已移除端点的 404 处理、
-                         # 控制面能力探测与全量值状态折叠
+                         # 审批与提问两条瀑布（Allow/Deny 的确切信封、cancel 撤卡、
+                         # next 委托）、assistant 流、已移除端点的 404 处理、
+                         # 控制面能力探测与全量值状态折叠、经真实控制器的
+                         # @ 补全状态契约、用可驱动 DOM 桩跑通的待答面板
 ```
 
 想让**真实**的 `dsh web` 自己报出它提供了什么（端点风格、事件套接字，以及
-29 个候选方法里哪些存在）：
+30 个候选方法里哪些存在）：
 
 ```bash
 npm run protocol-probe            # 默认 127.0.0.1:3080
@@ -285,8 +342,8 @@ npm install
 npm run build        # esbuild → dist/extension.js
 npm run watch        # 变更时自动重建
 npm run typecheck
-npm run package      # → harness-connector-deepseek-0.0.8.vsix
-npm run protocol-test      # 针对假 harness 的 83 项协议断言
+npm run package      # → harness-connector-deepseek-0.1.4.vsix
+npm run protocol-test      # 针对假 harness 的 211 项协议断言
 npm run protocol-probe     # 报告真实 dsh web 暴露了什么
 ```
 
@@ -310,7 +367,7 @@ npm run protocol-probe     # 报告真实 dsh web 暴露了什么
 - 未知的 harness 事件类型会被忽略（协议是可合并扩展的）；它们不会导致客户端崩溃，但也不会渲染。
 - Diff 审查的 Reject 使用 `git checkout` 回退——目标文件上未提交的本地修改会在 Reject 时丢失。
 
-## 路线图（v0.1.4+）
+## 路线图（v0.1.5+）
 
 - 自动连接：查清为什么面对一个健康的本地 `dsh web`，`auth.init()` + `tryMintLocalSession()` 仍可能返回未就绪（如今手动 `Connect` 按钮是兜底，不是修复）
 - 检查器：过滤框 / 类型高亮 / 导出 JSONL

@@ -191,22 +191,6 @@ textarea { resize: none; min-height: 60px; max-height: 200px; width: 100%; }
 .ctx-chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .atfile-hint { font-size: 10px; color: var(--vscode-descriptionForeground); opacity: 0.7; padding: 2px 0; }
 
-/* Approval card (embedded in tool item, always visible) */
-.t-approval {
-  margin: 4px 0; padding: 6px 8px; border-radius: 4px;
-  background: var(--vscode-inputWarningBackground, rgba(202,156,46,.12));
-  border: 1px solid var(--vscode-inputValidation-warningBorder, #ca9c2e);
-  font-size: 12px;
-}
-.t-approval.responding { opacity: 0.7; }
-.t-approval .approval-label { font-weight: 600; color: var(--vscode-charts-yellow, #ca9c2e); }
-.t-approval .approval-tool { margin-top: 2px; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; }
-.t-approval .approval-reason { margin-top: 2px; color: var(--vscode-descriptionForeground); font-size: 11px; }
-.t-approval .approval-actions { display: flex; gap: 6px; margin-top: 6px; align-items: center; }
-.t-approval .approval-actions button { padding: 2px 10px; font-size: 11px; }
-.t-approval .approval-webonly { font-size: 10px; color: var(--vscode-descriptionForeground); font-style: italic; }
-.t-approval .approval-responding { font-size: 10px; color: var(--vscode-descriptionForeground); }
-
 /* Review card (embedded in tool item, always visible) */
 .t-review {
   margin: 4px 0; padding: 6px 8px; border-radius: 4px;
@@ -244,6 +228,32 @@ textarea { resize: none; min-height: 60px; max-height: 200px; width: 100%; }
 #queue-bar .queue-item + .queue-item { border-top: 1px dashed var(--vscode-panel-border, rgba(128,128,128,.2)); }
 #queue-bar .queue-text { flex: 1; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-charts-yellow, #ca9c2e); }
 #queue-bar .queue-item button { padding: 1px 6px; font-size: 10px; flex: 0 0 auto; }
+
+/* ── pending waterfalls: approvals + ask_user_question ───────────────────
+   Both block the Host's tool call, so both belong in the one place the user is
+   already looking when they are about to type. Deliberately styled as a warning
+   block (left rule, raised background) rather than a message: it is a question
+   addressed to the reader, not a record of something that happened. */
+.pending-panel { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
+.pending-card { border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.35)); border-left: 3px solid var(--vscode-charts-yellow, #ca9c2e); border-radius: 4px; padding: 7px 8px; background: var(--vscode-editorWidget-background, rgba(128,128,128,.06)); }
+.pending-card.risk { border-left-color: var(--vscode-charts-red, #c53149); }
+.pending-card.responding { opacity: .6; }
+.pending-kind { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; color: var(--vscode-descriptionForeground); margin-bottom: 3px; }
+.pending-head { font-size: 11.5px; font-weight: 600; margin-bottom: 3px; }
+.pending-tool { font-size: 11px; font-family: var(--vscode-editor-font-family, monospace); margin-bottom: 2px; }
+.pending-reason { font-size: 11px; color: var(--vscode-descriptionForeground); white-space: pre-wrap; word-break: break-word; }
+.pending-note { font-size: 10.5px; color: var(--vscode-charts-red, #c53149); margin-top: 4px; }
+.pending-card .pending-question { font-size: 11.5px; margin: 5px 0 3px; white-space: pre-wrap; word-break: break-word; }
+.pending-card .pending-detail { font-size: 10.5px; color: var(--vscode-descriptionForeground); max-height: 160px; overflow: auto; white-space: pre-wrap; border-left: 2px solid var(--vscode-panel-border, rgba(128,128,128,.3)); padding-left: 6px; margin: 4px 0; }
+.pending-opts { display: flex; flex-direction: column; gap: 2px; margin: 4px 0; }
+.pending-opt { display: flex; align-items: flex-start; gap: 6px; font-size: 11px; padding: 3px 5px; border-radius: 3px; cursor: pointer; }
+.pending-opt:hover { background: var(--vscode-list-hoverBackground, rgba(128,128,128,.15)); }
+.pending-opt input { flex: 0 0 auto; margin: 2px 0 0; }
+.pending-opt .pending-opt-desc { display: block; font-size: 10px; color: var(--vscode-descriptionForeground); }
+.pending-card .pending-other { width: 100%; box-sizing: border-box; font-size: 11px; padding: 3px 5px; margin-top: 3px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(128,128,128,.35))); border-radius: 3px; }
+.pending-actions { display: flex; gap: 6px; margin-top: 6px; }
+.pending-actions button { padding: 3px 10px; font-size: 11px; }
+.pending-actions .grow { flex: 1; }
 
 /* Composer attachments: chips above the textarea. Images that were pasted get a
    local blob thumbnail, so the preview never travels as base64. */

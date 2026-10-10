@@ -69,6 +69,10 @@ export const HTML_SKELETON = /* html */ `
   <div id="messages"></div>
 
   <div id="input-area">
+    <!-- Anything the Host is blocked on: approvals and ask_user_question
+         requests. Sits above every other composer bar because it is the only
+         one that stops the turn from finishing. -->
+    <div id="pending-panel" class="pending-panel" style="display:none;"></div>
     <div id="queue-bar" style="display:none;"></div>
     <div id="attach-bar" class="attach-bar" style="display:none;"></div>
     <div id="at-popup" style="display:none;"></div>

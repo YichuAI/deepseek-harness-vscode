@@ -1,9 +1,9 @@
-# DeepSeek Harness Connector for VS Code (v0.1.3)
+# DeepSeek Harness Connector for VS Code (v0.1.4)
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
 [![VS Code Marketplace](https://img.shields.io/badge/VS%20Code-Marketplace-blue.svg)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
-[![Version](https://img.shields.io/badge/version-0.1.3-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.3)
+[![Version](https://img.shields.io/badge/version-0.1.4-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.4)
 
 > Native VS Code client for DeepSeek Harness.
 >
@@ -24,6 +24,27 @@ VS Code ─────┘
 ```
 
 VS Code reads the workspaces and sessions the browser already has, and continues the **same** session — so a browser refresh of that session sees exactly what VS Code sent.
+
+## What's new in v0.1.4
+
+**Approvals and agent questions can now be answered from the sidebar — and "Allow" actually allows.**
+
+The bug report was one line: *"when the cloud asks a question, I can't answer it in VS Code."* Answering it meant pinning down the one contract everything else hung on — **`outcome.value` on `POST /api/$events/result` is the Host waterfall's return value.** Three of the fixes below are that single fact, seen from three angles.
+
+- **Fixed: agent questions (`user-questions/request`) had no way out of VS Code.** The client translated them into `question/requested` correctly and then the controller dropped the frame on the floor — no card, no way to answer. The damage was worse than a missing card: on the Host side `ask_user_question` **blocks** that tool call, so with nobody answering, the turn simply sat there. Questions now share the same pending panel as approvals.
+  - Single question, single choice: clicking an option answers immediately (same as the Web UI's option cards). Multiple questions or multi-select: hit **Answer** to submit the whole batch at once; anything unanswered is flagged in place instead of being sent up as a batch of empty answers.
+  - Free text is always available and rides the `custom` field (not `selected`).
+- **Fixed: clicking "Allow" had never actually allowed anything.** The approval response body was `{ kind: 'result' }` — **with no `value`**. But `value` *is* the Host waterfall's return value, so omitting it settles the waterfall with `undefined`, and `ApprovalService.decide` normalizes every non-vocabulary return (including `undefined`) to `'unavailable'` — a **silent fail-closed denial**, complete with a perfectly normal-looking `approval/decided` audit line. Measured against a live host: the bare shape → `outcome: "unavailable"` and the tool reports *"requires approval, but no approval channel is available"*; the shape with a value → `outcome: "allowed-once"` and the command genuinely runs.
+- **Fixed: clicking "Deny" was also recorded as "no approval channel available".** Denial was encoded as `{ kind: 'rejected', error: … }`, which *cancels* the Host waterfall; the containment in `decide` then normalized it to `'unavailable'` too. A denial is a **result** carrying a vocabulary string, not a transport error.
+- **Fixed: after answering in the Web UI, the VS Code card stayed clickable forever.** For mux clients the host signals withdrawal with **one** `cancel` frame (0.2.1 does not forward `approval/resolved` or `question/resolved`), and the old code only logged it. `cancel` is now translated into `waterfall/resolved` and the card is withdrawn.
+- **Fixed: approval cards only rendered when a tool row happened to match.** The card lived inside a ToolItem keyed by `callId`, so with no matching row (session not in the foreground, tool row not folded in yet) it effectively did not exist. Pending items now have their own panel above the composer — where you are looking when you are about to type.
+- **Changed: the approval gate now reads the *reason*, not the tool name.** The old allowlist was `write/edit/read/grep/…`, and this host has none of those names (its shell tool is `pwsh`), so **every real shell escalation was rejected** — which is the most common path by far. Names never described how much power was being asked for anyway; the reason does (*"escalate sandbox to danger-full-access: …"* is the Host's own risk statement), and that reason is now shown verbatim next to the buttons. Inline Allow is withheld only when the reason declares full/unrestricted access; that card still renders, can still be denied, and gains an **Answer in Web UI** button. Blocked buttons are no longer unexplained — `blockedBy` states why.
+- **Added `delegateWaterfall`** — hands a still-open waterfall back to the Host chain (`outcome: {kind:'next'}`). This is a real hand-off, not an ignore: we give up our delivery and the request stays with the Web UI; the Host only settles with `next()` once no delivery remains.
+- Resolved requests no longer render in the panel.
+
+Verification: the regression gate is now **211 assertions** (was 190), including a new G2 group covering panel rendering, the *exact* Allow/Deny payloads, high-risk cards offering hand-off instead of Allow, single-click answering by *label*, explicit submission for multi-question, empty answers caught in place, free text via `custom`, and resolved items leaving the panel. Live integration is **25/25** (was 21), two of them new: the host delivers `user-questions/request` to a mux client and the answer reaches the blocked tool call, and the host delivers `approval/request` with "Allow" *actually granting* an out-of-bounds escalation.
+
+See [CHANGELOG.md](./CHANGELOG.md) for the full diff.
 
 ## What's new in v0.1.3
 
@@ -90,7 +111,7 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full diff.
 - Stream the assistant's reply with **Markdown rendering** (code blocks, lists, tables, links).
 - Show tool calls as **collapsed cards** with name-aware titles (`Read src/foo.ts`, `Search "pattern"`, `Run npm test`).
 - **Review agent code changes** — diff cards with per-file Accept/Reject, native VS Code diff editor, bulk Accept All / Reject All.
-- **Approve or deny agent actions** — inline approval cards with Allow once / Deny buttons (security allowlist enforced).
+- **Approve or deny agent actions** — a pending panel above the composer with Allow once / Deny buttons (the gate reads the Host's stated reason, not a tool-name allowlist).
 - **Attach file context** — use `@file:path` or `@file:path:L10-L20` in your prompt; file content is read and inlined automatically. Right-click in explorer or editor for quick insertion.
 - Hide plugin-injected system messages by default; toggle with the `SYS` button.
 - Stop the active turn.
@@ -104,7 +125,7 @@ For your safety, the following remain out of scope:
 
 - No `credentials` or `settings` API; no auto-approve of high-risk tools beyond the opt-in `autoApproveApprovals` switch.
 - No inline completion, terminal/LSP integration.
-- High-risk approvals (e.g. `bash` with untrusted input) cannot be allowed from VS Code — the card shows "Review in Web UI".
+- Approvals whose stated reason declares full/unrestricted access cannot be allowed inline — the card offers Deny and an **Answer in Web UI** hand-off instead.
 - No second session database — the Harness Session is the **only** source of truth.
 - No auto-install / auto-start / auto-upgrade of `dsh`.
 - Does not fork or modify the Harness source.
@@ -140,7 +161,7 @@ For your safety, the following remain out of scope:
    Or install the VSIX from [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases):
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.1.3.vsix
+   code --install-extension harness-connector-deepseek-0.1.4.vsix
    ```
 
 3. Nothing to configure. The extension auto-connects: it reads the browser-session
@@ -266,20 +287,23 @@ that implements the `0.2.1-alpha.2` server half exactly — so no `dsh web` is
 needed:
 
 ```bash
-npm run protocol-test    # 156 assertions: the two-stream transport split
+npm run protocol-test    # 211 assertions: the two-stream transport split
                          # ($events allowlist vs session/follow), wire negotiation
                          # (dot/slash, cookie gating, event socket), auth and cookie
                          # derivation, {args} payloads (wrapped vs bare), the approval
-                         # waterfall, assistant stream start/chunk/end (including
-                         # orphan-chunk rejection), missing-method vs business-not-found
-                         # classification, removed-endpoint 404 handling,
-                         # control-surface capability probing, the whole-value control
-                         # fold, the @-completion state contract through the real
-                         # controller, and the webview script's integrity
+                         # and question waterfalls (exact Allow/Deny envelopes,
+                         # withdrawing on cancel, delegating with next), assistant
+                         # stream start/chunk/end (including orphan-chunk rejection),
+                         # missing-method vs business-not-found classification,
+                         # removed-endpoint 404 handling, control-surface capability
+                         # probing, the whole-value control fold, the @-completion
+                         # state contract through the real controller, the pending
+                         # panel driven through a scriptable DOM stub, and the
+                         # webview script's integrity
 ```
 
 To ask your **real** `dsh web` what it actually serves (endpoint style, event
-socket, and which of 13 candidate methods exist):
+socket, and which of 30 candidate methods exist):
 
 ```bash
 npm run protocol-probe            # defaults to 127.0.0.1:3080
@@ -302,8 +326,8 @@ npm install
 npm run build        # esbuild → dist/extension.js
 npm run watch        # rebuild on change
 npm run typecheck
-npm run package      # → harness-connector-deepseek-0.1.3.vsix
-npm run protocol-test      # 156 protocol assertions against a fake harness
+npm run package      # → harness-connector-deepseek-0.1.4.vsix
+npm run protocol-test      # 211 protocol assertions against a fake harness
 npm run protocol-probe     # report what your real dsh web exposes
 ```
 
@@ -336,7 +360,7 @@ Press `F5` in VS Code to launch an Extension Development Host with the extension
 - Unknown harness event types are ignored (the protocol is merge-extensible); they do not crash the client but also do not render.
 - Diff review revert uses `git checkout` — uncommitted changes to the target file will be lost on Reject.
 
-## Roadmap (v0.1.4+)
+## Roadmap (v0.1.5+)
 
 - Auto-connect: find out why `auth.init()` + `tryMintLocalSession()` can come back not-ready against a healthy local `dsh web` (today the manual `Connect` button is the workaround, not a fix)
 - Inspector: filter box / type highlight / export as JSONL

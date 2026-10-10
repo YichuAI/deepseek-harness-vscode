@@ -121,7 +121,19 @@ export interface ReadyFrame {
   host: { home: string }
 }
 
-/** Body of `POST /api/$events/result` — the approval/question answer. */
+/**
+ * Body of `POST /api/$events/result` — the answer to one forwarded waterfall.
+ *
+ * `{ kind: 'result' }` with **no** `value` is not "yes": the value IS the
+ * waterfall's return value, so omitting it settles the Host chain with
+ * `undefined`. For approvals that lands in `ApprovalService.decide`, whose
+ * normalizer maps every non-vocabulary return (including `undefined`) to
+ * `'unavailable'` — a silent fail-closed DENY that still logs
+ * `approval/decided: unavailable`. An allow MUST carry `value: 'allowed-once'`,
+ * a deny `value: 'rejected'`, and a question `value: { answers: [...] }`.
+ * `{ kind: 'next' }` delegates to the next listener (leaving the request
+ * answerable by another client, e.g. the Web UI).
+ */
 export interface RemoteEventResult {
   clientId: string
   eventId: string
@@ -145,8 +157,16 @@ export type MuxFrame =
   | { type: 'session/subscribed'; sessionId: SessionId; lastSeq: number }
   | { type: 'approval/requested'; sessionId: SessionId; approvalId: string; toolName?: string; callId?: string; reason?: string }
   | { type: 'approval/resolved'; sessionId: SessionId; approvalId: string; outcome: 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable' }
-  | { type: 'question/requested'; sessionId: SessionId; questions: unknown[] }
+  | { type: 'question/requested'; sessionId: SessionId; questions: AskUserQuestionItem[]; callId?: string }
   | { type: 'question/resolved'; sessionId: SessionId; questionRpcId: RpcId; outcome: 'answered' | 'cancelled' }
+  /**
+   * The Host withdrew a waterfall we were still holding. On `0.2.1-alpha.2` this
+   * is the ONLY resolution signal a mux client gets: the Host does not forward
+   * an `approval/resolved` (or an answered-question) event, it sends `cancel` to
+   * every delivery still outstanding. Without this frame the plugin's card stays
+   * pending forever after somebody answers in the Web UI.
+   */
+  | { type: 'waterfall/resolved'; eventId: RpcId }
   | { type: 'session/queue'; sessionId: SessionId; items: unknown[] }
   | { type: 'session/jobs'; sessionId: SessionId; jobs: unknown[] }
   | { type: 'session/projection'; sessionId: SessionId; key: string; value: unknown; seq: number }
@@ -156,6 +176,56 @@ export type MuxFrame =
 // ─── approvals ───────────────────────────────────────────────────────────────
 /** Host-side outcome of one approval waterfall (mirrors the runtime union). */
 export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
+
+/** The subset a UI may ever produce. `cancelled`/`unavailable` are the Host's own fail-closed verdicts. */
+export type ApprovalDecision = 'allowed-once' | 'rejected'
+
+// ─── user questions (`user-questions/request`) ───────────────────────────────
+/** One selectable answer offered to the user. */
+export interface AskUserQuestionOption {
+  label: string
+  description?: string
+}
+
+/**
+ * A caller-declared presentation intent. `plan-review` means the question IS a
+ * plan approval: `detail` is the plan markdown and the option named `approve`
+ * is the only affirmative one. The answer encoding is identical either way —
+ * an intent changes presentation, never the protocol.
+ */
+export interface AskUserQuestionIntent {
+  kind: 'plan-review'
+  approve: string
+  callId?: string
+}
+
+/** One question in a `user-questions/request` waterfall. */
+export interface AskUserQuestionItem {
+  /** Stable caller-provided id, echoed in the answer. */
+  id: string
+  question: string
+  /** Supporting detail rendered with the question (for `plan-review`, the plan itself). */
+  detail?: string
+  header?: string
+  options?: AskUserQuestionOption[]
+  /** Whether more than one option may be selected. Defaults to single-select. */
+  multiSelect?: boolean
+  intent?: AskUserQuestionIntent
+}
+
+/** The human's answer to one question. */
+export interface AskUserQuestionAnswerItem {
+  id: string
+  /** Selected option labels; may accompany `custom` on a multi-select question. */
+  selected: string[]
+  /** Free-text "Other" answer. */
+  custom?: string
+}
+
+/** Host-side return value of the `user-questions/request` waterfall. */
+export interface AskUserQuestionAnswer {
+  answers: AskUserQuestionAnswerItem[]
+}
 
 /** Wire outcome sent to `POST /api/$events/result`. */
 export type RemoteEventOutcome =

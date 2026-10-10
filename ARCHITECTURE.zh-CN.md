@@ -177,12 +177,38 @@ Content-Type: application/json
                          "outcome": { "kind": "result", "value": "allowed-once" | "rejected" } } } }
 ```
 
+**`outcome.value` 就是宿主瀑布的返回值**，而这一条事实就是整份契约：
+
+- 省略 `value`（裸 `{ kind: 'result' }`）等于用 `undefined` 结算瀑布。
+  `ApprovalService.decide` 会把一切不在词表内的返回值——包括 `undefined`——归一化成
+  `'unavailable'`：一次**静默的 fail-closed 拒绝**，而且照常写一条看起来完全正常的
+  `approval/decided` 审计。这正是 v0.1.4 修掉的那个 bug：点"允许"从来没有允许过任何东西。
+- 因此"拒绝"也必须是一个携带词表字符串的 **result**（`value: 'rejected'`）。把它编码成
+  `{ kind: 'rejected', error }` 会**取消**瀑布，而 `decide` 里的 containment 又会把它
+  归一化成 `'unavailable'`——这就是"拒绝被记成没有可用的审批通道"的由来。
+- `{ kind: 'next' }` 放弃**本客户端**这次 delivery，把请求留给其它客户端；只有当没有别的
+  delivery 时，宿主才会用 `next()` 结算。`delegateWaterfall()` 发的就是它，仅此而已。
+
+词表为 `'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'`；UI 只能产出前两个
+（类型上叫 `ApprovalDecision`）。
+
 `approval/request` 帧携带 `sessionId` + `eventId`（瀑布事件，在 mux 上已被观察到）；
 `respondApproval()` 据此查帧，连同我们的 `clientId` 一起 POST 出去。上游 `agentId` 就是 SessionId，
 所以能做会话级过滤。
 
-`user-questions/request` 也是瀑布，但侧边栏渲染不了问答表单，因此**故意不答**——
-Host 以第一个应答为准，随便回 `next` 反而会抢在 Web UI 之前把事情结掉。
+**`user-questions/request` 是同一个传输上的同一条瀑布**——帧形为
+`{ type: 'waterfall', event, eventId, agentId, request }`，`request` 的形状是
+`{ questions: AskUserQuestionItem[], agent?, signal?, wait?: { callId } }`。
+注意这里**没有 `sessionId`**：会话身份来自 Agent 的作用域，`wait.callId` 是唯一能关联回
+工具行的线索。`respondQuestion()` 用 `{ answers: [{ id, selected: string[], custom? }] }` 应答，
+其中 `selected` 装的是选项 **label**，不是下标。v0.1.4 之前控制器把这一帧整个丢在地上，
+代价不只是少一张卡片：`ask_user_question` 在宿主侧**阻塞**着那次工具调用，
+于是这一轮就停在没人能回答的状态里。
+
+**撤销信号只有 `cancel`，没有别的。** 对 mux 客户端，`0.2.1` 不转发 `approval/resolved`
+或 `question/resolved`；唯一表示"这个请求已经不能再答"的信号就是 `cancel` 帧。
+客户端把它翻译成 `waterfall/resolved` 并撤掉卡片——否则在浏览器里答过之后，
+VS Code 的卡片会永远点得动。
 
 **信任围栏**（上游 `api-request-trust.ts` / `browser-auth.ts`）：`Host` 必须是回环地址或
 在 `--trusted-host` 中，且（在 cookie 受限的 host 上）必须通过 cookie 校验。我们只连回环，
@@ -362,7 +388,7 @@ VS Code 上下文键 `deepseekHarness.offline`：
 
 > v0.0.x only supports local DeepSeek Harness instances.
 
-`approval/requested` 和 `question/requested` 帧**仅**显示一条信息消息（"该操作需要在 DeepSeek Harness Web UI 中审批"），绝不调用 `/api/respond`（审批统一经 `POST /api/$events/result` 应答）。
+`approval/request` 帧从侧边栏的待答面板经 `POST /api/$events/result` 应答（见上文）。理由中声明了 full/unrestricted access 的请求不给内联 Allow，改为提供 **Answer in Web UI** 交回入口；门槛读的是理由，不是工具名允许列表。这里没有任何东西调用 `/api/respond`。
 
 ## 目录结构
 

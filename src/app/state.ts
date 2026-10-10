@@ -11,7 +11,7 @@ import type { SessionSnapshot } from '../conversation/types.ts'
 import type { ControlState } from '../conversation/control.ts'
 import type { SessionUsageState } from '../conversation/usage.ts'
 import type { ReviewSummary } from '../review/types.ts'
-import type { ApprovalSummary } from '../approval/types.ts'
+import type { ApprovalSummary, QuestionSummary } from '../approval/types.ts'
 
 /** One raw frame captured for the live event inspector (F7). */
 export interface InspectorFrame {
@@ -82,6 +82,14 @@ export interface UiState {
   reviews?: ReviewSummary[]
   /** Pending approvals for the current session. */
   approvals?: ApprovalSummary[]
+  /**
+   * Pending `ask_user_question` requests for the current session.
+   *
+   * Separate from `approvals` because the answer is not a verdict: these carry
+   * the question list and need free-text/option input. Both live in the same
+   * panel, above the composer.
+   */
+  questions?: QuestionSummary[]
   /** Control surface folded from the session's knob/goal/todo events. */
   control?: ControlState
   /** `ns/method` → served by this host. Absent key means "probed and missing". */

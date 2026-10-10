@@ -8,7 +8,7 @@
  * but the stores are independent.
  */
 
-import type { CallId, RpcId, SessionId } from '../harness/protocol.ts'
+import type { AskUserQuestionItem, CallId, RpcId, SessionId } from '../harness/protocol.ts'
 
 export type ApprovalState = 'pending' | 'responding' | 'resolved'
 
@@ -41,6 +41,39 @@ export interface ApprovalSummary {
   outcome?: string
   /** Whether VS Code-side Allow is permitted (safety allowlist). */
   canAllow: boolean
+  /**
+   * Why `canAllow` is false, when it is a policy refusal rather than "wrong
+   * session" or "already answered". Rendered so a disabled Allow button is
+   * never a dead end.
+   */
+  blockedBy?: 'high-risk' | 'session' | 'settled'
+  createdAt: number
+}
+
+// ─── user questions (`user-questions/request`) ───────────────────────────────
+/**
+ * One pending `ask_user_question` waterfall.
+ *
+ * The Host blocks the tool call until this settles, so a question the sidebar
+ * does not render is a hung turn, not just a missing card.
+ */
+export interface PendingQuestion {
+  rpcId: RpcId
+  sessionId: SessionId
+  /** The `ask_user_question` call the card belongs to; absent on an indefinite wait. */
+  callId?: CallId
+  questions: AskUserQuestionItem[]
+  state: ApprovalState
+  createdAt: number
+}
+
+/** Opaque question summary for UI serialization. */
+export interface QuestionSummary {
+  rpcId: RpcId
+  sessionId: SessionId
+  callId?: CallId
+  questions: AskUserQuestionItem[]
+  state: ApprovalState
   createdAt: number
 }
 

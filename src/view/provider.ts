@@ -38,6 +38,8 @@ export interface UiState {
   brandIconUri?: string
   reviews?: import('../review/types.ts').ReviewSummary[]
   approvals?: import('../approval/types.ts').ApprovalSummary[]
+  /** Pending `ask_user_question` requests for the current session. */
+  questions?: import('../approval/types.ts').QuestionSummary[]
   /** Control surface folded from the session's knob/goal/todo events. */
   control?: import('../conversation/control.ts').ControlState
   /** `ns/method` → served by this host. Absent key means "probed and missing". */
@@ -83,6 +85,14 @@ export type WebviewAction =
   | { type: 'reviewAcceptAll'; reviewId: string }
   | { type: 'reviewRejectAll'; reviewId: string }
   | { type: 'approvalRespond'; rpcId: string; outcome: 'allowed-once' | 'rejected' }
+  /**
+   * Hand a waterfall back to the Host without answering it (stays pending for
+   * the Web UI). Used both by "answer in the browser" and by an approval the
+   * sidebar declines to grant.
+   */
+  | { type: 'waterfallDelegate'; rpcId: string }
+  // ─── user questions (`user-questions/request`) ─────────────────
+  | { type: 'questionAnswer'; rpcId: string; answers: QuestionAnswerPayload[] }
   // ─── control surface ────────────────────────────────────────────────────────
   | { type: 'controlPlan'; active: boolean }
   | { type: 'controlPreset'; preset: string }
@@ -125,6 +135,20 @@ export interface PendingAttachmentPayload {
    * with, so a screenshot is never round-tripped as base64 just to be shown.
    */
   key?: string
+}
+
+/**
+ * The human's answer to one question, as the webview hands it up.
+ *
+ * `selected` carries option LABELS (not indices): that is what the Host's
+ * `AskUserQuestionAnswerItem` records, and it is what the transcript will show
+ * later, so translating labels back out of a positional encoding here would
+ * only add a place for the two to disagree.
+ */
+export interface QuestionAnswerPayload {
+  id: string
+  selected: string[]
+  custom?: string
 }
 
 export interface ProviderDeps {

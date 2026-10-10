@@ -247,13 +247,13 @@ async function main(): Promise<void> {
   //
   // Looking only at the nested form (which this assertion used to do) silently
   // finds nothing, because the user record has no `message` wrapper at all.
-  const contentPartsOf = (event: unknown): { type?: string; attachment?: { attachmentId?: string; mediaType?: string } }[] => {
+  const contentPartsOf = (event: unknown): { type?: string; text?: string; attachment?: { attachmentId?: string; mediaType?: string } }[] => {
     const data = (event as { data?: Record<string, unknown> }).data
     if (data === undefined || data === null) return []
     const nested = (data['message'] as { content?: unknown } | undefined)?.content
-    const out: { type?: string; attachment?: { attachmentId?: string; mediaType?: string } }[] = []
+    const out: { type?: string; text?: string; attachment?: { attachmentId?: string; mediaType?: string } }[] = []
     for (const candidate of [data['content'], nested]) {
-      if (Array.isArray(candidate)) out.push(...candidate as { type?: string }[])
+      if (Array.isArray(candidate)) out.push(...candidate as { type?: string; text?: string }[])
     }
     return out
   }
@@ -298,6 +298,88 @@ async function main(): Promise<void> {
   await client.prompt(sessionId, 'Reply with the single word ok. Ignore the attachment.',
     'UTC', { files: [{ receiptId: stagedFile.receiptId as string }] })
   check('a prompt referencing the staged receipt is admitted', true, 'accepted')
+
+  // 08c. The two answerable waterfalls a mux client is handed, measured live.
+  //
+  //      Both were broken in ways that only a real Host could show:
+  //        · user-questions/request was translated and then DROPPED, so the
+  //          Host blocked on ask_user_question with nobody able to answer;
+  //        · approval answers went out as `{kind:'result'}` with no value, which
+  //          the Host normalises to 'unavailable' — a click on Allow that
+  //          silently denied and still wrote a plausible-looking audit entry.
+  //      The protocol test pins the envelopes; this measures that a real Host
+  //      accepts them and the model gets the answer back.
+  const waterfalls: { type: string; eventId: string; callId?: string }[] = []
+  const wfSub = client.onApprovalFrame((frame, eventId) => {
+    const f = frame as { type?: string; callId?: string }
+    waterfalls.push({ type: String(f.type), eventId, callId: f.callId })
+  })
+
+  async function waitForWaterfall(type: string, ms: number): Promise<string | undefined> {
+    const until = Date.now() + ms
+    while (Date.now() < until) {
+      const hit = waterfalls.find((w) => w.type === type)
+      if (hit !== undefined) return hit.eventId
+      await new Promise((r) => setTimeout(r, 500))
+    }
+    return undefined
+  }
+
+  /** Does any durable tool result carry `needle`? */
+  async function journalMentions(needle: string, ms: number): Promise<boolean> {
+    const until = Date.now() + ms
+    while (Date.now() < until) {
+      await new Promise((r) => setTimeout(r, 500))
+      const page = await client.getHistory(sessionId, { maxMessages: 50 })
+      const hit = page.events.some((entry) => contentPartsOf(entry.event)
+        .some((p) => (p.text ?? '').includes(needle)))
+      if (hit) return true
+    }
+    return false
+  }
+
+  await client.prompt(sessionId,
+    'You must call the ask_user_question tool right now, before anything else. '
+    + 'Pass exactly one question: id "q1", question "Pick a color", options red, green and blue. '
+    + 'Do not answer it yourself, and do not use any other tool.', 'UTC')
+  const questionEventId = await waitForWaterfall('question/requested', 60_000)
+  if (questionEventId === undefined) {
+    // The trigger is the model's choice, not the wire's. Say so rather than
+    // reporting a pass nobody measured.
+    console.log('  ~ skipped: the model did not call ask_user_question within 60s')
+  } else {
+    check('the live host delivers user-questions/request to a mux client', true,
+      `eventId=${questionEventId.slice(0, 8)}…`)
+    await client.respondQuestion(questionEventId, { answers: [{ id: 'q1', selected: ['green'] }] })
+    const answered = await journalMentions('"selected":["green"]', 30_000)
+    check('the answer reaches the blocked tool call', answered,
+      answered ? 'the tool result echoes the chosen label' : 'no tool result carried the answer within 30s')
+  }
+
+  // The approval half. The sidebar only answers from an ACTIVE session and only
+  // when the reason does not announce full access, so set a confining preset and
+  // ask for an honest escalation into it.
+  await client.setPermissionPreset(sessionId, 'workspace-write')
+  await new Promise((r) => setTimeout(r, 800))
+  await client.prompt(sessionId,
+    'The user explicitly asked for this, so do it without asking for confirmation first. '
+    + 'Use the bash/shell tool to append the line "probe" to the file '
+    + 'C:\\Users\\PP\\AppData\\Local\\Temp\\dsh-approval-probe.txt . That path is OUTSIDE the '
+    + 'workspace on purpose, so the command must write outside the sandbox: pass '
+    + 'sandbox_permissions="danger-full-access" and justification="the user asked for a probe file outside the workspace".',
+    'UTC')
+  const approvalEventId = await waitForWaterfall('approval/requested', 60_000)
+  if (approvalEventId === undefined) {
+    console.log('  ~ skipped: the model did not request an escalation within 60s')
+  } else {
+    check('the live host delivers approval/request to a mux client', true,
+      `eventId=${approvalEventId.slice(0, 8)}…`)
+    await client.respondApproval(approvalEventId, 'allowed-once')
+    const granted = await journalMentions('probe', 30_000)
+    check('an allow actually grants the escalation', granted,
+      granted ? 'the escalated command ran' : 'no tool result showed the command running within 30s')
+  }
+  wfSub.dispose()
 
   // 09. Cancel (no-op if already ended) to validate the wire.
   await client.cancel(sessionId)

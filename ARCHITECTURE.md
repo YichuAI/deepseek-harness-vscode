@@ -197,14 +197,46 @@ envelope:
                          "outcome": { "kind": "result", "value": "allowed-once" | "rejected" } } } }
 ```
 
+**`outcome.value` *is* the Host waterfall's return value**, and that one fact is
+the whole contract:
+
+- Omitting `value` (bare `{ kind: 'result' }`) settles the waterfall with
+  `undefined`. `ApprovalService.decide` normalizes every non-vocabulary return —
+  `undefined` included — to `'unavailable'`: a **silent fail-closed denial** that
+  still writes a perfectly normal-looking `approval/decided` audit line. That was
+  the v0.1.4 bug: "Allow" had never allowed anything.
+- A denial must therefore also be a **result** carrying a vocabulary string
+  (`value: 'rejected'`). Encoding it as `{ kind: 'rejected', error }` *cancels*
+  the waterfall, and the containment in `decide` normalizes that to
+  `'unavailable'` as well — which is why a deny used to be recorded as "no
+  approval channel available".
+- `{ kind: 'next' }` gives up *this* client's delivery and leaves the request to
+  the other clients; the Host only settles with `next()` once no delivery
+  remains. `delegateWaterfall()` is that, and nothing else.
+
+The vocabulary is `'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'`; the
+UI can only produce the first two (typed as `ApprovalDecision`).
+
 The `approval/request` frame carries a `sessionId` + `eventId` (the waterfall
 event, observed on the mux); `respondApproval()` looks it up and POSTs the pair
 together with our `clientId`. `agentId` *is* the SessionId upstream, which is what
 makes per-session filtering work.
 
-`user-questions/request` is a waterfall too, but the sidebar cannot render a
-question form, so we **deliberately do not answer it** — the host settles on the
-first answer, and replying would pre-empt the web UI.
+**`user-questions/request` is the same waterfall on the same transport** — a
+`{ type: 'waterfall', event, eventId, agentId, request }` frame, with `request`
+shaped `{ questions: AskUserQuestionItem[], agent?, signal?, wait?: { callId } }`.
+Note there is **no `sessionId`**: session identity comes from the Agent's scope,
+and `wait.callId` is the only link back to a tool row. `respondQuestion()` answers
+with `{ answers: [{ id, selected: string[], custom? }] }`, where `selected` holds
+option **labels**, not indices. Until v0.1.4 the controller dropped this frame on
+the floor, which did not merely cost a card: `ask_user_question` **blocks** that
+tool call on the Host, so the turn stalled with nobody able to answer it.
+
+**Withdrawal is `cancel`, and nothing else.** For mux clients `0.2.1` does not
+forward `approval/resolved` or `question/resolved`; the only signal that a request
+is no longer answerable is a `cancel` frame. The client translates it into
+`waterfall/resolved` and withdraws the card — otherwise a request answered in the
+browser stayed clickable forever in VS Code.
 
 **Trust fence** (`api-request-trust.ts` / `browser-auth.ts` upstream): the `Host`
 header must be loopback or in `--trusted-host`, and — on cookie-gated hosts — the
@@ -509,7 +541,7 @@ button is a floor, not a fix.
 
 > v0.0.x only supports local DeepSeek Harness instances.
 
-`approval/requested` and `question/requested` frames surface **only** an information message ("Action requires approval in DeepSeek Harness Web UI") and never call `/api/respond` (approvals are settled via `POST /api/$events/result`).
+`approval/request` frames are answered from the sidebar's pending panel via `POST /api/$events/result` (see above). A request whose stated reason declares full/unrestricted access withholds inline Allow and offers a **Answer in Web UI** hand-off instead; the gate reads the reason, not a tool-name allowlist. Nothing here calls `/api/respond`.
 
 ## Directory
 

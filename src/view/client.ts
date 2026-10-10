@@ -39,6 +39,7 @@ export const CLIENT_SCRIPT = /* js */ `
   let lastRenderVersion = -1;
   let currentReviews = [];
   let currentApprovals = [];
+  let currentQuestions = [];
   let currentCapabilities = {};
   let currentCommands = [];
   let currentQueue = [];
@@ -109,6 +110,7 @@ export const CLIENT_SCRIPT = /* js */ `
     // Store reviews/approvals for lookup in renderTool
     currentReviews = state.reviews || [];
     currentApprovals = state.approvals || [];
+    currentQuestions = state.questions || [];
     currentCapabilities = state.capabilities || {};
     currentCommands = state.commands || [];
     currentQueue = state.queue || [];
@@ -251,6 +253,7 @@ export const CLIENT_SCRIPT = /* js */ `
     if (!running) $('steer').checked = false;
     renderQueueBar(state);
     renderPending(state);
+    renderPendingPanel(state);
     renderSearch(state);
     renderInspector(state);
   }
@@ -375,6 +378,236 @@ export const CLIENT_SCRIPT = /* js */ `
     }
     list.appendChild(frag)
     list.scrollTop = list.scrollHeight
+  }
+
+  // ─── pending waterfalls (approvals + ask_user_question) ──────────────────
+  // Both block the Host: an approval holds a tool call, a question holds
+  // ask_user_question. Neither resolves on its own, and neither necessarily has
+  // a tool row on screen — so they get their own panel above the composer
+  // instead of living inside whichever transcript item happens to match.
+  //
+  // Answers are keyed by option LABEL, not index: that is what the Host records
+  // in AskUserQuestionAnswerItem, and what the durable transcript shows later.
+  let pendingDraft = {};
+
+  function pendingSignature(approvals, questions) {
+    return approvals.map(function (a) { return a.rpcId + ':' + a.state; }).join(',')
+      + '||' + questions.map(function (q) { return q.rpcId + ':' + q.state; }).join(',');
+  }
+
+  function renderPendingPanel(state) {
+    const panel = $('pending-panel');
+    if (!panel) return;
+    // The panel holds unsent input (radio choices, a half-typed "Other"), so it
+    // is rebuilt only when the set of pending requests actually changes —
+    // render() runs on every streamed chunk, and rebuilding per chunk would
+    // throw away whatever the user had typed.
+    const approvals = (currentApprovals || []).filter(function (a) { return a.state !== 'resolved'; });
+    const questions = (currentQuestions || []).filter(function (q) { return q.state !== 'resolved'; });
+    const sig = pendingSignature(approvals, questions);
+    if (sig === renderPendingPanel.lastSig) return;
+    renderPendingPanel.lastSig = sig;
+    Object.keys(pendingDraft).forEach(function (id) {
+      if (!questions.some(function (q) { return q.rpcId === id; })) delete pendingDraft[id];
+    });
+    panel.innerHTML = '';
+    panel.style.display = (approvals.length + questions.length) > 0 ? '' : 'none';
+    approvals.forEach(function (ap) { panel.appendChild(renderApprovalPending(ap)); });
+    questions.forEach(function (q) { panel.appendChild(renderQuestionPending(q)); });
+  }
+  renderPendingPanel.lastSig = null;
+
+  function renderApprovalPending(ap) {
+    const card = document.createElement('div');
+    card.className = 'pending-card' + (ap.canAllow ? '' : ' risk') + (ap.state === 'responding' ? ' responding' : '');
+    const kind = document.createElement('div');
+    kind.className = 'pending-kind';
+    kind.textContent = '⚠ Approval required';
+    card.appendChild(kind);
+    if (ap.toolName) {
+      const tool = document.createElement('div');
+      tool.className = 'pending-tool';
+      tool.textContent = ap.toolName;
+      card.appendChild(tool);
+    }
+    if (ap.reason) {
+      const reason = document.createElement('div');
+      reason.className = 'pending-reason';
+      reason.textContent = ap.reason;
+      card.appendChild(reason);
+    }
+    if (ap.blockedBy === 'high-risk') {
+      const note = document.createElement('div');
+      note.className = 'pending-note';
+      note.textContent = 'The sidebar will not grant this one — it asks for unrestricted access. Use the Web UI.';
+      card.appendChild(note);
+    }
+    const actions = document.createElement('div');
+    actions.className = 'pending-actions';
+    if (ap.canAllow) {
+      const allow = document.createElement('button');
+      allow.className = 'grow';
+      allow.textContent = ap.state === 'responding' ? 'Allowing…' : 'Allow once';
+      allow.disabled = ap.state !== 'pending';
+      allow.addEventListener('click', function () {
+        post({ type: 'approvalRespond', rpcId: ap.rpcId, outcome: 'allowed-once' });
+      });
+      actions.appendChild(allow);
+    }
+    const deny = document.createElement('button');
+    deny.className = 'secondary' + (ap.canAllow ? '' : ' grow');
+    deny.textContent = ap.state === 'responding' ? 'Denying…' : 'Deny';
+    deny.disabled = ap.state !== 'pending';
+    deny.addEventListener('click', function () {
+      post({ type: 'approvalRespond', rpcId: ap.rpcId, outcome: 'rejected' });
+    });
+    actions.appendChild(deny);
+    if (!ap.canAllow) {
+      const web = document.createElement('button');
+      web.className = 'secondary';
+      web.textContent = 'Answer in Web UI ↗';
+      web.title = 'Hand this request back to the Harness Web UI without answering it here';
+      web.addEventListener('click', function () { post({ type: 'waterfallDelegate', rpcId: ap.rpcId }); });
+      actions.appendChild(web);
+    }
+    card.appendChild(actions);
+    return card;
+  }
+
+  function renderQuestionPending(q) {
+    const card = document.createElement('div');
+    card.className = 'pending-card' + (q.state === 'responding' ? ' responding' : '');
+    const kind = document.createElement('div');
+    kind.className = 'pending-kind';
+    kind.textContent = q.questions.length > 1
+      ? '❓ The agent is asking ' + q.questions.length + ' questions'
+      : '❓ The agent is asking you';
+    card.appendChild(kind);
+
+    const draft = pendingDraft[q.rpcId] || (pendingDraft[q.rpcId] = { selected: {}, custom: {} });
+    const err = document.createElement('div');
+    err.className = 'pending-note';
+    err.style.display = 'none';
+    const slot = function (id, label) { return id + '\u0000' + label; };
+    q.questions.forEach(function (item) {
+      if (item.header) {
+        const head = document.createElement('div');
+        head.className = 'pending-head';
+        head.textContent = item.header;
+        card.appendChild(head);
+      }
+      const text = document.createElement('div');
+      text.className = 'pending-question';
+      text.textContent = item.question;
+      card.appendChild(text);
+      if (item.detail) {
+        const detail = document.createElement('pre');
+        detail.className = 'pending-detail';
+        detail.textContent = item.detail;
+        card.appendChild(detail);
+      }
+      const opts = Array.isArray(item.options) ? item.options : [];
+      if (opts.length > 0) {
+        const box = document.createElement('div');
+        box.className = 'pending-opts';
+        opts.forEach(function (opt) {
+          const row = document.createElement('label');
+          row.className = 'pending-opt';
+          const input = document.createElement('input');
+          input.type = item.multiSelect ? 'checkbox' : 'radio';
+          input.name = 'q-' + q.rpcId + '-' + item.id;
+          input.checked = !!draft.selected[slot(item.id, opt.label)];
+          input.addEventListener('change', function () {
+            // A radio group is exclusive, but the draft is a flat label map, so
+            // the previous pick has to be cleared explicitly — otherwise the
+            // answer would carry two labels for a single-select question.
+            if (!item.multiSelect) {
+              Object.keys(draft.selected).forEach(function (k) {
+                if (k.indexOf(item.id + '\u0000') === 0) delete draft.selected[k];
+              });
+            }
+            draft.selected[slot(item.id, opt.label)] = input.checked;
+            // One question, one choice: choosing IS answering. Matches the Web
+            // UI's option cards, which settle on click. With several questions in
+            // one request that shortcut would submit empty answers for the rest,
+            // so there it stays behind the Answer button.
+            if (!item.multiSelect && q.questions.length === 1) submitQuestion(q, err);
+          });
+          const body = document.createElement('span');
+          body.textContent = opt.label;
+          if (opt.description) {
+            const desc = document.createElement('span');
+            desc.className = 'pending-opt-desc';
+            desc.textContent = opt.description;
+            body.appendChild(desc);
+          }
+          row.appendChild(input);
+          row.appendChild(body);
+          box.appendChild(row);
+        });
+        card.appendChild(box);
+      }
+      // Free text is always offered: an option list is a menu, not a cage, and
+      // the Host's answer type carries a free-text field alongside the selected
+      // labels for exactly this case.
+      const other = document.createElement('input');
+      other.className = 'pending-other';
+      other.type = 'text';
+      other.placeholder = opts.length > 0 ? 'Other…' : 'Type your answer…';
+      other.value = draft.custom[item.id] || '';
+      other.addEventListener('input', function () { draft.custom[item.id] = other.value; });
+      other.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); submitQuestion(q, err); }
+      });
+      card.appendChild(other);
+    });
+
+    card.appendChild(err);
+    const actions = document.createElement('div');
+    actions.className = 'pending-actions';
+    const send = document.createElement('button');
+    send.className = 'grow';
+    send.textContent = q.state === 'responding' ? 'Answering…' : 'Answer';
+    send.disabled = q.state !== 'pending';
+    send.addEventListener('click', function () { submitQuestion(q, err); });
+    const web = document.createElement('button');
+    web.className = 'secondary';
+    web.textContent = 'Answer in Web UI ↗';
+    web.title = 'Hand this question back to the Harness Web UI without answering it here';
+    web.addEventListener('click', function () { post({ type: 'waterfallDelegate', rpcId: q.rpcId }); });
+    actions.appendChild(send);
+    actions.appendChild(web);
+    card.appendChild(actions);
+    return card;
+  }
+
+  /**
+   * Collect the draft for every question in the request and send one batch.
+   *
+   * Every asked question needs an answer: an incomplete batch is rejected deep
+   * inside the tool call, where the user would never see it. So a missing one is
+   * reported right here, on the card, instead of being sent to fail remotely.
+   */
+  function submitQuestion(q, errNode) {
+    const draft = pendingDraft[q.rpcId] || { selected: {}, custom: {} };
+    const answers = [];
+    let missing = '';
+    for (const item of q.questions) {
+      let picked = (item.options || [])
+        .map(function (o) { return o.label; })
+        .filter(function (label) { return !!draft.selected[item.id + '\u0000' + label]; });
+      if (!item.multiSelect && picked.length > 1) picked = picked.slice(0, 1);
+      const custom = (draft.custom[item.id] || '').trim();
+      if (picked.length === 0 && custom === '') missing = item.question;
+      answers.push({ id: item.id, selected: picked, custom: custom || undefined });
+    }
+    if (missing) {
+      errNode.textContent = 'Answer or type something for: ' + missing;
+      errNode.style.display = '';
+      return;
+    }
+    errNode.style.display = 'none';
+    post({ type: 'questionAnswer', rpcId: q.rpcId, answers: answers });
   }
 
   // ─── queued messages (rc.2 session/updateQueue) ──────────────────────────
@@ -912,13 +1145,11 @@ export const CLIENT_SCRIPT = /* js */ `
     head.addEventListener('click', () => d.classList.toggle('open'));
     d.appendChild(head);
 
-    // Approval card (if pending approval linked to this tool)
-    if (item.approvalRpcId) {
-      const ap = currentApprovals.find(a => a.rpcId === item.approvalRpcId);
-      if (ap && ap.state !== 'resolved') {
-        d.appendChild(renderApprovalCard(ap));
-      }
-    }
+    // Approvals are NOT drawn here any more. They live in the pending panel
+    // above the composer, because the card that matters is the one for a
+    // waterfall this sidebar has to answer, and that has to be somewhere the
+    // user is already looking — not inside whichever transcript row happened to
+    // carry the matching callId.
 
     // Review card (if review linked to this tool)
     if (item.reviewId) {
@@ -948,60 +1179,6 @@ export const CLIENT_SCRIPT = /* js */ `
     }
     d.appendChild(body);
     return d;
-  }
-
-  // ─── approval card ──────────────────────────────────────────────────────
-  function renderApprovalCard(ap) {
-    const card = document.createElement('div');
-    card.className = 't-approval ' + ap.state;
-    const label = document.createElement('div');
-    label.className = 'approval-label';
-    label.textContent = '⚠ Approval required';
-    card.appendChild(label);
-    if (ap.toolName) {
-      const tool = document.createElement('div');
-      tool.className = 'approval-tool';
-      tool.textContent = 'Tool: ' + escapeText(ap.toolName);
-      card.appendChild(tool);
-    }
-    if (ap.reason) {
-      const reason = document.createElement('div');
-      reason.className = 'approval-reason';
-      reason.textContent = 'Reason: ' + escapeText(ap.reason);
-      card.appendChild(reason);
-    }
-    const actions = document.createElement('div');
-    actions.className = 'approval-actions';
-    const denyBtn = document.createElement('button');
-    denyBtn.className = 'secondary';
-    denyBtn.textContent = 'Deny';
-    denyBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      post({ type: 'approvalRespond', rpcId: ap.rpcId, outcome: 'rejected' });
-    });
-    actions.appendChild(denyBtn);
-    if (ap.canAllow) {
-      const allowBtn = document.createElement('button');
-      allowBtn.textContent = 'Allow once';
-      allowBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        post({ type: 'approvalRespond', rpcId: ap.rpcId, outcome: 'allowed-once' });
-      });
-      actions.appendChild(allowBtn);
-    } else {
-      const note = document.createElement('span');
-      note.className = 'approval-webonly';
-      note.textContent = 'Review in Web UI';
-      actions.appendChild(note);
-    }
-    if (ap.state === 'responding') {
-      const note = document.createElement('span');
-      note.className = 'approval-responding';
-      note.textContent = 'Sending…';
-      actions.appendChild(note);
-    }
-    card.appendChild(actions);
-    return card;
   }
 
   // ─── review card ─────────────────────────────────────────────────────────

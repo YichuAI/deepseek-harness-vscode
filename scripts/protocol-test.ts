@@ -123,15 +123,56 @@ async function loadControllerWithVscodeStub(): Promise<typeof import('../src/app
 
 // ─── webview boot harness (step G) ────────────────────────────────────────────
 type StubEl = Record<string, unknown>
+type StubListener = (e: unknown) => void
+
+/**
+ * A DOM stub faithful enough to *drive*, not just to boot.
+ *
+ * Listeners are recorded (so a test can click), and assigning `''` to
+ * `innerHTML` drops the children (so a re-render does not leave the previous
+ * tree behind and make a walk assert against stale nodes). Both matter the
+ * moment a test wants to check what a button DOES rather than that it exists.
+ */
 function makeStubEl(id: string): StubEl {
-  return {
-    id, value: '', textContent: '', innerHTML: '', className: '', src: '',
+  const el: StubEl = {
+    id, value: '', textContent: '', className: '', src: '',
     disabled: false, checked: false, style: {}, children: [] as unknown[],
+    listeners: {} as Record<string, StubListener[]>,
     classList: { add() {}, remove() {}, toggle() {}, contains() { return false } },
-    addEventListener() {}, appendChild(c: unknown) { (this.children as unknown[]).push(c) },
+    addEventListener(type: string, fn: StubListener) {
+      const map = el['listeners'] as Record<string, StubListener[]>
+      ;(map[type] ??= []).push(fn)
+    },
+    appendChild(c: unknown) { (el['children'] as unknown[]).push(c) },
     focus() {}, setAttribute() {}, getAttribute() { return null },
   }
+  let html = ''
+  Object.defineProperty(el, 'innerHTML', {
+    get: () => html,
+    set: (v: unknown) => { html = String(v ?? ''); if (html === '') el['children'] = [] },
+  })
+  return el
 }
+
+/** Fire every listener of `type` on one stub element. */
+function fire(el: unknown, type: string): void {
+  const handlers = ((el as StubEl)['listeners'] as Record<string, StubListener[]> | undefined)?.[type] ?? []
+  for (const fn of handlers) fn({ stopPropagation() {}, preventDefault() {}, key: 'Enter', shiftKey: false })
+}
+
+/** Depth-first walk of a stub tree. */
+function walk(el: unknown, out: StubEl[] = []): StubEl[] {
+  const node = el as StubEl
+  out.push(node)
+  for (const c of (node['children'] as unknown[]) ?? []) walk(c, out)
+  return out
+}
+
+const stubText = (el: unknown): string =>
+  walk(el).map((n) => String(n['textContent'] ?? '')).join(' ')
+
+const stubButtons = (el: unknown): StubEl[] =>
+  walk(el).filter((n) => n['tag'] === 'button' || (n['listeners'] as Record<string, unknown> | undefined)?.['click'] !== undefined)
 
 /**
  * Boot the real webview script against a minimal DOM stub and feed it one state.
@@ -186,6 +227,60 @@ function bootWebview(
     connectLabel: String(btn.textContent),
     connectDisabled: btn.disabled === true,
     error: '',
+  }
+}
+
+/**
+ * Boot the webview script and keep the wiring, so a test can drive it.
+ *
+ * `bootWebview` only proves the panel comes up; this one hands back the element
+ * tree and the actions the script posts, which is what it takes to assert that a
+ * button does the right thing rather than merely that it was drawn.
+ */
+function bootWebviewInteractive(
+  script: string,
+  skeleton: string,
+  state: Record<string, unknown>,
+): { error: string; panel: StubEl; actions: Record<string, unknown>[]; push: (patch: Record<string, unknown>) => void; el: (id: string) => StubEl } {
+  const ids = [...skeleton.matchAll(/id="([^"]+)"/g)].map((m) => m[1] as string)
+  const els = new Map(ids.map((id) => [id, makeStubEl(id)]))
+  let handler: ((e: unknown) => void) | undefined
+  const actions: Record<string, unknown>[] = []
+  const g = globalThis as unknown as Record<string, unknown>
+  g.document = { getElementById: (id: string) => els.get(id) ?? null, createElement: (t: string) => { const e = makeStubEl(t); e['tag'] = t; return e } }
+  g.window = { addEventListener: (type: string, fn: (e: unknown) => void) => { if (type === 'message') handler = fn } }
+  g.acquireVsCodeApi = () => ({
+    postMessage: (m: Record<string, unknown>) => { actions.push(m) },
+    getState() { return undefined },
+    setState() {},
+  })
+  g.MarkdownIt = function () { return { renderer: { rules: {} as Record<string, unknown> }, render: (s: string) => String(s ?? '') } }
+  try {
+    new Function(script)()
+  } catch (e) {
+    return { error: (e as Error).message, panel: makeStubEl('pending-panel'), actions, push: () => {}, el: () => makeStubEl('x') }
+  }
+  const base = {
+    connection: 'connected', sessions: [], sending: false, canStop: false,
+    showSystemMessages: false, systemMessageCount: 0, autoApprove: false, renderVersion: 1,
+    capabilities: {}, commands: [], queue: [], eventLog: [], search: null,
+    workspace: { workspaceId: '/w', title: 'w', path: '/w' },
+  }
+  let version = 1
+  const push = (patch: Record<string, unknown>): void => {
+    version += 1
+    handler?.({ data: { kind: 'state', state: { ...base, ...patch, renderVersion: version } } })
+  }
+  push(state)
+  // The script auto-connects on boot; that is not what these assertions are
+  // about, and leaving it in would offset every count.
+  actions.length = 0
+  return {
+    error: '',
+    panel: els.get('pending-panel') as StubEl,
+    actions,
+    push: (patch: Record<string, unknown>) => { actions.length = 0; push(patch) },
+    el: (id: string) => els.get(id) as StubEl,
   }
 }
 
@@ -781,9 +876,91 @@ async function main(): Promise<void> {
   eq('an unrelated forwarded event adds no conversation frame', frames.length, before)
   await client.respondApproval('evt-2', 'allowed-once')
   await wait(80)
-  eq('the /api/$events/result body carries clientId/eventId/outcome{kind:result}',
+  // The DECISION rides in outcome.value. `{kind:'result'}` alone settles the Host
+  // waterfall with `undefined`, which ApprovalService normalizes to
+  // 'unavailable' — an allow that silently denies. Verified against a live host:
+  // the bare shape audited `approval/decided: unavailable` and the tool call
+  // errored with "no approval channel is available".
+  eq('allowing sends outcome{kind:result, value:allowed-once}',
     lastOf(harness.seen.responses) as unknown as Record<string, unknown>,
-    { clientId: READY_CLIENT_ID, eventId: 'evt-2', outcome: { kind: 'result' } })
+    { clientId: READY_CLIENT_ID, eventId: 'evt-2', outcome: { kind: 'result', value: 'allowed-once' } })
+
+  // 08b. A deny is a result too, NOT a transport rejection: rejecting the Host
+  //      waterfall makes ApprovalService contain the throw and answer
+  //      'unavailable', so a Deny click used to be audited as "no approval
+  //      channel is available" instead of "the user rejected tool X".
+  harness.pushEvent({ type: 'waterfall', event: 'approval/request', eventId: 'evt-3', agentId: 'session-1', request: { sessionId: 'session-1', toolName: 'pwsh', callId: 'call-3', reason: 'escalate sandbox to danger-full-access: probe' } })
+  await wait(80)
+  await client.respondApproval('evt-3', 'rejected')
+  await wait(80)
+  eq('denying sends outcome{kind:result, value:rejected}',
+    lastOf(harness.seen.responses) as unknown as Record<string, unknown>,
+    { clientId: READY_CLIENT_ID, eventId: 'evt-3', outcome: { kind: 'result', value: 'rejected' } })
+
+  // 08c. user-questions/request is the SAME transport with a different payload.
+  //      It used to be translated and then dropped by the controller, so the
+  //      Host blocked on a tool call nobody could answer.
+  harness.pushEvent({
+    type: 'waterfall', event: 'user-questions/request', eventId: 'evt-q1', agentId: 'session-1',
+    request: {
+      questions: [{ id: 'q1', question: 'Pick a color', options: [{ label: 'red' }, { label: 'green' }] }],
+      wait: { callId: 'call-4', timed: false },
+    },
+  })
+  await wait(80)
+  const question = approvals.find((a) => a.eventId === 'evt-q1')
+  check('the wire user-questions/request reaches the listener as question/requested',
+    question?.frame.type === 'question/requested')
+  eq('the question frame carries the wait callId',
+    (question?.frame as { callId?: string } | undefined)?.callId, 'call-4')
+  eq('the question frame carries the questions verbatim',
+    (question?.frame as { questions?: unknown } | undefined)?.questions,
+    [{ id: 'q1', question: 'Pick a color', options: [{ label: 'red' }, { label: 'green' }] }])
+
+  await client.respondQuestion('evt-q1', { answers: [{ id: 'q1', selected: ['green'] }] })
+  await wait(80)
+  eq('answering sends outcome{kind:result, value:{answers}}',
+    lastOf(harness.seen.responses) as unknown as Record<string, unknown>,
+    {
+      clientId: READY_CLIENT_ID,
+      eventId: 'evt-q1',
+      outcome: { kind: 'result', value: { answers: [{ id: 'q1', selected: ['green'] }] } },
+    })
+
+  // 08d. Delegation: `next` drops our delivery and leaves the request pending for
+  //      whichever client still holds one (the Web UI), instead of answering it.
+  harness.pushEvent({
+    type: 'waterfall', event: 'user-questions/request', eventId: 'evt-q2', agentId: 'session-1',
+    request: { questions: [{ id: 'q2', question: 'Which env?' }] },
+  })
+  await wait(80)
+  await client.delegateWaterfall('evt-q2')
+  await wait(80)
+  eq('delegating sends outcome{kind:next}',
+    lastOf(harness.seen.responses) as unknown as Record<string, unknown>,
+    { clientId: READY_CLIENT_ID, eventId: 'evt-q2', outcome: { kind: 'next' } })
+  let delegatedAnswerRejected = false
+  try { await client.respondQuestion('evt-q2', { answers: [{ id: 'q2', selected: [] }] }) } catch { delegatedAnswerRejected = true }
+  check('a delegated waterfall can no longer be answered from here', delegatedAnswerRejected)
+
+  // 08e. A waterfall only a responder knows about must be refused, not guessed at.
+  let unknownRejected = false
+  try { await client.respondQuestion('evt-never-seen', { answers: [] }) } catch { unknownRejected = true }
+  check('answering a question the client never observed throws', unknownRejected)
+
+  // 08f. `cancel` is the ONLY resolution signal a mux client gets on
+  //      0.2.1-alpha.2 — there is no forwarded approval/resolved or
+  //      question/resolved. Without surfacing it, a card answered in the Web UI
+  //      stayed clickable here forever.
+  harness.pushEvent({ type: 'waterfall', event: 'approval/request', eventId: 'evt-4', agentId: 'session-1', request: { sessionId: 'session-1', toolName: 'write', callId: 'call-5', reason: 'outside workspace' } })
+  await wait(80)
+  harness.pushEvent({ type: 'cancel', eventId: 'evt-4' })
+  await wait(80)
+  const withdrawn = approvals.find((a) => a.eventId === 'evt-4' && a.frame.type === 'waterfall/resolved')
+  check('a cancel frame surfaces as waterfall/resolved', withdrawn !== undefined)
+  let lateAnswerRejected = false
+  try { await client.respondApproval('evt-4', 'allowed-once') } catch { lateAnswerRejected = true }
+  check('a withdrawn waterfall can no longer be answered', lateAnswerRejected)
 
   // 09. Control surface: discovered by probing, only offered when served.
   const caps = client.capabilities()
@@ -1467,6 +1644,135 @@ async function main(): Promise<void> {
       function () { return { render: (s: string) => String(s ?? '') } })
     check('the no-markdown-it fallback still boots the panel', degraded.handlerRegistered, degraded.error)
     eq('the fallback still renders Connected', degraded.statusText, 'Connected')
+
+    // ─── G2. the pending panel: approvals + ask_user_question ───────────────
+    // Both block the Host, and a question used to be dropped on the floor by the
+    // controller, so the agent's tool call waited on an answer nobody could give.
+    const idle = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, {})
+    eq('with nothing pending the panel stays hidden',
+      (idle.panel['style'] as Record<string, string>)['display'], 'none')
+
+    const approvalState = {
+      approvals: [{
+        rpcId: 'wf-1', approvalId: 'wf-1', sessionId: 'session-1', toolName: 'fs_write',
+        reason: 'writes outside the workspace', state: 'pending', canAllow: true, createdAt: 1,
+      }],
+    }
+    const ap = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, approvalState)
+    check('a pending approval draws a card instead of vanishing',
+      (ap.panel['style'] as Record<string, string>)['display'] !== 'none')
+    check('the card names the tool and the reason verbatim',
+      stubText(ap.panel).includes('fs_write') && stubText(ap.panel).includes('writes outside the workspace'))
+    const allowBtn = stubButtons(ap.panel).find((b) => String(b['textContent']) === 'Allow once')
+    const denyBtn = stubButtons(ap.panel).find((b) => String(b['textContent']) === 'Deny')
+    check('an allow-able approval offers both Allow once and Deny',
+      allowBtn !== undefined && denyBtn !== undefined)
+    fire(allowBtn, 'click')
+    eq('Allow posts the decision the Host actually reads',
+      lastOf(ap.actions), { type: 'approvalRespond', rpcId: 'wf-1', outcome: 'allowed-once' })
+    fire(denyBtn, 'click')
+    eq('Deny posts a rejected RESULT, not a transport error',
+      lastOf(ap.actions), { type: 'approvalRespond', rpcId: 'wf-1', outcome: 'rejected' })
+
+    // Risk gate: an escalation the sidebar refuses to grant must still be
+    // visible, and must offer a way forward rather than a dead button or nothing.
+    const risky = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, {
+      approvals: [{
+        rpcId: 'wf-2', approvalId: 'wf-2', sessionId: 'session-1', toolName: 'pwsh',
+        reason: 'escalate sandbox to danger-full-access: probe', state: 'pending',
+        canAllow: false, blockedBy: 'high-risk', createdAt: 1,
+      }],
+    })
+    check('a refused approval is still shown, with the reason',
+      stubText(risky.panel).includes('danger-full-access'))
+    check('...and offers no Allow button at all',
+      stubButtons(risky.panel).every((b) => String(b['textContent']) !== 'Allow once'))
+    const handOff = stubButtons(risky.panel).find((b) => String(b['textContent']).indexOf('Answer in Web UI') === 0)
+    check('...but does offer the hand-off', handOff !== undefined)
+    fire(handOff, 'click')
+    eq('the hand-off posts a delegation, not an answer',
+      lastOf(risky.actions), { type: 'waterfallDelegate', rpcId: 'wf-2' })
+
+    // Single-select: one question, one choice, so choosing IS answering.
+    const oneQ = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, {
+      questions: [{
+        rpcId: 'wf-3', sessionId: 'session-1', callId: 'call-7', state: 'pending', createdAt: 1,
+        questions: [{ id: 'q1', question: 'Pick a color', options: [{ label: 'red' }, { label: 'green' }] }],
+      }],
+    })
+    check('a pending question draws a card with its text', stubText(oneQ.panel).includes('Pick a color'))
+    const radios = walk(oneQ.panel).filter((n) => n['type'] === 'radio')
+    eq('a single-select question renders one radio per option', radios.length, 2)
+    check('the options carry the question id in their radio group name',
+      radios.every((r) => String(r['name']) === 'q-wf-3-q1'))
+    // Pick "green" (the second option) the way a browser would: set checked,
+    // then fire change.
+    const green = radios[1] as StubEl
+    green['checked'] = true
+    fire(green, 'change')
+    eq('choosing an option answers with the LABEL, keyed by question id',
+      lastOf(oneQ.actions),
+      { type: 'questionAnswer', rpcId: 'wf-3', answers: [{ id: 'q1', selected: ['green'], custom: undefined }] })
+
+    // Two questions in one request: the fast path must NOT fire, or the second
+    // question would be answered with an empty selection.
+    const twoQ = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, {
+      questions: [{
+        rpcId: 'wf-4', sessionId: 'session-1', state: 'pending', createdAt: 1,
+        questions: [
+          { id: 'a', question: 'Which env?', options: [{ label: 'prod' }] },
+          { id: 'b', question: 'Which branch?', options: [{ label: 'main' }] },
+        ],
+      }],
+    })
+    const firstRadio = walk(twoQ.panel).filter((n) => n['type'] === 'radio')[0] as StubEl
+    firstRadio['checked'] = true
+    fire(firstRadio, 'change')
+    eq('a choice in a multi-question request does not submit on its own', twoQ.actions.length, 0)
+    const answerBtn = stubButtons(twoQ.panel).find((b) => String(b['textContent']) === 'Answer')
+    fire(answerBtn, 'click')
+    check('an unanswered question blocks the batch instead of sending a blank',
+      twoQ.actions.length === 0
+      && stubText(twoQ.panel).includes('Which branch?'))
+    const secondRadio = walk(twoQ.panel).filter((n) => n['type'] === 'radio')[1] as StubEl
+    secondRadio['checked'] = true
+    fire(secondRadio, 'change')
+    fire(answerBtn, 'click')
+    eq('answering every question sends one batch',
+      lastOf(twoQ.actions),
+      {
+        type: 'questionAnswer', rpcId: 'wf-4',
+        answers: [
+          { id: 'a', selected: ['prod'], custom: undefined },
+          { id: 'b', selected: ['main'], custom: undefined },
+        ],
+      })
+
+    // Free text only: no options at all, so the Answer button is the only path.
+    const freeText = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, {
+      questions: [{
+        rpcId: 'wf-5', sessionId: 'session-1', state: 'pending', createdAt: 1,
+        questions: [{ id: 'why', question: 'Why is the build failing?' }],
+      }],
+    })
+    const box = walk(freeText.panel).find((n) => String(n['className']) === 'pending-other') as StubEl
+    check('a question with no options still offers free text', box !== undefined)
+    fire(stubButtons(freeText.panel).find((b) => String(b['textContent']) === 'Answer'), 'click')
+    eq('free text alone still does not submit', freeText.actions.length, 0)
+    box['value'] = 'the lockfile is stale'
+    fire(box, 'input')
+    fire(stubButtons(freeText.panel).find((b) => String(b['textContent']) === 'Answer'), 'click')
+    eq('the typed answer rides `custom`, not `selected`',
+      lastOf(freeText.actions),
+      { type: 'questionAnswer', rpcId: 'wf-5', answers: [{ id: 'why', selected: [], custom: 'the lockfile is stale' }] })
+
+    // A resolved request must leave the panel: 0.2.1 announces the verdict with a
+    // `cancel` frame, and a card left behind is a button that cannot work.
+    const resolved = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, {
+      questions: [{ rpcId: 'wf-6', sessionId: 'session-1', state: 'resolved', createdAt: 1, questions: [{ id: 'q', question: 'gone' }] }],
+    })
+    eq('a resolved request leaves the panel empty',
+      (resolved.panel['style'] as Record<string, string>)['display'], 'none')
   }
 
   console.log(`\n${failures === 0 ? 'all checks passed' : `${String(failures)} CHECK(S) FAILED`} (${String(step)} total)\n`)

@@ -32,6 +32,7 @@ import { formatMention } from '../context/collector.ts'
 import { ReviewController } from '../review/controller.ts'
 import { ReviewVirtualDocumentProvider } from '../review/virtualDocument.ts'
 import { ApprovalStore } from '../approval/store.ts'
+import type { AskUserQuestionAnswerItem, AskUserQuestionItem, ApprovalDecision } from '../harness/protocol.ts'
 
 export interface ControllerDeps {
   client: HarnessClient
@@ -263,6 +264,8 @@ export class AppController {
       case 'reviewAcceptAll': this.reviewController?.acceptAll(action.reviewId); break
       case 'reviewRejectAll': await this.reviewController?.rejectAll(action.reviewId); break
       case 'approvalRespond': await this.respondApproval(action.rpcId, action.outcome); break
+      case 'waterfallDelegate': await this.delegateWaterfall(action.rpcId); break
+      case 'questionAnswer': await this.answerQuestion(action.rpcId, action.answers); break
       case 'controlPlan': await this.setPlanMode(action.active); break
       case 'controlPreset': await this.setPreset(action.preset); break
       case 'controlFork': await this.forkActive(); break
@@ -311,7 +314,7 @@ export class AppController {
     this.binding = null
     this.noFolder = undefined
     this.usage.reset()
-    this.d.setState({ snapshot: undefined, activeSessionId: undefined, sessions: [], workspace: undefined, reviews: undefined, approvals: undefined, queue: [], sessionUsage: this.usage.snapshot() })
+    this.d.setState({ snapshot: undefined, activeSessionId: undefined, sessions: [], workspace: undefined, reviews: undefined, approvals: undefined, questions: undefined, queue: [], sessionUsage: this.usage.snapshot() })
     this.d.pushState()
   }
 
@@ -490,7 +493,7 @@ export class AppController {
     this.d.setState({ eventLog: this.eventLog })
   }
 
-  /** Handle approval frames from the dedicated approval listener (has the waterfall eventId). */
+  /** Handle approval/question frames from the dedicated waterfall listener. */
   private handleApprovalFrame(frame: unknown, eventId: RpcId): void {
     const f = frame as {
       type: string
@@ -500,6 +503,7 @@ export class AppController {
       callId?: CallId
       reason?: string
       outcome?: string
+      questions?: AskUserQuestionItem[]
     }
     if (f.type === 'approval/requested' && f.sessionId && f.approvalId) {
       this.approvalStore.upsert({
@@ -525,11 +529,48 @@ export class AppController {
         if (approval && this.approvalStore.canAllow(approval, this.activeSessionId)) {
           this.d.log.info(`Auto-approving: ${f.toolName ?? 'unknown'} (autoApprove setting)`)
           void this.respondApproval(eventId, 'allowed-once')
+        } else if (approval) {
+          this.d.log.info(
+            `Not auto-approving: ${f.toolName ?? 'unknown'} blocked by `
+            + `${this.approvalStore.blockReason(approval, this.activeSessionId) ?? 'policy'}`,
+          )
         }
       }
       return
     }
+    if (f.type === 'question/requested' && f.sessionId) {
+      const questions = Array.isArray(f.questions) ? f.questions : []
+      // A question with nothing in it is unanswerable; upserting it would park a
+      // blank card in front of the user forever.
+      if (questions.length === 0) {
+        this.d.log.info('Question requested with no questions — ignored')
+        return
+      }
+      this.approvalStore.upsertQuestion({
+        rpcId: eventId,
+        sessionId: f.sessionId,
+        callId: f.callId,
+        questions,
+      })
+      if (f.callId && this.model) this.model.setApprovalRpcId(f.callId, eventId)
+      this.d.log.info(`Question requested: ${String(questions.length)} question(s) (callId=${f.callId ?? '—'})`)
+      this.pushReviewApprovalState()
+      return
+    }
+    if (f.type === 'waterfall/resolved') {
+      // The Host withdrew it — typically because another client answered, or the
+      // turn ended. Drop the card instead of leaving it clickable against a
+      // waterfall that no longer exists.
+      const settled = this.approvalStore.resolveWaterfall(eventId, 'withdrawn')
+      if (settled) {
+        this.d.log.info(`Waterfall withdrawn by host: ${eventId}`)
+        this.pushReviewApprovalState()
+      }
+      return
+    }
     if (f.type === 'approval/resolved' && f.approvalId) {
+      // Pre-0.2 hosts announced the verdict here; 0.2.1 sends `cancel` instead
+      // (see the `waterfall/resolved` branch above).
       this.approvalStore.resolve(eventId, f.outcome ?? 'resolved')
       this.d.log.info(`Approval resolved: outcome=${f.outcome ?? '—'}`)
       this.pushReviewApprovalState()
@@ -538,7 +579,7 @@ export class AppController {
   }
 
   /** Answer an approval waterfall via `POST /api/$events/result`. */
-  private async respondApproval(eventId: RpcId, outcome: 'allowed-once' | 'rejected'): Promise<void> {
+  private async respondApproval(eventId: RpcId, outcome: ApprovalDecision): Promise<void> {
     const approval = this.approvalStore.getByRpcId(eventId)
     if (!approval) {
       this.d.notifyError('Approval not found or already resolved.')
@@ -560,6 +601,57 @@ export class AppController {
     }
   }
 
+  /** Answer a `user-questions/request` waterfall. */
+  private async answerQuestion(eventId: RpcId, answers: AskUserQuestionAnswerItem[]): Promise<void> {
+    const question = this.approvalStore.getQuestion(eventId)
+    if (!question) {
+      this.d.notifyError('That question is no longer pending.')
+      return
+    }
+    // One answer per asked question, and only for ids the Host actually asked
+    // about: the Host validates the shape, and a wrong count throws inside the
+    // tool call rather than failing the answer visibly.
+    const asked = new Set(question.questions.map((q) => q.id))
+    const cleaned = answers
+      .filter((a) => asked.has(a.id))
+      .map((a) => ({
+        id: a.id,
+        selected: Array.isArray(a.selected) ? a.selected.map(String) : [],
+        ...a.custom !== undefined && a.custom !== '' ? { custom: a.custom } : {},
+      }))
+    this.approvalStore.setQuestionResponding(eventId)
+    this.pushReviewApprovalState()
+    try {
+      await this.d.client.respondQuestion(eventId, { answers: cleaned })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      this.d.log.error('respondQuestion: ' + msg)
+      this.d.notifyError(`Failed to answer: ${msg}`)
+    }
+  }
+
+  /**
+   * Hand a waterfall back to the Host without answering it.
+   *
+   * The request is NOT cancelled — it stays pending for the Web UI, which holds
+   * its own delivery. Used for "answer this in the browser" and for an approval
+   * whose risk the sidebar refuses to grant.
+   */
+  private async delegateWaterfall(eventId: RpcId): Promise<void> {
+    try {
+      await this.d.client.delegateWaterfall(eventId)
+      // Drop the local card: we no longer hold a delivery, so nothing we do here
+      // could answer it. Leaving it clickable would offer a button that cannot work.
+      this.approvalStore.resolveWaterfall(eventId, 'delegated')
+      this.pushReviewApprovalState()
+      this.d.notifyError('Handed to the Harness Web UI — answer it there.')
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      this.d.log.error('delegateWaterfall: ' + msg)
+      this.d.notifyError(`Failed to hand off: ${msg}`)
+    }
+  }
+
   /** Push review and approval summaries to UiState. Also touches the model so
    *  the webview re-renders items (review/approval cards update). */
   private pushReviewApprovalState(): void {
@@ -568,6 +660,7 @@ export class AppController {
     this.d.setState({
       reviews: sid ? this.reviewController?.summaries(sid) : undefined,
       approvals: this.approvalStore.summaries(sid),
+      questions: this.approvalStore.questionSummaries(sid),
       snapshot: this.model?.snapshot(),
     })
     this.d.pushState()

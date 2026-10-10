@@ -5,8 +5,67 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.3] — 2026-10-10
+## [0.1.4] — 2026-10-10
 
+Tagline: **问题与审批现在真的能在 VS Code 里回答了 —— 而且点"允许"真的等于允许。**
+Tagline (EN): **fix: answer approvals and agent questions from the sidebar — and make Allow actually allow.**
+
+### Fixed
+
+- **Agent 的提问（`user-questions/request`）在 VS Code 里完全没有出口。** 客户端一直把它
+  正确翻译成 `question/requested`，然后控制器把这一帧丢在地上：既不渲染，也无法回答。
+  后果比"少一张卡片"严重——Host 侧 `ask_user_question` **阻塞**着那次工具调用，没人回答，
+  这一轮就停在那里。现在它和审批共用同一个待答面板。
+  - 单问题单选：点选项即作答（与 Web UI 的选项卡片一致）；多问题或复选：显式点 Answer，
+    一次提交整批，未作答的会就地报错而不是发一批空答案上去。
+  - 自由文本始终可用，走 `custom` 字段（不是 `selected`）。
+- **点"允许"从来没有允许过任何东西。** 审批的应答体发的是 `{ kind: 'result' }`，**没有
+  `value`**。但 `value` 就是 Host 瀑布的返回值，省略它等于用 `undefined` 结算；而
+  `ApprovalService.decide` 会把一切不在词表内的返回值（包括 `undefined`）归一化成
+  `'unavailable'` —— 一次**静默的 fail-closed 拒绝**，而且照常写一条看起来正常的
+  `approval/decided` 审计。真机实测：裸形状 → `outcome: "unavailable"`，工具报
+  "requires approval, but no approval channel is available"；带值形状 →
+  `outcome: "allowed-once"`，命令真的执行了。
+- **点"拒绝"也被记成了"没有可用的审批通道"。** 原来把拒绝编码成
+  `{ kind: 'rejected', error: … }`，那会 *取消* Host 瀑布，`decide` 里的 containment
+  再把它归一化成 `'unavailable'`。拒绝是一个携带词表字符串的 **result**，不是传输层错误。
+- **在 Web UI 里回答过之后，VS Code 的卡片永远点得动。** Host 对 mux 客户端**只**发一个
+  `cancel` 帧表示撤销（0.2.1 不转发 `approval/resolved` / `question/resolved`），而旧代码
+  只把它记进日志。现在 `cancel` 会被翻译成 `waterfall/resolved` 并撤掉对应卡片。
+- **审批卡只在"能匹配到工具行"时才画得出来。** 它原来嵌在 ToolItem 里，靠 `callId` 匹配；
+  没有匹配行（会话没在前台、工具行还没折进来）就等于不存在。现在待答项有自己的面板，
+  位于输入框上方——用户准备打字时正在看的地方。
+
+### Changed
+
+- **审批的放行门槛改成看"理由"，不再看工具名。** 原来的白名单是
+  `write/edit/read/grep/…` ——它列的这些名字本机 Host 根本没有（shell 工具叫 `pwsh`/`bash`），
+  于是**每一次真实的 shell 升级都会被拒**，而这条路径恰好是最常见的。名字本来也说明不了
+  申请有多大权限，理由才说明（"escalate sandbox to danger-full-access: …" 是 Host 自己
+  写的风险陈述），而且理由会**原样显示**在按钮旁边。现在只在理由声明了
+  full/unrestricted access 时不给内联允许；那张卡仍会显示、仍可拒绝、并多一个
+  "Answer in Web UI" 把它交回浏览器。被拒绝的按钮不再没有解释——
+  `blockedBy` 会说明原因。
+- 面板不再把"已解决"的请求画出来。
+
+### Added
+
+- `delegateWaterfall`：把仍开着的瀑布交回 Host 链（`outcome: {kind:'next'}`）。这是真正的
+  委托而非忽略——我们放弃自己的 delivery，请求继续留给 Web UI；只有当没有别的 delivery 时
+  Host 才会用 `next()` 结算。
+
+### Verification
+
+- 回归门 **190 → 211 项**全绿，新增第 G2 组：面板渲染、Allow/Deny 各自发出的**确切**载荷、
+  高危卡不给 Allow 但给交回、单选点击即答（按**标签**而不是下标）、多问题必须显式提交、
+  空答案被就地拦下、自由文本走 `custom`、已解决项离开面板。第 08 组补上四种信封的断言。
+  webview 桩升级到可"驱动"（记录监听器、`innerHTML=''` 清空子树），因为这次要验的是
+  按钮**做了什么**，不只是它**画出来了**。
+- 真机集成 **21 → 25 项**全绿，其中两条为新链路实测：Host 把 `user-questions/request`
+  交付给 mux 客户端且答案回到了被阻塞的工具调用；Host 交付 `approval/request` 且
+  "允许"**真的授予了**越界升级（命令执行成功）。
+
+## [0.1.3] — 2026-10-10
 Tagline: **修好了"能连上但收不到回话"，补上了图片与真正的文件上传，顺手拔掉两个静默 bug。**
 Tagline (EN): **fix: the sidebar connected and then went silent; plus inline images, real file uploads, and two silent bugs.**
 

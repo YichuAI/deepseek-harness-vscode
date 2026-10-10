@@ -1,7 +1,7 @@
 # 发布流程
 
 本文档描述如何裁剪并发布 **DeepSeek Harness Connector for VS Code** 的一个版本。
-v0.0.6 以 GitHub Release + VSIX 资产的形式发布；Marketplace 发布是可选的，见第 5 节。
+v0.1.4 以 GitHub Release + VSIX 资产的形式发布；Marketplace 发布是可选的，见第 5 节。
 
 仓库地址 `git@github.com:YichuAI/deepseek-harness-vscode.git`。此处 HTTPS 推送会失败
 （没有凭据助手），因此 remote 走 SSH。曾经需要 repo-local 的 `core.sshCommand` 来绕过
@@ -37,7 +37,7 @@ npm run typecheck          # → tsc --noEmit, 退出码 0
 npm run build              # → dist/extension.js
 
 # 1.3 协议测试（假 harness——不需要 dsh web）
-npm run protocol-test      # → 全部 180 项断言 ✓
+npm run protocol-test      # → 全部 211 项断言 ✓
 
 # 1.4 协议探测（可选但推荐——需要 dsh web 运行）
 #     打印该 host 的端点风格、是否 cookie 门禁、事件套接字，以及它实际提供哪些
@@ -49,7 +49,7 @@ npm run protocol-probe     # 接受 [host] [port] 参数，默认 127.0.0.1:3080
 #       cd ../deepseek-harness && npm run dsh -- web
 #     默认走本地自签（也就是扩展实际用的那条路），无需再复制 token；
 #     需要时可用 DSH_LAUNCH_URL='http://127.0.0.1:3080/?token=<token>' 覆盖
-npm run integration-test   # → 21/21 项 ✓，闭环通过
+npm run integration-test   # → 25/25 项 ✓，闭环通过
 
 # 1.6 打包 VSIX
 npm run package            # → harness-connector-deepseek-<版本>.vsix
@@ -63,8 +63,8 @@ npm run package            # → harness-connector-deepseek-<版本>.vsix
       `RELEASE.md` 的每一处修改，都已镜像到对应的 `*.zh-CN.md`。这是长期约定，
       不是每次发版再临时判断的事。
 - [ ] `CHANGELOG.md` 与 `ARCHITECTURE.md` 里的断言数与 `npm run protocol-test`
-      的**当前**输出一致（它已历经 50 → 64 → 98 → 83 → 156 → 178 → 180，其中 rc.2 重写用新假
-      harness 替换了 rc.6 假 harness；此处数字过期是最常见的文档漂移）。
+      的**当前**输出一致（它已历经 50 → 64 → 98 → 83 → 156 → 178 → 180 → 190 → 211，其中 rc.2 重写用新假
+      harness 替换了 rc.6 假 harness，之后又加入了瀑布/待答面板两组；此处数字过期是最常见的文档漂移）。
 - [ ] `LICENSE` 存在（MIT）。
 - [ ] `test/fixtures/` 中无秘钥/API 密钥/真实提示内容
       （固件必须使用 `<redacted:...>` 占位符）。
@@ -81,7 +81,7 @@ npm run package            # → harness-connector-deepseek-<版本>.vsix
 unzip -l harness-connector-deepseek-<版本>.vsix
 ```
 
-预期（v0.1.3 = 14 个文件，约 239 KB）：
+预期（v0.1.4 = 14 个文件，约 253 KB）：
 
 ```
 [Content_Types].xml

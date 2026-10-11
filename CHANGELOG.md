@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0] — 2026-10-11
+## [0.1.9] — 2026-10-11
 
 Tagline: **a ledger of what the turn changed — and an undo, not a permission slip.**
 Tagline (ZH): **一张本回合改了什么的账本——以及一个撤销键，而不是一张许可单。**

@@ -1,7 +1,7 @@
 # Release Process
 
 This document describes how to cut and publish a release of
-**DeepSeek Harness Connector for VS Code**. v0.2.0 ships as a GitHub Release +
+**DeepSeek Harness Connector for VS Code**. v0.1.9 ships as a GitHub Release +
 VSIX asset; Marketplace publishing is optional and documented in step 5.
 
 The repo lives at `git@github.com:YichuAI/deepseek-harness-vscode.git`. Pushing
@@ -67,6 +67,11 @@ Manual checks:
       the waterfall/pending-panel groups landed; stale counts are the most common
       doc drift here).
 - [ ] `LICENSE` present (MIT).
+- [ ] The expected VSIX size in step 2 was measured **after** the last edit to a
+      shipped doc. `README.md` / `CHANGELOG.md` / `ARCHITECTURE.md` and their
+      `*.zh-CN.md` twins live *inside* the VSIX, so editing one after packaging
+      invalidates the number — re-package and re-measure, never adjust by eye.
+      (This is how v0.2.0's baseline ended up 856 bytes short.)
 - [ ] No secrets / API keys / real prompt content in `test/fixtures/`
       (fixtures must use `<redacted:...>` placeholders).
 - [ ] `.vscodeignore` excludes `src/`, `scripts/`, `test/`, configs **and
@@ -83,7 +88,7 @@ Manual checks:
 unzip -l harness-connector-deepseek-<ver>.vsix
 ```
 
-Expected (v0.2.0 = 14 files, 308,764 bytes, ~301 KB):
+Expected (v0.1.9 = 14 files, 309,620 bytes, ~302 KB):
 
 ```
 [Content_Types].xml

@@ -1,4 +1,4 @@
-# 架构说明 — DeepSeek Harness VS Code v0.2.0
+# 架构说明 — DeepSeek Harness VS Code v0.1.9
 
 一页纸。三个稳定边界：**接线**（`extension.ts`）、**编排**（`AppController`）、**语义**（`ConversationModel`）。后续 feature PR 从这些边界向外扩展，而非向内侵入。
 
@@ -48,7 +48,7 @@ type ConversationItem =
   | SystemItem           // kind: 'system'（独立类型，不是 UserItem + 标记）
   | ToolItem             // kind: 'tool'（call + result 按 callId 合并，另带 reviewId）
   | StatusItem           // kind: 'status'（turn start/end）
-  | ChangesItem          // kind: 'changes'（v0.2.0：每回合一张改动卡片）
+  | ChangesItem          // kind: 'changes'（v0.1.9：每回合一张改动卡片）
 ```
 
 关键变化：
@@ -68,7 +68,7 @@ type ConversationItem =
 | `tool/call` | → 创建 `ToolItem`（state: `running`） |
 | `tool/result` | → **更新**已有 `ToolItem`（按 `callId`，state: `completed`/`error`） |
 | `turn/start` / `turn/end` | → `status` 行；设置 `running` |
-| `workspace/changes` | → `changes` 卡片（v0.2.0）；每回合一张，重复播报是替换坐标 |
+| `workspace/changes` | → `changes` 卡片（v0.1.9）；每回合一张，重复播报是替换坐标 |
 | `session/title` | 更新快照标题 |
 | **任何其他类型** | **忽略**（harness 协议是可合并扩展的） |
 
@@ -346,7 +346,7 @@ findHarnessWorkspace()          — 只读：匹配文件夹 ↔ harness workspa
 
 无确认弹窗。workspace 是**发送时按需确保的资源**，不是连接时的资源。
 
-## 改动记录与撤销（v0.2.0）
+## 改动记录与撤销（v0.1.9）
 
 "改了什么"有两份彼此独立的记录，它们不能互相替代：
 
@@ -423,7 +423,7 @@ dsh-review://<reviewId>/<encoded-path>/before|after
 dsh-changes://<id>/before|after
 ```
 
-从 `path` 读就是 v0.2.0 修掉的那个 bug：
+从 `path` 读就是 v0.1.9 修掉的那个 bug：
 `Uri.parse('dsh-review://review-1/foo/before').path` 是 `/foo/before`——层级 URI 会保留开头
 的斜杠——于是 `path.split('/')[0]` 是空字符串，store 查找永远不命中，经该 provider 打开的
 每一个 diff 都是空白。

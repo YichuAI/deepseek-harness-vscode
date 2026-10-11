@@ -1,7 +1,7 @@
 # 发布流程
 
 本文档描述如何裁剪并发布 **DeepSeek Harness Connector for VS Code** 的一个版本。
-v0.2.0 以 GitHub Release + VSIX 资产的形式发布；Marketplace 发布是可选的，见第 5 节。
+v0.1.9 以 GitHub Release + VSIX 资产的形式发布；Marketplace 发布是可选的，见第 5 节。
 
 仓库地址 `git@github.com:YichuAI/deepseek-harness-vscode.git`。此处 HTTPS 推送会失败
 （没有凭据助手），因此 remote 走 SSH。曾经需要 repo-local 的 `core.sshCommand` 来绕过
@@ -69,6 +69,10 @@ npm run package            # → harness-connector-deepseek-<版本>.vsix
       的**当前**输出一致（它已历经 50 → 64 → 98 → 83 → 156 → 178 → 180 → 190 → 211 → 231 → 243 → 268 → 295，其中 rc.2 重写用新假
       harness 替换了 rc.6 假 harness，之后又加入了瀑布/待答面板两组；此处数字过期是最常见的文档漂移）。
 - [ ] `LICENSE` 存在（MIT）。
+- [ ] 第 2 步里的 VSIX 期望体积，是在**最后一次改动随包文档之后**量出来的。
+      `README.md` / `CHANGELOG.md` / `ARCHITECTURE.md` 及其 `*.zh-CN.md` 镜像
+      **都被打进 VSIX**，打包之后再改其中一个，那个数字就作废了——重新打包、
+      重新量，**不要凭感觉调**。（v0.2.0 的基线就是这么少了 856 字节的。）
 - [ ] `test/fixtures/` 中无秘钥/API 密钥/真实提示内容
       （固件必须使用 `<redacted:...>` 占位符）。
 - [ ] `.vscodeignore` 排除了 `src/`、`scripts/`、`test/`、配置文件**以及 `.workbuddy/`**
@@ -84,7 +88,7 @@ npm run package            # → harness-connector-deepseek-<版本>.vsix
 unzip -l harness-connector-deepseek-<版本>.vsix
 ```
 
-预期（v0.2.0 = 14 个文件，308,764 字节，约 301 KB）：
+预期（v0.1.9 = 14 个文件，309,620 字节，约 302 KB）：
 
 ```
 [Content_Types].xml

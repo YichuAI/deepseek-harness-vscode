@@ -5,7 +5,7 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [0.2.0] — 2026-10-11
+## [0.1.9] — 2026-10-11
 
 版本定位：**一张本回合改了什么的账本——以及一个撤销键，而不是一张许可单。**
 

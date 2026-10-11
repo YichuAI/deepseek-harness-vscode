@@ -52,7 +52,10 @@ jobs:
           # On a tag push this is the tag; on a dispatch it is the tag named by
           # the input, so the artifact is always built from the tagged commit and
           # never from the branch the dispatch was launched from.
-          ref: ${{ inputs.tag || github.ref }}
+          # `github.event.inputs`, not the `inputs` context: the latter is scoped to
+          # dispatch/reusable runs and this expression must also evaluate on a plain
+          # tag push, which is the path that actually ships.
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - uses: actions/setup-node@v4
         with:
@@ -65,7 +68,7 @@ jobs:
           # Via `env:` and not `${{ }}` inline: a dispatch input is untrusted text
           # and interpolating it straight into a shell script is an injection
           # vector. Every later step reads the resolved values the same way.
-          REQUESTED: ${{ inputs.tag }}
+          REQUESTED: ${{ github.event.inputs.tag }}
         run: |
           set -euo pipefail
           tag="${REQUESTED:-$GITHUB_REF_NAME}"

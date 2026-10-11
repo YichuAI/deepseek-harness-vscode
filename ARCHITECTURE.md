@@ -1,4 +1,4 @@
-# Architecture — DeepSeek Harness VS Code v0.1.9
+# Architecture — DeepSeek Harness VS Code v0.2.0
 
 One page. Three stable boundaries: **wiring** (`extension.ts`), **orchestration** (`AppController`), **semantics** (`ConversationModel`). Future feature PRs extend outward from these boundaries, not inward.
 
@@ -902,7 +902,7 @@ media/
 ├── origin.png                # source material (excluded from VSIX)
 └── markdown-it.umd.min.js    # bundled for VSIX (114 KB)
 scripts/
-├── protocol-test.ts          # fake-harness protocol test, 295 assertions (no dsh web)
+├── protocol-test.ts          # fake-harness protocol test, 312 assertions (no dsh web)
 ├── protocol-probe.ts         # asks a live `dsh web` what it actually serves
 ├── integration-test.ts       # closed-loop test against real dsh
 └── gen-icon.ts               # icon generation from origin.png

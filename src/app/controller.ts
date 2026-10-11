@@ -833,7 +833,16 @@ export class AppController {
       const msg = e instanceof Error ? e.message : String(e)
       this.d.log.error('respondApproval: ' + msg)
       this.d.notifyError(`Failed to respond to approval: ${msg}`)
+      this.approvalStore.revertResponding(eventId)
+      this.pushReviewApprovalState()
+      return
     }
+    // The POST *is* the settlement: a 2xx means the Host resolved the waterfall
+    // with this value. Nothing else will ever say so — a mux client is not sent
+    // `approval/resolved`, only a withdrawal `cancel` — so waiting for a frame
+    // that never arrives is what left the card reading "Allowing…" for good.
+    this.approvalStore.resolveWaterfall(eventId, outcome)
+    this.pushReviewApprovalState()
   }
 
   /** Answer a `user-questions/request` waterfall. */
@@ -862,7 +871,16 @@ export class AppController {
       const msg = e instanceof Error ? e.message : String(e)
       this.d.log.error('respondQuestion: ' + msg)
       this.d.notifyError(`Failed to answer: ${msg}`)
+      this.approvalStore.revertResponding(eventId)
+      this.pushReviewApprovalState()
+      return
     }
+    // Settle locally for the same reason as an approval: the answer has been
+    // accepted by the Host, and no `question/resolved` frame is coming to tell
+    // us. Leaving it pending is what left the card sitting under the composer
+    // after it had already been answered.
+    this.approvalStore.resolveWaterfall(eventId, 'answered')
+    this.pushReviewApprovalState()
   }
 
   /**

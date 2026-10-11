@@ -216,6 +216,29 @@ export class ApprovalStore {
     }))
   }
 
+  /**
+   * Put a waterfall back to pending, in either store.
+   *
+   * The counterpart to {@link resolveWaterfall}, and needed for the same reason
+   * the settle-on-success is: the Host sends a mux client no `approval/resolved`
+   * frame, so we own the lifecycle. A POST that *failed* used to leave the card
+   * in 'responding' for the rest of the session — buttons reading "Allowing…",
+   * nothing clickable, and no way back, because the only route to pending was
+   * for the card to be dropped entirely.
+   */
+  revertResponding(rpcId: RpcId): void {
+    const a = this.approvals.get(rpcId)
+    if (a && a.state === 'responding') {
+      a.state = 'pending'
+      this.notify(a)
+    }
+    const q = this.questions.get(rpcId)
+    if (q && q.state === 'responding') {
+      q.state = 'pending'
+      this.notify(q)
+    }
+  }
+
   clearSession(sessionId: SessionId): void {
     for (const [rpcId, a] of this.approvals) {
       if (a.sessionId === sessionId) {

@@ -1,9 +1,9 @@
-# DeepSeek Harness Connector for VS Code (v0.1.9)
+# DeepSeek Harness Connector for VS Code (v0.2.0)
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
 [![VS Code Marketplace](https://img.shields.io/badge/VS%20Code-Marketplace-blue.svg)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
-[![Version](https://img.shields.io/badge/version-0.1.9-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.9)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.2.0)
 
 > DeepSeek Harness 的原生 VS Code 客户端。
 >
@@ -59,6 +59,17 @@ diff 在这儿、撤销在这儿。这跟两个人在同一个仓库里的关系
 而不用 web 传输，是同一种错的缩小版：`acp` profile 是一个自称 automation-only 的 stdio
 JSON-RPC 服务，既不带 elicitation，也不带 DSH 的展示卡片——那会丢掉审批/提问瀑布和改动记录，
 而这两样 HTTP+WS 传输本来就已经给到了。
+
+## v0.2.0 新特性
+
+**两个只有用起来才会冒出来的 bug。**
+
+- **修复：输入框下面的引用芯片把提示词一起吞了。** webview 里那份 `@` 语法副本是一个普通字符串，交给 `new RegExp` 使用——而字符串字面量会在 `RegExp` 看到它之前先吃掉反斜杠：`'[^\s"]'` 到手时已是 `'[^s"]'`，一个能匹配空格、换行、以及后面那些 `@` 的字符类。所以先写 `@readmefor_human.md 这里多了文字`、下一行再写 `@RELEASE.md`，只会得到**一个**芯片，内容包含这全部；`:L10-L20` 的行号范围也彻底失效。现在它是正则字面量——它旁边两行的 `/\\s/` 一直就是这么写的。
+- **修复：已经答完的提问（或已经批准的审批）会一直留在屏幕上。** mux 客户端**永远不会**收到 `question/resolved` / `approval/resolved`，只有撤回用的 `cancel`，所以那张卡就一直停在输入框上面显示「Answering…」，按钮全死、也没有东西放它走。现在那个 POST 本身就是结算；POST 失败则把卡片退回去。
+
+门禁：**312 项断言**（原 295），新增的驱动的是编译产物里的 webview 脚本与真实控制器——包括「POST 失败」那条顺利路径测不到的支线。真机集成仍为 **39/39**。
+
+完整差异见 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
 
 ## v0.1.9 新特性
 
@@ -355,7 +366,7 @@ URI authority 契约，以及卡片语义——每回合一张卡、重复播报
    或从 [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases) 安装 VSIX：
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.1.9.vsix
+   code --install-extension harness-connector-deepseek-0.2.0.vsix
    ```
 
 3. **不用配置任何东西。** 扩展会自动连接：它读取 `dsh web` 写在 `$DSH_HOME/.credentials.yaml` 里的浏览器会话签名密钥，自己签出同一个 `dsh-auth-…` cookie。**没有需要粘贴的 token。**
@@ -471,7 +482,7 @@ path"`、`@dir/`，可带 `:L<n>` / `:L<n>-L<m>` 后缀；从 `@` 补全列表�
 一个独立的 Node 脚本用真实客户端代码驱动一个**假**的 harness（不预设具体版本——插件是协商的，这个假实现也是）—— 不需要 `dsh web`：
 
 ```bash
-npm run protocol-test    # 295 项断言：双流传输拆分（$events 白名单 vs
+npm run protocol-test    # 312 项断言：双流传输拆分（$events 白名单 vs
                          # session/follow）、线缆协商（点分/斜杠、cookie 门禁、
                          # 事件套接字）、认证、cookie 派生、{args} payload、
                          # 审批与提问两条瀑布（Allow/Deny 的确切信封、cancel 撤卡、
@@ -504,8 +515,8 @@ npm install
 npm run build        # esbuild → dist/extension.js
 npm run watch        # 变更时自动重建
 npm run typecheck
-npm run package      # → harness-connector-deepseek-0.1.9.vsix
-npm run protocol-test      # 针对假 harness 的 295 项协议断言
+npm run package      # → harness-connector-deepseek-0.2.0.vsix
+npm run protocol-test      # 针对假 harness 的 312 项协议断言
 npm run protocol-probe     # 报告真实 dsh web 暴露了什么
 ```
 
@@ -542,7 +553,7 @@ npm run protocol-probe     # 报告真实 dsh web 暴露了什么
 - **回合的改动卡片列出的是这个回合改了哪些文件，但其中只有文件工具自己的改动能从中撤销。** 撤销范围限定在该回合产出的 review 内，因为 Host 的摘要只带路径与行数，不带还原所需的文本。某个回合若只通过 shell 命令改了文件，它会直说。
 - 改动摘要在宿主上只活到 Session 结束，所以宿主重启后卡片可能解析为「没有改动可显示」。这会渲染成没有卡片，与 Web UI 一致。
 
-## 路线图（v0.2.0+）
+## 路线图（v0.2.1+）
 
 - **部分回退——hunk 级。** materializer 其实已经会回退单个 hunk（并且会在文件漂移时拒绝），但现在没有任何 UI 能触达它：今天的回退是每文件全有或全无。要恢复它，意味着在改动卡片和原生 diff 里提供逐 hunk 撤销，数据来自 Host 本来就提供的 hunk 列表，而不是它并不保留的整份文件文本。
 - 按条目下发状态增量：流式推送目前仍整份发送对话流（40 轮会话约 52 KB/次）。渲染端已不再重建它，但跨 `postMessage` 的结构化克隆仍是每个分块剩下的代价。

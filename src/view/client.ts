@@ -1647,12 +1647,22 @@ export const CLIENT_SCRIPT = /* js */ `
   // sends the message text to the agent verbatim — nothing here is stripped,
   // resolved or inlined.
   // NOTE: doubled backslashes are load-bearing (template literal), see above.
-  const MENTION_SOURCE = '@(?:"([^"\\n]*)"|([^\\s"]+))(?::L(\\d+)(?:-L(\\d+)))?';
+  // A REGEX LITERAL, not a string handed to new RegExp, and the difference is
+  // not style. In the string form the emitted source is a single-quoted literal,
+  // so the JS parser consumes the backslash before RegExp ever sees the text:
+  // '[^\\s"]' arrives at RegExp as '[^s"]', a class that matches spaces,
+  // newlines and further @s. One chip then swallowed the rest of the prompt —
+  // path plus prose plus the next mention — and ':L' ranges stopped parsing
+  // because '\\d' had become a literal 'd'. A regex literal only needs the
+  // template's escaping, which is why the /\\s/ test below always worked while
+  // this did not. (Doubled backslashes remain load-bearing; see the note above.)
+  const MENTION_RE = /@(?:"([^"\\n]*)"|([^\\s"]+))(?::L(\\d+)(?:-L(\\d+)))?/g;
   function findMentionPreview(text) {
     const found = [];
-    const re = new RegExp(MENTION_SOURCE, 'g');
+    // One shared literal, so the cursor has to be rewound per call.
+    MENTION_RE.lastIndex = 0;
     let m;
-    while ((m = re.exec(text)) !== null) {
+    while ((m = MENTION_RE.exec(text)) !== null) {
       // Only at the start of the text or after whitespace (an email address is
       // not a mention).
       if (m.index > 0 && !/\\s/.test(text.charAt(m.index - 1))) continue;

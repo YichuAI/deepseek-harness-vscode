@@ -1,4 +1,4 @@
-# 架构说明 — DeepSeek Harness VS Code v0.1.9
+# 架构说明 — DeepSeek Harness VS Code v0.2.0
 
 一页纸。三个稳定边界：**接线**（`extension.ts`）、**编排**（`AppController`）、**语义**（`ConversationModel`）。后续 feature PR 从这些边界向外扩展，而非向内侵入。
 
@@ -685,7 +685,7 @@ media/
 ├── origin.png                # 源材料（VSIX 排除）
 └── markdown-it.umd.min.js    # VSIX 打包用（114 KB）
 scripts/
-├── protocol-test.ts          # 假 harness 协议测试，295 项断言（无需 dsh web）
+├── protocol-test.ts          # 假 harness 协议测试，312 项断言（无需 dsh web）
 ├── protocol-probe.ts         # 向真实 `dsh web` 询问它实际提供什么
 ├── integration-test.ts       # 针对真实 dsh 的闭环测试
 └── gen-icon.ts               # 从 origin.png 生成图标

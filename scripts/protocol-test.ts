@@ -50,6 +50,7 @@ import type { MuxFrame, ReadyFrame, RemoteEventResult } from '../src/harness/pro
 // The webview script is a plain template string, so tsc never looks inside it.
 // These two give the regression gate eyes on it (see step G).
 import { CLIENT_SCRIPT } from '../src/view/client.ts'
+import { ApprovalStore } from '../src/approval/store.ts'
 import { HTML_SKELETON } from '../src/view/html.ts'
 import { ControlSurface } from '../src/conversation/control.ts'
 import { ConversationModel } from '../src/conversation/model.ts'
@@ -2052,19 +2053,79 @@ async function main(): Promise<void> {
       type: 'questionAnswer', rpcId: 'evt-q', answers: [{ id: 'q1', selected: ['yes'] }],
     } as never)
     await settle()
-    eq('answering publishes exactly one state', pushes, 1)
+    // Two publishes, and both carry news: the first shows "Answering…", the
+    // second settles the card. The settle is ours to make. A mux client is not
+    // sent `question/resolved` — only a withdrawal `cancel` — so a card that
+    // waited for one stayed under the composer for the rest of the session,
+    // which is exactly what it did.
+    eq('answering publishes the responding state and then the settled one', pushes, 2)
+    eq('...so an answered question stops being parked in the panel',
+      (ui['questions'] as unknown[]).length, 0)
     eq('...with no transcript rebuild either',
       (ui['snapshot'] as { renderVersion: number }).renderVersion, versionBefore)
     eq('the answer rode in outcome.value, as the Host waterfall expects',
       (wf.seen.responses.at(-1) as { outcome?: unknown } | undefined)?.outcome,
       { kind: 'result', value: { answers: [{ id: 'q1', selected: ['yes'] }] } })
 
+    // Handing one back is the other exit: nothing is answered, and the card is
+    // dropped because we no longer hold a delivery. Its own waterfall, because
+    // the one above is settled.
+    wf.pushEvent({
+      type: 'waterfall', event: 'user-questions/request', eventId: 'evt-q2', agentId: 'session-1',
+      request: { wait: {}, questions: [{ id: 'q1', question: 'Ship it?', options: [{ label: 'yes' }] }] },
+    })
+    await settle()
     pushes = 0
-    await wfCtrl.dispatch({ type: 'waterfallDelegate', rpcId: 'evt-q' } as never)
+    await wfCtrl.dispatch({ type: 'waterfallDelegate', rpcId: 'evt-q2' } as never)
     await settle()
     eq('handing it back publishes exactly one state', pushes, 1)
     eq('a delegated waterfall is dropped from the pending panel',
       (ui['questions'] as unknown[]).length, 0)
+
+    // The approval half of the same fix. Same store, same lifecycle, same missing
+    // frame — asserted rather than assumed symmetric, because the failure mode is
+    // a card that says "Allowing…" for good.
+    wf.pushEvent({
+      type: 'waterfall', event: 'approval/request', eventId: 'evt-a', agentId: 'session-1',
+      request: { sessionId: 'session-1', toolName: 'write', callId: 'call-a', reason: 'outside workspace' },
+    })
+    await settle()
+    eq('an approval arrival parks a card', (ui['approvals'] as unknown[]).length, 1)
+    pushes = 0
+    await wfCtrl.dispatch({
+      type: 'approvalRespond', rpcId: 'evt-a', outcome: 'allowed-once',
+    } as never)
+    await settle()
+    eq('allowing publishes the responding state and then the settled one', pushes, 2)
+    eq('...so a granted approval stops being parked',
+      (ui['approvals'] as unknown[]).length, 0)
+    eq('...and the grant still rode in outcome.value',
+      (wf.seen.responses.at(-1) as { outcome?: unknown } | undefined)?.outcome,
+      { kind: 'result', value: 'allowed-once' })
+
+    // The other half of the same lifecycle, which a controller test cannot reach:
+    // a POST that FAILS. A card in flight stays listed — only 'resolved' is
+    // filtered out of the panel, which is exactly why a stuck card was visible at
+    // all, sitting under the composer reading "Answering…" — so walking the state
+    // back is what makes its buttons clickable again.
+    const store = new ApprovalStore()
+    store.upsertQuestion({
+      rpcId: 'q-revert', sessionId: 'session-1',
+      questions: [{ id: 'q1', question: 'Ship it?', options: [{ label: 'yes' }] }],
+    })
+    eq('a question arrival starts out pending', store.getQuestion('q-revert')?.state, 'pending')
+    store.setQuestionResponding('q-revert')
+    eq('a click moves it to responding, which is what the card renders as "Answering…"',
+      store.getQuestion('q-revert')?.state, 'responding')
+    eq('...and a card in flight is still listed in the panel',
+      store.pendingQuestions('session-1').length, 1)
+    store.revertResponding('q-revert')
+    eq('a failed answer walks it back to pending, with its buttons live again',
+      store.getQuestion('q-revert')?.state, 'pending')
+    store.setQuestionResponding('q-revert')
+    store.resolveWaterfall('q-revert', 'answered')
+    eq('an accepted answer is what actually clears the panel',
+      store.pendingQuestions('session-1').length, 0)
 
     // The inspector ring buffer is filled either way — it must be, so opening
     // the panel can backfill — but only published while something can read it.
@@ -2415,6 +2476,43 @@ async function main(): Promise<void> {
 
     cfClient.dispose()
     await cf.stop()
+  }
+
+  // ─── N. composer mention chips ──────────────────────────────────────────────
+  //
+  // The chip strip under the composer is the only place the `@` grammar becomes
+  // visible, and it is a second, deliberately duplicated copy of that grammar —
+  // the webview cannot import extension-host code. It was also silently wrong in
+  // a way no type checker can see: the pattern lived in a plain string, and the
+  // webview's own parser consumed the backslash before `RegExp` ever got it, so
+  // '[^\\s"]' arrived as '[^s"]' — a class matching spaces, newlines and further
+  // @s. One chip swallowed the whole prompt, and ':L' ranges stopped parsing
+  // because '\\d' had degenerated to a literal 'd'. Nothing above would catch
+  // that; these assertions drive the REAL emitted script, which is the only
+  // layer that can.
+  {
+    const chat = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, {})
+    check('the webview boots for the mention assertions', chat.error === '', chat.error)
+
+    const input = chat.el('input') as { value: string }
+    const strip = chat.el('context-files') as { children: Record<string, unknown>[] }
+    const typed = (text: string): string[] => {
+      input.value = text
+      fire(input, 'input')
+      return strip.children.map((c) => String(c['textContent']))
+    }
+
+    eq('a mention followed by prose chips the PATH alone',
+      typed('@readmefor_human.md 这里多了文字'), ['readmefor_human.md'])
+    eq('a mention on the next line is its own chip, not more of the first',
+      typed('@readmefor_human.md 这里多了文字\n@RELEASE.md'),
+      ['readmefor_human.md', 'RELEASE.md'])
+    eq('a line range rides on the chip instead of the path absorbing it',
+      typed('@src/app.ts:L10-L20'), ['src/app.ts:L10-L20'])
+    eq('a quoted mention keeps its spaces and stops at the closing quote',
+      typed('@"my notes/plan.md" and then prose'), ['my notes/plan.md'])
+    eq('an @ inside a word is not a mention', typed('mail bob@example.com'), [])
+    eq('and the strip goes away once nothing is referenced', typed('just prose'), [])
   }
 
   console.log(`\n${failures === 0 ? 'all checks passed' : `${String(failures)} CHECK(S) FAILED`} (${String(step)} total)\n`)

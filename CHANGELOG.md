@@ -5,6 +5,40 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-10-11
+
+Tagline: **two bugs that only showed up in use — a chip that ate the prompt, and a card that never stopped answering.**
+Tagline (ZH): **两个只有用起来才会冒出来的 bug——一个把提示词吃掉的芯片，一张永远答不完的卡片。**
+
+### Fixed
+
+- **The mention chip under the composer swallowed the prompt.** The webview's copy of the
+  `@` grammar lived in a plain string handed to `new RegExp`, and a string literal consumes
+  the backslash before `RegExp` ever sees it: `'[^\s"]'` arrived as `'[^s"]'`, a class that
+  matches spaces, newlines and further `@`s. Typing `@readmefor_human.md some prose` and
+  then `@RELEASE.md` on the next line produced one chip reading
+  `readmefor_human.md some prose @RELEASE.md` instead of two — and `:L10-L20` ranges
+  stopped parsing at all, because `\d` had degenerated to a literal `d`.
+
+  It is a regex literal now, where the template's own escaping is the correct amount —
+  which is why the `/\\s/` test two lines below it had always worked. The file already
+  carried a note about the template eating backslashes; what the note missed is that a
+  *string* needs four where a regex literal needs two.
+- **An answered question, and a granted approval, stayed on screen for the rest of the
+  session.** A mux client is never sent `question/resolved` or `approval/resolved` — only
+  a withdrawal `cancel` — so the card sat under the composer reading "Answering…" with its
+  buttons dead, and nothing ever released it. The POST **is** the settlement: a 2xx means
+  the Host took our value, so that is what settles the card now. A POST that fails walks
+  it back to pending instead of leaving the same dead end.
+
+### Notes
+
+- The regression gate is now **312 assertions** (was 295). The new ones drive the
+  *emitted* webview script for the chip grammar — the only layer that can see a backslash
+  eaten by the template — and the real controller for the waterfall lifecycle, including
+  the failed-POST path a happy-path controller test cannot reach.
+- Live integration stays **39/39**.
+
 ## [0.1.9] — 2026-10-11
 
 Tagline: **a ledger of what the turn changed — and an undo, not a permission slip.**

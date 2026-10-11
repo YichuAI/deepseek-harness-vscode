@@ -1,9 +1,9 @@
-# DeepSeek Harness Connector for VS Code (v0.1.5)
+# DeepSeek Harness Connector for VS Code (v0.1.6)
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
 [![VS Code Marketplace](https://img.shields.io/badge/VS%20Code-Marketplace-blue.svg)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
-[![Version](https://img.shields.io/badge/version-0.1.5-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.5)
+[![Version](https://img.shields.io/badge/version-0.1.6-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.6)
 
 > DeepSeek Harness 的原生 VS Code 客户端。
 >
@@ -24,6 +24,29 @@ VS Code ─────┘
 ```
 
 VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**会话——所以浏览器刷新该会话时能看到 VS Code 发送的内容。
+
+## v0.1.6 新特性
+
+**问一句、答一句，不再把整条对话流重画两遍。**
+
+- **修复：一次审批/提问事件会把对话流重建两遍。** 一个审批或 `ask_user_question` 会推送
+  两次完整状态——`ApprovalStore` 自己的变更监听器一次，刚改完 store 的调用方再一次——
+  而每一次被接受的状态推送都会让 webview 把 `#messages` 拆掉、逐条重建（连带 markdown
+  重新解析）。两次落在同一个 tick 里，中间没有绘制的机会。在一条 72 条记录的会话上实测：
+  每个事件 **2 次推送 / 约 70 KB / 2 次完整重建**，一次作答往返合计 **6 次推送 / 约 212 KB
+  / 6 次重建**。另外两个同伙也一并收掉：`pushReviewApprovalState()` 无条件 `model.touch()`
+  （审批和提问**根本不在对话流里画**，`renderTool` 里写明了），以及 `session/follow` 批处理
+  回调即使批里什么都没变也照推。现在：**每个事件 1 次推送、0 次重建**。
+- **修复：检查器的事件环形缓冲区搭上了每一次状态推送**，开着关着都搭。最多 300 帧 × 2 KB
+  ≈ 600 KB 的结构化克隆，而推送在流式输出里是逐块触发的——实测**单次推送 1,318,580 字节**，
+  而且没人读。现在只有面板在屏幕上才发布（打开的那一刻一次性补全历史）：**1.29 MB → 35 KB**。
+- **修复：检查器列表无限膨胀。** 它每次变化都把整个数组 append 一遍，而缓冲区是环形的、头
+  部会移动——于是每来一帧就多堆一份全部行（300、600、900…）。改为整体重建，上限 300 行。
+- **修复：把提问交回 Web UI 成功时反而报错。** 一次成功的交接弹的是红色错误提示。
+- **移除 `ToolItem.approvalRpcId`** 及其写入方 `setApprovalRpcId()`——写的人没有、读的人也没有，
+  而它带的 `renderVersion` 自增会在每次审批时逼出第二次对话流重建。
+
+完整差异见 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
 
 ## v0.1.5 新特性
 
@@ -229,7 +252,7 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
    或从 [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases) 安装 VSIX：
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.1.5.vsix
+   code --install-extension harness-connector-deepseek-0.1.6.vsix
    ```
 
 3. **不用配置任何东西。** 扩展会自动连接：它读取 `dsh web` 写在 `$DSH_HOME/.credentials.yaml` 里的浏览器会话签名密钥，自己签出同一个 `dsh-auth-…` cookie。**没有需要粘贴的 token。**
@@ -345,7 +368,7 @@ path"`、`@dir/`，可带 `:L<n>` / `:L<n>-L<m>` 后缀；从 `@` 补全列表�
 一个独立的 Node 脚本用真实客户端代码驱动一个**假**的 harness（不预设具体版本——插件是协商的，这个假实现也是）—— 不需要 `dsh web`：
 
 ```bash
-npm run protocol-test    # 231 项断言：双流传输拆分（$events 白名单 vs
+npm run protocol-test    # 243 项断言：双流传输拆分（$events 白名单 vs
                          # session/follow）、线缆协商（点分/斜杠、cookie 门禁、
                          # 事件套接字）、认证、cookie 派生、{args} payload、
                          # 审批与提问两条瀑布（Allow/Deny 的确切信封、cancel 撤卡、
@@ -375,8 +398,8 @@ npm install
 npm run build        # esbuild → dist/extension.js
 npm run watch        # 变更时自动重建
 npm run typecheck
-npm run package      # → harness-connector-deepseek-0.1.5.vsix
-npm run protocol-test      # 针对假 harness 的 231 项协议断言
+npm run package      # → harness-connector-deepseek-0.1.6.vsix
+npm run protocol-test      # 针对假 harness 的 243 项协议断言
 npm run protocol-probe     # 报告真实 dsh web 暴露了什么
 ```
 
@@ -394,6 +417,12 @@ npm run protocol-probe     # 报告真实 dsh web 暴露了什么
   本机没有第二个服务会这么说——所以它同时也是一个身份判据。`deepseekHarness.autoDiscover`
   用的就是它，在这之前先读各 profile 用户 patch 层里钉过的 `webserver.port`。本机实测：
   探测 46 个 loopback 监听，命中 1 个 Host，并归因到 `desktop` profile 里钉的端口。
+- **一次状态推送很贵，所以推送次数和"真的有变化"的次数一样多。** webview 收到一次被接受
+  的推送，就会把 `#messages` 拆掉、逐条重建，所以凡是要发布的东西都必须真的有东西可发布。
+  在一条 72 条记录的会话上实测：一个审批/提问事件过去要花 2 次推送、约 70 KB、2 次完整重建，
+  现在 1 次推送、0 次重建。检查器的事件环形缓冲区（最多约 600 KB 的截断帧）只在那个面板
+  在屏幕上时才发布，同一会话下单次推送因此从 1,318,580 字节降到 35,399 字节。这些数字是被
+  断言住的，不是自称的——见 `scripts/protocol-test.ts` 第 I 组。
 
 ## 限制
 
@@ -405,7 +434,7 @@ npm run protocol-probe     # 报告真实 dsh web 暴露了什么
 - 未知的 harness 事件类型会被忽略（协议是可合并扩展的）；它们不会导致客户端崩溃，但也不会渲染。
 - Diff 审查的 Reject 使用 `git checkout` 回退——目标文件上未提交的本地修改会在 Reject 时丢失。
 
-## 路线图（v0.1.6+）
+## 路线图（v0.1.7+）
 
 - 检查器：过滤框 / 类型高亮 / 导出 JSONL
 - 搜索：限定工作区、分页、命中高亮

@@ -115,6 +115,14 @@ export type WebviewAction =
   | { type: 'searchClear' }
   // ─── F7 live event inspector ───────────────────────────────
   | { type: 'inspectorClear' }
+  /**
+   * The inspector panel opened or closed.
+   *
+   * Reported upwards because the panel is pure webview DOM: only that side
+   * knows whether it is on screen, and therefore whether the frame ring buffer
+   * (up to 300 truncated frames) is worth riding every state push.
+   */
+  | { type: 'inspectorToggle'; open: boolean }
   // ─── `@` completion (host-served fileReferences/list) ──────
   | { type: 'refsQuery'; query: string }
   // ─── composer attachments (images ride the prompt; files are staged) ──

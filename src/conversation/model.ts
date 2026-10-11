@@ -115,24 +115,32 @@ export class ConversationModel {
     }
   }
 
-  /** Attach an approval rpcId to a ToolItem (called by AppController on approval/requested). */
-  setApprovalRpcId(callId: CallId, rpcId: string | undefined): void {
-    const idx = this.toolIndexByCallId.get(callId)
-    if (idx == null) return
-    const item = this.items[idx]
-    if (item?.kind === 'tool') {
-      item.approvalRpcId = rpcId
-      this.bump()
-    }
-  }
-
   setShowSystemMessages(show: boolean): void {
     if (show !== this.showSystemMessages) this.renderVersion++
     this.showSystemMessages = show
   }
 
-  /** Bump renderVersion so the webview re-renders items (used when review/approval state changes). */
+  /**
+   * Force a webview re-render of the transcript.
+   *
+   * Only review cards need this: they are drawn INSIDE transcript tool rows, so
+   * a review whose state changed has no other way to reach the screen. Approval
+   * and question cards live in the pending panel above the composer instead, so
+   * touching the model for one of those bought a full transcript rebuild for a
+   * diff of nothing.
+   */
   touch(): void { this.bump() }
+
+  /**
+   * The current change-detection signature, read without mutating anything.
+   *
+   * `touch()` is the only other way to observe this, and it bumps as a side
+   * effect — which is exactly what a caller trying to decide *whether* a
+   * re-render is warranted cannot afford to do. A webview rebuild costs a
+   * markdown re-parse plus a full DOM teardown of the transcript, so "did
+   * anything change" has to be answerable for free.
+   */
+  get version(): number { return this.renderVersion }
 
   /**
    * Set the running flag from the host's own status relay

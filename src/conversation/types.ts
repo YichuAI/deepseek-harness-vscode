@@ -48,8 +48,6 @@ export interface ToolItem {
   state: 'running' | 'completed' | 'error'
   /** Review transaction id if a review was created for this tool (write/edit). */
   reviewId?: string
-  /** Pending approval rpcId if approval/requested was received for this tool. */
-  approvalRpcId?: string
 }
 
 export interface StatusItem {

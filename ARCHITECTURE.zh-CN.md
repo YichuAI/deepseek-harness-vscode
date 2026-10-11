@@ -355,6 +355,40 @@ findHarnessWorkspace()          — 只读：匹配文件夹 ↔ harness workspa
 
 `EventBuffer` 合并高频 `assistant/chunk` 帧，最多每 **30 ms** 刷新一次。`turn/end` 和 `assistant/message` 强制立即刷新，使 UI 即时定稿。webview 仅在 `renderVersion` 变化时重渲染——绝不按 token 逐次重渲染。
 
+### 推送预算（v0.1.6）
+
+`pushState()` 不便宜，而且它在真正要紧的意义上**不幂等**：webview 收到一次
+`snapshot.renderVersion` 变了的推送，就会把 `#messages` 拆掉、逐条重建、并把每条助手消息
+重新按 markdown 解析一遍。所以本仓库对自己的要求是：**一次推送必须真的有东西可推。**
+有三处没做到，都在瀑布（waterfall）路径上：
+
+- **瀑布事件推送两次。** `ApprovalStore` 通知自己的变更监听器，监听器调用
+  `pushReviewApprovalState()`；而刚刚改完 store 的调用方紧接着又调了一次。两次落在同一个
+  tick 里，中间没有绘制机会——第二次纯粹是白烧主线程。现在
+  `pushReviewApprovalState()` 会先算一个
+  `(sessionId, 模型版本, reviews, approvals, questions)` 的签名，没变就直接返回。
+- **它还无条件 `model.touch()`。** `touch()` 会增加 `renderVersion`，而那**正是** webview
+  的重建信号。但审批和提问根本不在对话流里画（`renderTool` 里写明了），所以那次重建是在
+  为"什么都没变"付账。现在只有 **review** 这一片有资格 touch——review 卡片确实画在对话流
+  的工具行里。顺带删掉了没人写、也没人读的 `ToolItem.approvalRpcId`。
+- **`session/follow` 回调无条件推送。** 一批帧覆盖整个会话，所以一次普通的 flush 很可能只是
+  把屏幕上的东西重放一遍。现在它会在批处理前后比对字段身份，只有真的动了才发布。
+
+一条 72 条记录的会话上实测：一个瀑布事件从 2 次推送 / 约 70 KB / 2 次完整对话流重建，
+降到 **1 次推送 / 35 KB / 0 次重建**；一次作答往返从 6 次 / 约 212 KB / 6 次重建降到
+3 次 / 约 106 KB / 0 次。`scripts/protocol-test.ts` 第 I 组把推送次数和"`renderVersion`
+没动"都断言住了——这里若回归，是测试失败，而不是"感觉有点卡"。
+
+### 检查器缓冲区的发布时机
+
+`AppController.captureFrame()` 每收到一帧就写进一个 300 条的环形缓冲区（每条 `raw` 截断到
+2 KB）。这个缓冲区**照常填充，但只在面板位于屏幕上时才发布**——面板是纯 webview DOM，
+只有那一侧知道它是否可见，于是它用 `inspectorToggle` 动作把状态变化报上来。过去它搭上
+每一次 `UiState` 推送，代价是 300 × 2 KB ≈ 600 KB 的结构化克隆（缓冲填满后单次推送实测
+1,318,580 字节），去喂一个默认关着、根本不读它的面板。打开面板时会把攒下的缓冲一次性发布，
+所以历史当场就在。另外列表渲染改为**整体重建**而不是追加：缓冲区是环形的、头部会移动，
+每次追加整个数组会每帧多堆一份全部行，无限增长。
+
 ## 重连
 
 `MuxStream` 以退避策略重试（250 ms → 5 s）。在 `closed → open` 转换时，`AppController` 调用 `refetchHistory(activeSessionId)` 并重建模型——Harness 文档化的恢复语义是**重建**，不是游标续传。
@@ -462,7 +496,7 @@ media/
 ├── origin.png                # 源材料（VSIX 排除）
 └── markdown-it.umd.min.js    # VSIX 打包用（114 KB）
 scripts/
-├── protocol-test.ts          # 假 harness 协议测试，231 项断言（无需 dsh web）
+├── protocol-test.ts          # 假 harness 协议测试，243 项断言（无需 dsh web）
 ├── protocol-probe.ts         # 向真实 `dsh web` 询问它实际提供什么
 ├── integration-test.ts       # 针对真实 dsh 的闭环测试
 └── gen-icon.ts               # 从 origin.png 生成图标

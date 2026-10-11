@@ -1,9 +1,9 @@
-# DeepSeek Harness Connector for VS Code (v0.1.5)
+# DeepSeek Harness Connector for VS Code (v0.1.6)
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
 [![VS Code Marketplace](https://img.shields.io/badge/VS%20Code-Marketplace-blue.svg)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
-[![Version](https://img.shields.io/badge/version-0.1.5-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.5)
+[![Version](https://img.shields.io/badge/version-0.1.6-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.6)
 
 > Native VS Code client for DeepSeek Harness.
 >
@@ -24,6 +24,18 @@ VS Code ─────┘
 ```
 
 VS Code reads the workspaces and sessions the browser already has, and continues the **same** session — so a browser refresh of that session sees exactly what VS Code sent.
+
+## What's new in v0.1.6
+
+**Asking or answering a question no longer redraws the whole conversation.**
+
+- **Fixed: one waterfall event rebuilt the transcript twice.** An approval or `ask_user_question` published the entire state twice — once from the `ApprovalStore`'s own change listener, once from the caller that had just mutated it — and each accepted push made the webview tear down `#messages` and rebuild every item, markdown and all. Both landed in the same tick, so nothing could paint in between. On a 72-record session that measured **2 pushes / ~70 KB / 2 full rebuilds** per event, and **6 pushes / ~212 KB / 6 rebuilds** for one answer round trip. Two more contributors went with it: `pushReviewApprovalState()` touched the model unconditionally (nothing about an approval or a question is drawn in the transcript — `renderTool` says so in as many words), and the `session/follow` batch callback pushed even when the batch had moved nothing. Now: **1 push per event, 0 rebuilds.**
+- **Fixed: the event inspector's ring buffer rode every push, open or closed.** Up to 300 frames × 2 KB ≈ 600 KB of structured clone, on a push that fires for every streamed chunk — measured at **1,318,580 bytes in a single push**, none of which anything read. It is published only while the panel is on screen now (and backfilled the moment you open it): **1.29 MB → 35 KB.**
+- **Fixed: the inspector list grew without bound.** It appended the whole array on every change, but the buffer is a ring whose head moves — so each new frame piled on another full copy of every row (300, then 600, then 900…). It rebuilds instead, bounded at 300 rows.
+- **Fixed: handing a question back to the Web UI reported itself as an error.** A successful hand-off used the red error toast.
+- **Removed `ToolItem.approvalRpcId`** and its writer `setApprovalRpcId()` — written by nobody, read by nobody, and the `renderVersion` bump it carried forced a second transcript rebuild on every approval.
+
+See [CHANGELOG.md](./CHANGELOG.md) for the full diff.
 
 ## What's new in v0.1.5
 
@@ -173,7 +185,7 @@ For your safety, the following remain out of scope:
    Or install the VSIX from [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases):
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.1.5.vsix
+   code --install-extension harness-connector-deepseek-0.1.6.vsix
    ```
 
 3. Nothing to configure. The extension auto-connects: it reads the browser-session
@@ -300,7 +312,7 @@ that implements the `0.2.1-alpha.2` server half exactly — so no `dsh web` is
 needed:
 
 ```bash
-npm run protocol-test    # 231 assertions: the two-stream transport split
+npm run protocol-test    # 243 assertions: the two-stream transport split
                          # ($events allowlist vs session/follow), wire negotiation
                          # (dot/slash, cookie gating, event socket), auth and cookie
                          # derivation, {args} payloads (wrapped vs bare), the approval
@@ -342,8 +354,8 @@ npm install
 npm run build        # esbuild → dist/extension.js
 npm run watch        # rebuild on change
 npm run typecheck
-npm run package      # → harness-connector-deepseek-0.1.5.vsix
-npm run protocol-test      # 231 protocol assertions against a fake harness
+npm run package      # → harness-connector-deepseek-0.1.6.vsix
+npm run protocol-test      # 243 protocol assertions against a fake harness
 npm run protocol-probe     # report what your real dsh web exposes
 ```
 
@@ -372,6 +384,15 @@ Press `F5` in VS Code to launch an Extension Development Host with the extension
   `deepseekHarness.autoDiscover` uses, after first reading any `webserver.port`
   pinned in a profile's user patch layer. Measured on this machine: 46 loopback
   listeners probed, one Host found, attributed to the pinned `desktop` profile.
+- **A state push is expensive, so there are as few of them as there are changes.**
+  The webview answers an accepted push by tearing down `#messages` and rebuilding
+  every item, so anything that publishes must have something to publish. Measured
+  on a 72-record session, one approval/question event used to cost 2 pushes,
+  ~70 KB and 2 full rebuilds; it now costs 1 push and no rebuild. The event
+  inspector's frame ring buffer — up to ~600 KB of truncated frames — is published
+  only while that panel is on screen, which took a single push from 1,318,580
+  bytes to 35,399 on the same session. The figures are asserted, not asserted-to:
+  see group I of `scripts/protocol-test.ts`.
 
 ## Limitations
 
@@ -383,7 +404,7 @@ Press `F5` in VS Code to launch an Extension Development Host with the extension
 - Unknown harness event types are ignored (the protocol is merge-extensible); they do not crash the client but also do not render.
 - Diff review revert uses `git checkout` — uncommitted changes to the target file will be lost on Reject.
 
-## Roadmap (v0.1.6+)
+## Roadmap (v0.1.7+)
 
 - Inspector: filter box / type highlight / export as JSONL
 - Search: scope to workspace, pagination, highlight rendering

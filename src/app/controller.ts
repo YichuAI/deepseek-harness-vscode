@@ -222,6 +222,20 @@ export class AppController {
    * up in `disposables` left one dead listener per switch alive forever.
    */
   private sessionSubscription: { dispose: () => void } | undefined
+  /** Last published review slice — see {@link pushReviewApprovalState}. */
+  private lastReviewSig = ''
+  /** Last published review/approval/question signature — see above. */
+  private lastWaterfallSig = ''
+  /**
+   * Whether the webview's event inspector is on screen.
+   *
+   * The ring buffer is filled either way (it has to be, so that opening the
+   * panel can backfill), but only published while the panel can read it. Riding
+   * every `pushState` regardless cost up to 300 × 2 KB ≈ 600 KB of structured
+   * clone per push — on a push that fires for every streamed chunk — to feed a
+   * panel that is closed by default and reads none of it.
+   */
+  private inspectorOpen = false
 
   constructor(private readonly d: ControllerDeps) {}
 
@@ -305,6 +319,14 @@ export class AppController {
       case 'pendingRemove': this.removePending(action.id); break
       case 'pendingClear': this.clearPending(); break
       case 'inspectorClear': this.eventLog = []; this.eventLogSeq = 0; this.d.setState({ eventLog: [] }); break
+      // The inspector lives entirely in the webview's DOM, so it is the only
+      // side that knows whether the panel is showing — and therefore the only
+      // side that can say whether its ring buffer is worth shipping.
+      case 'inspectorToggle':
+        this.inspectorOpen = action.open
+        this.d.setState({ eventLog: this.inspectorOpen ? this.eventLog : [] })
+        this.d.pushState()
+        break
     }
   }
 
@@ -494,8 +516,23 @@ export class AppController {
       await this.refetchHistory(sessionId)
       this.sessionSubscription?.dispose()
       this.sessionSubscription = this.d.client.subscribe(sessionId, (frames) => {
+        // Identity snapshot of everything a session batch can publish, taken
+        // before the batch runs. Reference equality is enough: every producer
+        // REPLACES the whole field (`setState({ snapshot })`, `setState({ queue })`,
+        // …) rather than mutating it in place.
+        const st = this.d.getState()
+        const before = [this.model?.version, st.snapshot, st.canStop, st.control, st.sessionUsage]
         for (const f of frames) { this.captureFrame(f); this.applyMuxFrame(f) }
-        this.d.pushState()
+        const now = this.d.getState()
+        // Publish only when the batch actually moved something. A `session/follow`
+        // batch carries frames for the whole session, so an equally ordinary
+        // flush is a replay of what is already on screen — and an unconditional
+        // push here made the webview rebuild the transcript for a diff of
+        // nothing, on a timer.
+        const moved = (this.model?.version ?? -1) !== before[0]
+          || now.snapshot !== before[1] || now.canStop !== before[2]
+          || now.control !== before[3] || now.sessionUsage !== before[4]
+        if (moved || this.inspectorOpen) this.d.pushState()
       })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -547,7 +584,10 @@ export class AppController {
     if (f.type === 'session/event' && f.sessionId === this.activeSessionId && f.event) {
       const event = f.event as Parameters<ConversationModel['applyEvent']>[0]
       this.model.applyEvent(event)
-      if (this.control.apply(event)) this.pushControl()
+      // Publish the folded state but do NOT push per event: the subscriber
+      // delivers a batch and pushes once at the end, so a push here would be
+      // repeated for every control-changing frame in that batch.
+      if (this.control.apply(event)) this.d.setState({ control: this.control.snapshot() })
       // Token usage: fold assistant/message samples live; refresh the host's
       // projections after a turn ends (they cover the whole session log).
       if (this.usage.apply(event)) {
@@ -609,7 +649,8 @@ export class AppController {
     if (raw.length > 2000) raw = raw.slice(0, 1997) + '…'
     this.eventLog.push({ seq: ++this.eventLogSeq, at: Date.now(), kind, eventType, summary, raw })
     if (this.eventLog.length > 300) this.eventLog = this.eventLog.slice(-300)
-    this.d.setState({ eventLog: this.eventLog })
+    // Publish only while the inspector can read it — see `inspectorOpen`.
+    if (this.inspectorOpen) this.d.setState({ eventLog: this.eventLog })
   }
 
   /** Handle approval/question frames from the dedicated waterfall listener. */
@@ -633,11 +674,10 @@ export class AppController {
         callId: f.callId,
         reason: f.reason,
       })
-      // Link approval to ToolItem if callId matches
-      if (f.callId && this.model) {
-        this.model.setApprovalRpcId(f.callId, eventId)
-        this.d.setState({ snapshot: this.model.snapshot() })
-      }
+      // The approval↔tool linkage (`setApprovalRpcId`) is gone: the field it
+      // wrote was never read by anything, and the renderVersion bump it carried
+      // forced a second full transcript rebuild on top of the one the store
+      // listener already triggered.
       this.d.log.info(`Approval requested: ${f.toolName ?? 'unknown'} (callId=${f.callId ?? '—'})`)
       this.pushReviewApprovalState()
       // F2: auto-approve — answer the waterfall immediately when the setting is
@@ -671,7 +711,7 @@ export class AppController {
         callId: f.callId,
         questions,
       })
-      if (f.callId && this.model) this.model.setApprovalRpcId(f.callId, eventId)
+      // No tool linkage: see the approval branch above for why.
       this.d.log.info(`Question requested: ${String(questions.length)} question(s) (callId=${f.callId ?? '—'})`)
       this.pushReviewApprovalState()
       return
@@ -771,17 +811,45 @@ export class AppController {
     }
   }
 
-  /** Push review and approval summaries to UiState. Also touches the model so
-   *  the webview re-renders items (review/approval cards update). */
+  /**
+   * Publish review + pending-waterfall state to UiState.
+   *
+   * Two cheap guards keep this from being the sidebar's most expensive call.
+   * A waterfall event reaches here twice — once from the store's own change
+   * listener and once from the caller that just mutated it — and the webview
+   * answers an accepted push by tearing down and rebuilding the whole
+   * transcript, markdown and all. Measured on a 72-record session: 2 pushes and
+   * 2 full rebuilds per event, twice per answer round trip.
+   *
+   *   • `touch()` only when the REVIEW slice changed. A review card is drawn
+   *     inside a transcript tool row, so it has to force a rebuild; approval and
+   *     question cards are not drawn there at all (`renderTool`), so touching
+   *     for them bought a rebuild for a diff of nothing.
+   *   • Publishing the same thing twice is a no-op, not merely wasteful — the
+   *     second push happens in the same tick, so nothing can paint in between.
+   *     The signature includes the model's own version, so a real transcript
+   *     change always gets through.
+   */
   private pushReviewApprovalState(): void {
     const sid = this.activeSessionId
-    if (this.model) this.model.touch()
-    this.d.setState({
-      reviews: sid ? this.reviewController?.summaries(sid) : undefined,
-      approvals: this.approvalStore.summaries(sid),
-      questions: this.approvalStore.questionSummaries(sid),
-      snapshot: this.model?.snapshot(),
-    })
+    const reviews = sid ? this.reviewController?.summaries(sid) : undefined
+    const approvals = this.approvalStore.summaries(sid)
+    const questions = this.approvalStore.questionSummaries(sid)
+
+    const reviewSig = JSON.stringify(reviews ?? null)
+    if (reviewSig !== this.lastReviewSig) {
+      this.lastReviewSig = reviewSig
+      this.model?.touch()
+    }
+
+    const sig = [
+      sid ?? '-', String(this.model?.version ?? -1), reviewSig,
+      JSON.stringify(approvals), JSON.stringify(questions),
+    ].join('|')
+    if (sig === this.lastWaterfallSig) return
+    this.lastWaterfallSig = sig
+
+    this.d.setState({ reviews, approvals, questions, snapshot: this.model?.snapshot() })
     this.d.pushState()
   }
 

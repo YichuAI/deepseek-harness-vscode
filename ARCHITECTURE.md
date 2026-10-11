@@ -344,10 +344,24 @@ folding, so the inspector sees exactly what the wire delivered: every
 `session/event`, `assistant/stream`, `stream/error` frame, with seq / arrival
 time / type / one-line summary. Frames live in a 300-entry ring buffer
 (each `raw` JSON truncated to 2 KB) held in extension-host memory only —
-nothing is written to disk or sent anywhere. Clicking a row copies the raw
-JSON to the clipboard. Because it rides the existing subscribe path, it costs
-zero extra host requests and cannot desynchronize from what the conversation
-model actually saw.
+nothing is written to disk. Clicking a row copies the raw JSON to the
+clipboard. Because it rides the existing subscribe path, it costs zero extra
+host requests and cannot desynchronize from what the conversation model
+actually saw.
+
+The buffer is **filled unconditionally but published only while the panel is on
+screen**. The panel is pure webview DOM, so that side is the only one that knows
+whether it is showing; it reports the transition with the `inspectorToggle`
+action. Riding every `UiState` push instead cost up to 300 × 2 KB ≈ 600 KB of
+structured clone per push — measured at 1,318,580 bytes for a single push once
+the buffer was full — to feed a panel that is closed by default and reads none
+of it. Opening the panel publishes the retained buffer in one go, so the history
+is there the moment you ask for it.
+
+Rendering appends nothing: the list is rebuilt whenever the tail frame changes.
+The buffer is a ring, so its head moves as it fills; appending the whole array
+each time (as it used to) piled on another full copy of every row per frame and
+grew without bound.
 
 ### F8 — attachments (images inline, files two-step)
 
@@ -502,6 +516,39 @@ failure into the message area, so a broken panel is self-evident instead of sile
 
 `EventBuffer` coalesces high-frequency `assistant/chunk` frames and flushes at most every **30 ms**. `turn/end` and `assistant/message` force an immediate flush so the UI settles at once. The webview re-renders on `renderVersion` change only — never per token.
 
+### The push budget (v0.1.6)
+
+`pushState()` is not cheap, and it is not idempotent in the way that matters: the
+webview answers an accepted push whose `snapshot.renderVersion` moved by tearing
+down `#messages`, rebuilding every item, and re-parsing every assistant message
+as markdown. So the rule this codebase holds itself to is **a push must have
+something to publish.** Three places broke it, all in the waterfall path:
+
+- **Waterfall events published twice.** `ApprovalStore` notifies its own change
+  listener, which calls `pushReviewApprovalState()`; the caller that had just
+  mutated the store then called it again. Both landed in the same tick, so
+  nothing could paint between them — the second push was pure main-thread time.
+  `pushReviewApprovalState()` now computes a signature of `(sessionId, model
+  version, reviews, approvals, questions)` and returns early when it has not
+  changed.
+- **It also touched the model unconditionally.** `model.touch()` bumps
+  `renderVersion`, which *is* the webview's rebuild signal. But nothing about an
+  approval or a question is drawn in the transcript — `renderTool` says so — so
+  the rebuild was for a diff of nothing. Only the **review** slice earns a touch
+  now: review cards do live inside transcript tool rows. The dead
+  `ToolItem.approvalRpcId` (written by nobody, read by nobody) went with it.
+- **The `session/follow` callback pushed unconditionally.** A batch carries
+  frames for the whole session, so an ordinary flush can be a replay of what is
+  already on screen. It now compares field identities across the batch and
+  publishes only if something moved.
+
+Measured on a 72-record session: one waterfall event went from 2 pushes /
+~70 KB / 2 full transcript rebuilds to **1 push / 35 KB / 0 rebuilds**, and an
+answer round trip from 6 pushes / ~212 KB / 6 rebuilds to 3 / ~106 KB / 0. Group
+I of `scripts/protocol-test.ts` asserts the push count and the unchanged
+`renderVersion`, so a regression here fails the gate rather than merely feeling
+slow.
+
 ## Reconnect
 
 `MuxStream` retries with backoff (250 ms → 5 s). On a `closed → open` transition, `AppController` calls `refetchHistory(activeSessionId)` and reloads the model — the documented Harness resume semantic is **rebuild**, not cursor-resume.
@@ -622,7 +669,7 @@ media/
 ├── origin.png                # source material (excluded from VSIX)
 └── markdown-it.umd.min.js    # bundled for VSIX (114 KB)
 scripts/
-├── protocol-test.ts          # fake-harness protocol test, 231 assertions (no dsh web)
+├── protocol-test.ts          # fake-harness protocol test, 243 assertions (no dsh web)
 ├── protocol-probe.ts         # asks a live `dsh web` what it actually serves
 ├── integration-test.ts       # closed-loop test against real dsh
 └── gen-icon.ts               # icon generation from origin.png

@@ -366,6 +366,11 @@ export const CLIENT_SCRIPT = /* js */ `
     if (log.length === 0 || log[log.length - 1].seq === lastInspectorSeq) return
     lastInspectorSeq = log[log.length - 1].seq
     const list = $('inspector-list')
+    // Rebuild, not append. The buffer is a ring, so its head moves as it fills
+    // and its tail advances one frame at a time; appending the whole array on
+    // every advance piled up a fresh copy of every row each time (300, then
+    // 600, then 900 …) instead of showing the newest tail.
+    list.innerHTML = ''
     const frag = document.createDocumentFragment()
     for (const f of log) {
       const row = document.createElement('div')
@@ -1463,9 +1468,22 @@ export const CLIENT_SCRIPT = /* js */ `
     const p = $('inspector-panel');
     const open = p.style.display === 'none';
     p.style.display = open ? '' : 'none';
-    if (open) { lastInspectorSeq = -1; renderInspector(currentState); }
+    // Tell the extension, because it is what decides whether the frame ring
+    // buffer rides every state push. Nothing reads the buffer while the panel is
+    // shut, and it is up to ~300 truncated frames per push.
+    post({ type: 'inspectorToggle', open: open });
+    // Either way the list is now stale: closed clears it, and reopening has to
+    // repaint from whatever the buffer holds.
+    $('inspector-list').innerHTML = '';
+    lastInspectorSeq = -1;
+    if (open) renderInspector(currentState);
   });
-  $('inspector-close').addEventListener('click', () => { $('inspector-panel').style.display = 'none'; });
+  $('inspector-close').addEventListener('click', () => {
+    $('inspector-panel').style.display = 'none';
+    $('inspector-list').innerHTML = '';
+    lastInspectorSeq = -1;
+    post({ type: 'inspectorToggle', open: false });
+  });
   $('inspector-clear').addEventListener('click', () => { lastInspectorSeq = -1; post({ type: 'inspectorClear' }); $('inspector-list').innerHTML = ''; });
   $('btn-attach').addEventListener('click', () => post({ type: 'attachFile' }));
   $('input').addEventListener('keydown', (e) => {

@@ -1915,6 +1915,117 @@ async function main(): Promise<void> {
     await new Promise<void>((r) => { plain.close(() => { r() }) })
   }
 
+  // ─── I. one waterfall event = one push, and none of them a transcript rebuild ─
+  // A waterfall event used to publish the whole state TWICE — once from the
+  // ApprovalStore's own change listener and once from the caller that had just
+  // mutated it. That is not merely wasteful: each accepted push makes the
+  // webview tear down `#messages` and rebuild every item, markdown and all, and
+  // both pushes land in the same tick so nothing can paint in between. Measured
+  // on a 72-record session it was 2 pushes / ~70 KB / 2 full rebuilds per event,
+  // four times over an answer round trip.
+  //
+  // The rebuild is also unnecessary: nothing about an approval or a question is
+  // drawn in the transcript any more — `renderTool` says so in as many words,
+  // and the `approvalRpcId` it used to read was written by nobody and read by
+  // nobody. A review card IS drawn there, so reviews keep the right to touch the
+  // model. That asymmetry is what these assertions pin down.
+  {
+    const wf = makeHarness('none', PRESENT_CONTROLS)
+    const wfPort = await wf.start()
+    const wfAuth = new BrowserSessionAuth({
+      host: '127.0.0.1', port: wfPort,
+      store: { load: async () => undefined, save: async () => {} }, log: () => {},
+      allowLocalMint: true,
+    })
+    await wfAuth.init()
+    await wfAuth.tryMintLocalSession()
+    const wfClient = new HarnessClient({ host: '127.0.0.1', port: wfPort, auth: wfAuth, log: () => {} })
+    await wfClient.connect()
+
+    const { AppController } = await loadControllerWithVscodeStub()
+    let ui: Record<string, unknown> = { showSystemMessages: false, eventLog: [] }
+    let pushes = 0
+    const wfCtrl = new AppController({
+      client: wfClient,
+      vscodeAPI: {
+        window: {}, commands: {},
+        workspace: { registerTextDocumentContentProvider: () => ({ dispose: () => undefined }) },
+      } as never,
+      getState: () => ui as never,
+      setState: (patch) => { ui = { ...ui, ...patch } },
+      bump: () => {},
+      pushState: () => { pushes += 1 },
+      notifyError: () => {},
+      notifyInfo: () => {},
+      autoDiscover: () => false,
+      openHarnessHome: () => {},
+      moveToSecondarySideBar: async () => {},
+      log: { info: () => {}, error: () => {} },
+    })
+    wfCtrl.start()
+    await wfCtrl.selectSession('session-1')
+    const settle = (ms = 150): Promise<void> => new Promise((r) => { setTimeout(r, ms) })
+    // Let the follow stream open and its snapshot flush before anything is
+    // measured — those pushes are real, they just belong to `selectSession`.
+    await settle(400)
+
+    const versionBefore = (ui['snapshot'] as { renderVersion: number }).renderVersion
+
+    pushes = 0
+    wf.pushEvent({
+      type: 'waterfall', event: 'user-questions/request', eventId: 'evt-q', agentId: 'session-1',
+      request: { wait: {}, questions: [{ id: 'q1', question: 'Ship it?', options: [{ label: 'yes' }, { label: 'no' }] }] },
+    })
+    await settle()
+    eq('a question arrival publishes exactly one state (not the store-notify + caller pair)',
+      pushes, 1)
+    eq('...and parks the card in the pending panel', (ui['questions'] as unknown[]).length, 1)
+    eq('...without forcing a transcript rebuild',
+      (ui['snapshot'] as { renderVersion: number }).renderVersion, versionBefore)
+
+    pushes = 0
+    await wfCtrl.dispatch({
+      type: 'questionAnswer', rpcId: 'evt-q', answers: [{ id: 'q1', selected: ['yes'] }],
+    } as never)
+    await settle()
+    eq('answering publishes exactly one state', pushes, 1)
+    eq('...with no transcript rebuild either',
+      (ui['snapshot'] as { renderVersion: number }).renderVersion, versionBefore)
+    eq('the answer rode in outcome.value, as the Host waterfall expects',
+      (wf.seen.responses.at(-1) as { outcome?: unknown } | undefined)?.outcome,
+      { kind: 'result', value: { answers: [{ id: 'q1', selected: ['yes'] }] } })
+
+    pushes = 0
+    await wfCtrl.dispatch({ type: 'waterfallDelegate', rpcId: 'evt-q' } as never)
+    await settle()
+    eq('handing it back publishes exactly one state', pushes, 1)
+    eq('a delegated waterfall is dropped from the pending panel',
+      (ui['questions'] as unknown[]).length, 0)
+
+    // The inspector ring buffer is filled either way — it must be, so opening
+    // the panel can backfill — but only published while something can read it.
+    // Riding every push regardless cost up to ~600 KB of structured clone per
+    // push, on a push that fires for every streamed chunk.
+    eq('nothing of the ring buffer is published while the inspector is closed',
+      (ui['eventLog'] as unknown[]).length, 0)
+    wf.pushFollow({
+      type: 'session/event', sessionId: 'session-1',
+      event: { type: 'turn/start', seq: 900, time: 1, data: { turn: 900 } },
+    })
+    await settle()
+    eq('...still nothing, even though a frame just arrived',
+      (ui['eventLog'] as unknown[]).length, 0)
+
+    await wfCtrl.dispatch({ type: 'inspectorToggle', open: true } as never)
+    eq('opening the inspector publishes what it kept',
+      (ui['eventLog'] as unknown[]).length >= 1, true)
+    await wfCtrl.dispatch({ type: 'inspectorToggle', open: false } as never)
+    eq('closing it stops shipping the buffer', (ui['eventLog'] as unknown[]).length, 0)
+
+    wfClient.dispose()
+    await wf.stop()
+  }
+
   console.log(`\n${failures === 0 ? 'all checks passed' : `${String(failures)} CHECK(S) FAILED`} (${String(step)} total)\n`)
   process.exit(failures === 0 ? 0 : 1)
 }

@@ -1,4 +1,4 @@
-# 架构说明 — DeepSeek Harness VS Code v0.0.2
+# 架构说明 — DeepSeek Harness VS Code v0.1.8
 
 一页纸。三个稳定边界：**接线**（`extension.ts`）、**编排**（`AppController`）、**语义**（`ConversationModel`）。后续 feature PR 从这些边界向外扩展，而非向内侵入。
 
@@ -46,8 +46,9 @@ type ConversationItem =
   | UserMessageItem      // kind: 'user'
   | AssistantMessageItem // kind: 'assistant'（streaming 标记、usage、reasoning）
   | SystemItem           // kind: 'system'（独立类型，不是 UserItem + 标记）
-  | ToolItem             // kind: 'tool'（call + result 按 callId 合并）
+  | ToolItem             // kind: 'tool'（call + result 按 callId 合并，另带 reviewId）
   | StatusItem           // kind: 'status'（turn start/end）
+  | ChangesItem          // kind: 'changes'（v0.1.8：每回合一张改动卡片）
 ```
 
 关键变化：
@@ -67,6 +68,7 @@ type ConversationItem =
 | `tool/call` | → 创建 `ToolItem`（state: `running`） |
 | `tool/result` | → **更新**已有 `ToolItem`（按 `callId`，state: `completed`/`error`） |
 | `turn/start` / `turn/end` | → `status` 行；设置 `running` |
+| `workspace/changes` | → `changes` 卡片（v0.1.8）；每回合一张，重复播报是替换坐标 |
 | `session/title` | 更新快照标题 |
 | **任何其他类型** | **忽略**（harness 协议是可合并扩展的） |
 
@@ -239,6 +241,9 @@ VS Code 的卡片会永远点得动。
 绝不调用：`settings/*`、`credentials/*`、`terminal/*`、`directoryPicker/*`，
 或上表之外的任何审批/权限变更操作。
 
+改动卡片的两条路由（`changes.summary`、`changes.diff`）**根本不是 RPC**，也永远不会出现在
+这张表里——见[改动记录与撤销](#改动记录与撤销v018)。
+
 ## 控制面（`src/conversation/control.ts`）
 
 harness 把各种旋钮以持久会话事件的形式下发，而且都是**全量值**：后写的覆盖先写的，
@@ -340,6 +345,107 @@ findHarnessWorkspace()          — 只读：匹配文件夹 ↔ harness workspa
 ```
 
 无确认弹窗。workspace 是**发送时按需确保的资源**，不是连接时的资源。
+
+## 改动记录与撤销（v0.1.8）
+
+"改了什么"有两份彼此独立的记录，它们不能互相替代：
+
+| | 按调用的 review | 按回合的改动记录 |
+|---|---|---|
+| 由谁构建 | 文件工具自己的 `before`/`after` | Host 侧，在回合边界 |
+| 覆盖范围 | 那一次文件工具写入的内容 | 这个回合动过的一切 |
+| 能看见 shell 命令里的 `sed -i` 吗 | **不能** | **能** |
+| 能否撤销 | 能——它带着文本 | 只能经由与之重叠的 review |
+
+**review** 在 `tool/call` + `tool/result` 配对完成时创建，用它自己报告的前后文本。它是唯一
+保留了足够文本、能把文件还原回去的来源。
+
+**回合记录**根本不是本插件构建的。Host 的 `@deepseek-ai/dsh-workspace-changes` 插件在回合
+开始与结束各对工作区做一次快照——走一个**私有 git 索引**、写进临时对象目录
+（`GIT_OBJECT_DIRECTORY` + `GIT_ALTERNATE_OBJECT_DIRECTORIES`），git 经由它的 `subprocess`
+能力调用——另外在 `write`/`edit`/会改盘的 `str_replace_editor` 调用前后留整份文件副本。
+这就是它**也能覆盖 shell 命令里 `sed -i` 改掉的文件**（任何工具结果都不会提到那个文件）、
+以及它是唯一描述「整个回合」而不是「其中某一次调用」的来源的原因。它记录的是 **hunk**，
+不是整份文件文本——它是一份 diff，不是一份备份。
+
+### 播报，以及两条路由
+
+在每个**改动了东西**的顶层回合结束时，Host 追加一个持久 Session 事件：
+
+```json
+{ "type": "workspace/changes", "seq": 412, "data": { "turn": 7 } }
+```
+
+事件自己的 `seq` **就是**坐标——路由按它寻址，不按回合号：
+
+```
+GET /api/changes.summary?sessionId=<sid>&seq=<seq>          → ChangesSummary
+GET /api/changes.diff?sessionId=<sid>&seq=<seq>&index=<n>   → ChangesDiff
+```
+
+三个性质值得记住：
+
+- 它们是**普通的带鉴权 GET**，带查询参数，**在网关旁边而不是网关后面**。没有 `{args}` 信封，
+  也不是 `/api/<ns>/<method>` 路径。`harness/client.ts` 的 `getRoute()` 处理这种形状：
+  `401` 抛错（并接上认证缺失路径），**`404` 返回 `undefined`**，空正文返回 `undefined`，
+  而如果未来的 host 决定包一层网关形状的 `{ok, value}`，会被拆开。
+- **`404` 的意思是「没有卡片」，不是「出错」。** Host 只在 Session 生命期内把摘要留在内存里，
+  所以宿主重启就会丢。`undefined` 的答复把卡片解析成空，与 Web UI 一致。*抛错*不一样，它会
+  保留那一行——一次瞬时失败不能读成「这个回合什么都没改」。
+- 还有第三条路由 `POST /api/changes.open`，它请求**桌面应用**打开文件。它被有意不用：VS Code
+  自己的编辑器是更好的目标，而那条路由是面向 Windows/桌面的。
+
+### 卡片位置与模型语义
+
+卡片是 `kind: 'changes'` 的 `ConversationItem`，住在**对话流的工具行**里、紧挨产生它的那次
+调用——不是独立的树视图。它带通常的 `uid`/`rev` 渲染身份，所以 v0.1.7 的调和器把它当普通
+条目对待。
+
+每回合一张卡，靠 `Map<turn, index>` 而不是靠追加来保证：
+
+- 对一张已在屏幕上的卡片的**重复**播报，**替换**坐标（`seq`、`summary`）而不是叠第二张卡
+  ——一个回合在 `turn/end` 重新记录时会播报两次；
+- 解析为 `undefined` 的摘要把该行**解析**成存在但不画，而不是删掉它——删条目会让
+  `toolIndexByCallId` 与 `changesIndex` 失效；
+- 取数是**串行**的（`changesFetchChain`），并限制在最近 `MAX_CHANGES_TURNS`（10）个回合内，
+  且在 `await` 之后重新核对当前会话 id，所以中途切换会话不会把摘要落进另一条对话流。
+
+### hunk 重建，与 URI authority 契约
+
+`hunksToSides()` 从 hunk 列表重建两侧：`+` 只落在 after 侧，`-` 只落在 before 侧，上下文两侧
+都有，一行不属于某一侧就在那侧写 `''`。那个空行正是重点——没有它，两列会错位，比较读起来
+像"什么都移动过"。
+
+两个虚拟文档 provider 现在都从 **`uri.authority`** 读 id：
+
+```
+dsh-review://<reviewId>/<encoded-path>/before|after
+dsh-changes://<id>/before|after
+```
+
+从 `path` 读就是 v0.1.8 修掉的那个 bug：
+`Uri.parse('dsh-review://review-1/foo/before').path` 是 `/foo/before`——层级 URI 会保留开头
+的斜杠——于是 `path.split('/')[0]` 是空字符串，store 查找永远不命中，经该 provider 打开的
+每一个 diff 都是空白。
+
+### 撤销，以及为什么没有「接受」
+
+review 行只提供**回退**。没有接受的对位物，因为改动落到磁盘是在 review 能由它的结果建出来
+**之前**——"接受"只能把一件事标记为已知悉，而一个除了暗示"此前一直在等它批准"之外什么也不做的
+按钮，比没有这个按钮更糟。这是设计立场（README 里有完整表述）：**写盘归 DSH，插件只观察、
+不设闸。**
+
+回退本身是**把抓到的 `before` 文本写回去**，并带一道漂移闸：它先核对盘上的文件是否仍等于
+review 建立时抓到的 `after`，如果此后动过就拒绝（把该文件标为冲突）。正是这道闸让"不用问
+就能撤销"是安全的，也是它能说「不」的原因。
+
+从回合卡片撤销的范围**限定在该回合产出的 review 内**，因为摘要只带路径与行数、不带可还原的
+文本。把摘要路径映射到某个 review 文件分三轮尝试——精确、唯一后缀、唯一 basename——后两者
+只在恰好**一个**候选命中时才作数，因为在多个之间猜会回退错文件。某个回合若只通过 shell
+命令改了文件，它会直说，而不是假装执行。
+
+hunk 级回退在 `ReviewMaterializer` 里是存在的（`rejectHunk`，同样的漂移闸），但已经没有 UI
+能触达它——今天的回退是每文件全有或全无。恢复它就是路线图上的「部分回退」一项。
 
 ## Markdown 渲染
 
@@ -530,9 +636,21 @@ src/
 ├── conversation/
 │   ├── model.ts              # ConversationModel 折叠（"它说了什么"）
 │   ├── control.ts            # ControlSurface 折叠（"它能做什么 / 在做什么"）
-│   └── types.ts              # ConversationItem 联合类型（5 种）
+│   └── types.ts              # ConversationItem 联合类型（6 种）
 ├── workspace/
 │   └── binding.ts            # findHarnessWorkspace / ensureHarnessWorkspace
+├── approval/
+│   ├── store.ts              # 两条瀑布共用的待答生命周期
+│   └── types.ts              # PendingApproval / 待答提问的形状
+├── review/
+│   ├── controller.ts         # review 生命周期（store ↔ materializer）
+│   ├── store.ts              # 逐文件、逐 hunk 抓取的 before/after
+│   ├── materializer.ts       # 唯一真正写回退的模块
+│   ├── virtualDocument.ts    # dsh-review:// before|after provider
+│   ├── changesDocument.ts    # dsh-changes:// provider + hunksToSides
+│   └── types.ts              # Review / ReviewFile / ReviewHunk
+├── context/
+│   └── collector.ts          # 编辑器上下文（活动文件、选区）
 ├── harness/
 │   ├── protocol.ts           # 线缆类型（镜像 0.2.0-rc.2 Remote）
 │   ├── wire.ts               # 协议协商 + 能力探测
@@ -555,7 +673,7 @@ media/
 ├── origin.png                # 源材料（VSIX 排除）
 └── markdown-it.umd.min.js    # VSIX 打包用（114 KB）
 scripts/
-├── protocol-test.ts          # 假 harness 协议测试，268 项断言（无需 dsh web）
+├── protocol-test.ts          # 假 harness 协议测试，295 项断言（无需 dsh web）
 ├── protocol-probe.ts         # 向真实 `dsh web` 询问它实际提供什么
 ├── integration-test.ts       # 针对真实 dsh 的闭环测试
 └── gen-icon.ts               # 从 origin.png 生成图标

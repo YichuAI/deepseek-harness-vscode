@@ -222,6 +222,36 @@ textarea { resize: none; min-height: 60px; max-height: 200px; width: 100%; }
 .t-review .review-actions { display: flex; gap: 6px; margin-top: 6px; }
 .t-review .review-actions button { flex: 1; padding: 3px 10px; font-size: 11px; }
 
+/* ─── end-of-turn changed files ─────────────────────────────────────────────
+   A report of what the turn already wrote, plus the one action that makes
+   sense on a fact: undo it. Visually a sibling of the review card above, but
+   it belongs to the TURN rather than to one tool call, so it sits at the end
+   of the transcript instead of inside a tool row. */
+.changes {
+  margin: 8px 0; padding: 8px 10px; border-radius: 6px;
+  background: var(--vscode-editorWidget-background, rgba(128,128,128,0.08));
+  border: 1px solid var(--vscode-widget-border, rgba(128,128,128,0.25));
+}
+.changes.loading { color: var(--vscode-descriptionForeground); font-size: 11px; }
+.changes.error { border-color: var(--vscode-errorForeground, #c53149); }
+.changes-error { font-size: 11px; color: var(--vscode-errorForeground, #c53149); }
+.changes-head { display: flex; align-items: center; gap: 8px; }
+.changes-title { flex: 1; font-size: 11px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.changes-stats { font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; flex: 0 0 auto; }
+.changes-stats .added, .changes-file .cf-stats .added { color: var(--vscode-charts-green, #2da44e); }
+.changes-stats .removed, .changes-file .cf-stats .removed { color: var(--vscode-charts-red, #c53149); }
+.changes-head button { padding: 2px 8px; font-size: 10px; flex: 0 0 auto; }
+.changes-files { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; }
+.changes-file { display: flex; align-items: center; gap: 6px; }
+.changes-file .cf-path {
+  flex: 1; cursor: pointer; font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.changes-file .cf-path:hover { text-decoration: underline; }
+.changes-file .cf-stats { font-size: 10px; font-family: var(--vscode-editor-font-family, monospace); flex: 0 0 auto; }
+.changes-file button { padding: 2px 6px; font-size: 10px; flex: 0 0 auto; }
+.changes-fold { margin-top: 6px; width: 100%; padding: 3px 10px; font-size: 11px; }
+
 /* ── v0.0.9: queued messages / slash completion / usage panel ───────────── */
 #queue-bar { border: 1px solid var(--vscode-panel-border, rgba(128,128,128,.25)); border-radius: 4px; margin-bottom: 6px; padding: 5px 7px; }#queue-bar .queue-title { font-size: 10px; color: var(--vscode-descriptionForeground); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .4px; }
 #queue-bar .queue-item { display: flex; align-items: center; gap: 5px; padding: 3px 0; }

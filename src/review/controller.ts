@@ -57,20 +57,14 @@ export class ReviewController {
     }
   }
 
-  /** Accept = keep the applied change (no filesystem op). */
-  acceptFile(reviewId: string, filePath: string): void {
-    this.store.setFileState(reviewId, filePath, 'accepted')
-    this.d.log.info(`Review ${reviewId}: accepted ${filePath}`)
-  }
-
-  /** Accept all files in a review. */
-  acceptAll(reviewId: string): void {
-    const review = this.store.getById(reviewId)
-    if (!review) return
-    for (const f of review.files) this.store.setFileState(reviewId, f.path, 'accepted')
-  }
-
-  /** Reject = reverse the applied change via materializer. */
+  /**
+   * Reverse the applied change.
+   *
+   * There is no `accept*` counterpart any more. A mutation reaches disk before
+   * a review can be built from its result, so "accept" could only ever mark a
+   * fact as acknowledged — a button that did nothing but imply the change had
+   * been waiting for permission. See the `WebviewAction` union.
+   */
   async rejectFile(reviewId: string, filePath: string): Promise<void> {
     const review = this.store.getById(reviewId)
     if (!review) return

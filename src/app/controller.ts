@@ -33,6 +33,9 @@ import { CompositeDisposable } from '../disposable.ts'
 import { formatMention } from '../context/collector.ts'
 import { ReviewController } from '../review/controller.ts'
 import { ReviewVirtualDocumentProvider } from '../review/virtualDocument.ts'
+import {
+  ChangesDiffStore, ChangesVirtualDocumentProvider, hunksToSides, openChangesDiff,
+} from '../review/changesDocument.ts'
 import { ApprovalStore } from '../approval/store.ts'
 import type { AskUserQuestionAnswerItem, AskUserQuestionItem, ApprovalDecision } from '../harness/protocol.ts'
 
@@ -69,6 +72,29 @@ const IMAGE_MEDIA_TYPES: readonly ImageMediaType[] = ['image/png', 'image/jpeg',
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024
 /** Upstream `DEFAULT_MAX_IMAGES_PER_MESSAGE`. */
 const MAX_IMAGES_PER_MESSAGE = 20
+
+/**
+ * How many of the most recent turns keep asking for a changed-files summary.
+ *
+ * Announcements replay with history, so this is what keeps opening an old
+ * session from firing one request per turn it ever ran.
+ */
+const MAX_CHANGES_TURNS = 10
+
+/** Forward slashes only, so two spellings of the same path compare equal. */
+function normalizePath(p: string): string {
+  return p.replace(/\\/g, '/')
+}
+
+function basename(p: string): string {
+  const parts = normalizePath(p).split('/')
+  return parts[parts.length - 1] ?? p
+}
+
+/** Windows drive letters and POSIX roots both count as absolute. */
+function isAbsolutePath(p: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(p) || /^[\\/]/.test(p)
+}
 
 /** One attachment held in the composer, bytes included. */
 interface HeldAttachment {
@@ -177,6 +203,19 @@ export class AppController {
   private model: ConversationModel | undefined
   private muxStatus: MuxStatus | undefined
   private reviewController: ReviewController | undefined
+  /** Native diffs for a turn's changed files (`/api/changes.diff`), keyed by id. */
+  private readonly changesDiffs = new ChangesDiffStore()
+  /**
+   * Highest turn a `workspace/changes` announcement has named in this session.
+   *
+   * Replaying a session's history replays its announcements too, and each one
+   * asks the Host for a summary. Only the most recent turns are worth asking
+   * about — older ones are usually served by a Host that has since restarted
+   * anyway — so this bounds a 50-turn replay to a handful of requests.
+   */
+  private maxChangesTurn = 0
+  /** Serialises summary fetches so a replay does not fire them all at once. */
+  private changesFetchChain: Promise<void> = Promise.resolve()
   private approvalStore = new ApprovalStore()
   /** Control surface for the active session (plan/preset/todos/goal/…). */
   private control = new ControlSurface()
@@ -271,6 +310,13 @@ export class AppController {
         new ReviewVirtualDocumentProvider(this.reviewController.store),
       ),
     )
+    // Register the changed-files diff provider (dsh-changes:// URIs).
+    this.disposables.add(
+      this.d.vscodeAPI.workspace.registerTextDocumentContentProvider(
+        ChangesVirtualDocumentProvider.scheme,
+        new ChangesVirtualDocumentProvider(this.changesDiffs),
+      ),
+    )
     return this.disposables
   }
 
@@ -292,12 +338,19 @@ export class AppController {
       case 'openWebUI': this.d.openHarnessHome(); break
       case 'toggleSystemMessages': this.toggleSystemMessages(); break
       case 'moveToSecondarySideBar': void this.d.moveToSecondarySideBar(); break
-      case 'reviewAcceptFile': this.reviewController?.acceptFile(action.reviewId, action.filePath); break
+      // Review cards report a mutation the tool ALREADY made. There is no
+      // accept step any more: "accept" was a no-op with a button, because the
+      // change was on disk before the card could be drawn. What is left is the
+      // half that does something — seeing it, and undoing it.
       case 'reviewRejectFile': await this.reviewController?.rejectFile(action.reviewId, action.filePath); break
       case 'reviewRejectHunk': await this.reviewController?.rejectHunk(action.reviewId, action.filePath, action.hunkId); break
       case 'reviewOpenDiff': await this.reviewController?.openDiff(action.reviewId, action.filePath); break
-      case 'reviewAcceptAll': this.reviewController?.acceptAll(action.reviewId); break
       case 'reviewRejectAll': await this.reviewController?.rejectAll(action.reviewId); break
+      // ─── turn changed files ────────────────────────────────────────────────
+      case 'openFile': await this.openFileAt(action.path, action.line); break
+      case 'changesOpenDiff': await this.openTurnChangesDiff(action.turn, action.index); break
+      case 'changesRevertFile': await this.revertTurnFile(action.turn, action.path); break
+      case 'changesRevertTurn': await this.revertTurn(action.turn); break
       case 'approvalRespond': await this.respondApproval(action.rpcId, action.outcome); break
       case 'waterfallDelegate': await this.delegateWaterfall(action.rpcId); break
       case 'questionAnswer': await this.answerQuestion(action.rpcId, action.answers); break
@@ -500,6 +553,18 @@ export class AppController {
     this.usage.reset()
     this.model = new ConversationModel(sessionId)
     this.model.setShowSystemMessages(this.d.getState().showSystemMessages)
+    // Ask the Host for each turn's changed-files summary. The model is pure
+    // projection — no network, no VS Code — so it names the turn and the event
+    // coordinate, and this side does the fetch. Fetches are serialised and
+    // bounded to the most recent turns: replaying a long session replays its
+    // announcements too, and nobody needs a card for turn 3 of a 50-turn log.
+    this.maxChangesTurn = 0
+    this.model.setChangesRequestHandler((turn, seq) => {
+      if (turn > this.maxChangesTurn) this.maxChangesTurn = turn
+      if (turn <= this.maxChangesTurn - MAX_CHANGES_TURNS) return
+      const run = (): Promise<void> => this.fetchChanges(turn, seq)
+      this.changesFetchChain = this.changesFetchChain.then(run, run)
+    })
     // Wire tool completion → ReviewController (creates review transactions for write/edit)
     this.model.setToolCompletedHandler((info) => {
       const reviewId = this.reviewController?.onToolCompleted({
@@ -862,6 +927,154 @@ export class AppController {
 
     this.d.setState({ reviews, approvals, questions, snapshot: this.model?.snapshot() })
     this.d.pushState()
+  }
+
+  // ─── turn changed files (workspace/changes) ────────────────────────────────
+
+  /**
+   * Fetch one turn's changed-files summary and publish it.
+   *
+   * A `undefined` answer means the Host no longer serves it — the Session was
+   * disposed, or the Host restarted since the turn ran (the recorder keeps its
+   * summaries in memory for the Session's lifetime only). That renders as no
+   * card at all, exactly as the Web UI behaves. A thrown error is different: it
+   * keeps the row and shows the message, because a transient failure should not
+   * look like "this turn changed nothing".
+   */
+  private async fetchChanges(turn: number, seq: number): Promise<void> {
+    const sid = this.activeSessionId
+    if (!sid || !this.model) return
+    try {
+      const summary = await this.d.client.changesSummary(sid, seq)
+      // Switching sessions (or a forced reconnect re-selecting) while the
+      // request was in flight must not land a summary in the new transcript.
+      if (this.activeSessionId !== sid || !this.model) return
+      this.model.setChangesSummary(turn, summary ?? undefined)
+      this.d.setState({ snapshot: this.model.snapshot() })
+      this.d.pushState()
+    } catch (e) {
+      if (this.activeSessionId !== sid || !this.model) return
+      this.model.setChangesSummary(turn, undefined, e instanceof Error ? e.message : String(e))
+      this.d.setState({ snapshot: this.model.snapshot() })
+      this.d.pushState()
+    }
+  }
+
+  /** Open the native diff for one file of one turn's changed-files card. */
+  private async openTurnChangesDiff(turn: number, index: number): Promise<void> {
+    const sid = this.activeSessionId
+    const item = this.model?.snapshot().items.find(i => i.kind === 'changes' && i.turn === turn)
+    if (!sid || !item || item.kind !== 'changes') return
+    try {
+      const diff = await this.d.client.changesDiff(sid, item.seq, index)
+      if (diff === undefined) {
+        this.d.notifyInfo('The Host no longer serves this comparison.')
+        return
+      }
+      if (diff.kind !== 'text') {
+        this.d.notifyInfo(`${diff.display}: the Host recorded this file as ${diff.kind}.`)
+        return
+      }
+      const sides = hunksToSides(diff.hunks)
+      const id = this.changesDiffs.put({ label: diff.display, before: sides.before, after: sides.after })
+      await openChangesDiff(id, diff.display)
+    } catch (e) {
+      this.d.notifyError(`Cannot open diff: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  /**
+   * Undo every file this turn changed that we can still undo.
+   *
+   * A summary lists files but not the text needed to restore them — only a
+   * review, built from a file tool's own before/after, carries that. So an undo
+   * is scoped to the reviews the turn produced. A turn whose changes all came
+   * from shell commands says so rather than pretending to act.
+   */
+  private async revertTurn(turn: number): Promise<void> {
+    const reviews = this.turnReviews(turn)
+    if (reviews.length === 0) {
+      this.d.notifyInfo(`Turn ${turn}: nothing to undo — its changes were not made by a file tool.`)
+      return
+    }
+    for (const id of reviews) await this.reviewController?.rejectAll(id)
+  }
+
+  /** Undo one file of a turn, matched against the reviews that turn produced. */
+  private async revertTurnFile(turn: number, path: string): Promise<void> {
+    const target = this.matchTurnFile(turn, path)
+    if (!target) {
+      this.d.notifyInfo(`Turn ${turn}: no undo available for ${path}.`)
+      return
+    }
+    await this.reviewController?.rejectFile(target.reviewId, target.path)
+  }
+
+  /** Review ids the turn's tool rows produced. */
+  private turnReviews(turn: number): string[] {
+    const out: string[] = []
+    for (const item of this.model?.snapshot().items ?? []) {
+      if (item.kind === 'tool' && item.turn === turn && item.reviewId) out.push(item.reviewId)
+    }
+    return out
+  }
+
+  /**
+   * Find the review file a summary path refers to.
+   *
+   * The two sides name paths differently — a summary path is relative to the
+   * turn's working directory while a review path is whatever the tool was
+   * handed — so an exact match is tried first, then a suffix match, then a
+   * basename match. The last two only count when exactly ONE candidate matches:
+   * guessing among several would mean reverting the wrong file.
+   */
+  private matchTurnFile(turn: number, path: string): { reviewId: string; path: string } | undefined {
+    const wanted = normalizePath(path)
+    const base = basename(wanted)
+    for (const reviewId of this.turnReviews(turn)) {
+      const review = this.reviewController?.store.getById(reviewId)
+      if (!review) continue
+      const exact = review.files.find(f => normalizePath(f.path) === wanted)
+      if (exact) return { reviewId, path: exact.path }
+      const bySuffix = review.files.filter(f => normalizePath(f.path).endsWith('/' + wanted))
+      if (bySuffix.length === 1 && bySuffix[0]) return { reviewId, path: bySuffix[0].path }
+      const byBase = review.files.filter(f => basename(f.path) === base)
+      if (byBase.length === 1 && byBase[0]) return { reviewId, path: byBase[0].path }
+    }
+    return undefined
+  }
+
+  /**
+   * Open a file — optionally at a line — in the editor, resolving a relative
+   * path against the workspace root.
+   *
+   * Deliberately commands-only (`openTextDocument` accepts a plain path and
+   * `revealLine` needs no `Range`), so this needs no runtime `vscode` import and
+   * stays testable behind the injected API surface.
+   */
+  private async openFileAt(p: string, line?: number): Promise<void> {
+    const abs = this.resolvePath(p)
+    if (abs === undefined) {
+      this.d.notifyInfo(`Cannot resolve ${p} — open a folder first.`)
+      return
+    }
+    try {
+      const doc = await this.d.vscodeAPI.workspace.openTextDocument(abs)
+      await this.d.vscodeAPI.window.showTextDocument(doc, { preview: true })
+      if (typeof line === 'number' && line > 0) {
+        await this.d.vscodeAPI.commands.executeCommand('revealLine', { lineNumber: line, at: 'center' })
+      }
+    } catch (e) {
+      this.d.notifyError(`Cannot open ${p}: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  /** Absolute form of a transcript path, or undefined when nothing can anchor it. */
+  private resolvePath(p: string): string | undefined {
+    if (isAbsolutePath(p)) return p
+    const root = this.d.getState().workspace?.path
+    if (root === undefined || root.length === 0) return undefined
+    return root.replace(/[\\/]+$/, '') + '/' + p.replace(/^[\\/]+/, '')
   }
 
   async newSession(): Promise<void> {

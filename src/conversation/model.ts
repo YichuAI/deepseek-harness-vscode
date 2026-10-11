@@ -16,9 +16,9 @@
  */
 
 import type {
-  AssistantChunkData, AssistantMessageData, CallId, ContentBlock, SessionEvent,
+  AssistantChunkData, AssistantMessageData, CallId, ChangesSummary, ContentBlock, SessionEvent,
   SessionId, SessionSummary, StreamChunk, ToolCallData, ToolResultData, TurnEndData,
-  UserMessageData,
+  UserMessageData, WorkspaceChangesEventData,
 } from '../harness/protocol.ts'
 import type { ConversationItem, SessionSnapshot } from './types.ts'
 
@@ -85,6 +85,18 @@ export interface ToolCompletedHandler {
 }
 
 /**
+ * Callback fired when a turn announces its changed files.
+ *
+ * The model cannot fetch anything (it is pure projection — no network, no VS
+ * Code), so it names the turn and the coordinate and lets the controller ask
+ * the Host. `seq` is the announcement event's own sequence; that, not the turn
+ * number, is what the summary route is addressed by.
+ */
+export interface ChangesRequestHandler {
+  (turn: number, seq: number): void
+}
+
+/**
  * Source of {@link ItemIdentity.uid}, deliberately module-level rather than
  * per-model.
  *
@@ -106,6 +118,8 @@ export class ConversationModel {
   private renderVersion = 0
   /** callId → index in this.items where ToolItem lives. */
   private toolIndexByCallId = new Map<string, number>()
+  /** turn → index in this.items where its ChangesItem lives (one card per turn). */
+  private changesIndex = new Map<number, number>()
   /** turn:step → accumulated streaming buffers */
   private streaming = new Map<string, { text: string; reasoning: string }>()
   /** Index of currently streaming assistant item (-1 if none). */
@@ -132,6 +146,8 @@ export class ConversationModel {
   private finalizedSteps = new Set<string>()
   /** Callback fired when tool call+result pair completes. */
   private toolCompletedHandler: ToolCompletedHandler | undefined
+  /** Callback fired when a turn announces its changed files. */
+  private changesRequestHandler: ChangesRequestHandler | undefined
 
   constructor(private readonly sessionId: SessionId) {}
 
@@ -150,6 +166,10 @@ export class ConversationModel {
 
   setToolCompletedHandler(h: ToolCompletedHandler | undefined): void {
     this.toolCompletedHandler = h
+  }
+
+  setChangesRequestHandler(h: ChangesRequestHandler | undefined): void {
+    this.changesRequestHandler = h
   }
 
   /** Attach a review id to a ToolItem (called by ReviewController after creating review). */
@@ -211,6 +231,7 @@ export class ConversationModel {
     this.lastSeq = -1
     this.streaming.clear()
     this.toolIndexByCallId.clear()
+    this.changesIndex.clear()
     this.streamingAssistantIdx = -1
     this.lastEndedTurn = -1
     this.finalizedSteps.clear()
@@ -230,6 +251,7 @@ export class ConversationModel {
       case 'turn/start': this.applyTurnStart(event); break
       case 'turn/end': this.applyTurnEnd(event); break
       case 'session/title': this.applyTitle(event); break
+      case 'workspace/changes': this.applyWorkspaceChanges(event); break
       default: break
     }
   }
@@ -399,6 +421,7 @@ export class ConversationModel {
     this.items.push(this.stamp({
       kind: 'tool',
       seq: event.seq,
+      turn: typeof d.turn === 'number' ? d.turn : undefined,
       callId: d.callId,
       name: d.name,
       arguments: d.arguments,
@@ -478,6 +501,73 @@ export class ConversationModel {
       this.title = d.title
       this.bump()
     }
+  }
+
+  /**
+   * The Host's end-of-turn record of what the turn changed.
+   *
+   * One card per turn. A turn may announce more than once — `agent/turn-stopping`
+   * records inside the turn and `turn/end` records again when tool results
+   * settled after that — and the LATEST announcement owns the coordinate the
+   * summary route is addressed by. A repeat therefore REPLACES the card's `seq`
+   * and re-asks, rather than stacking a second card on the same turn.
+   *
+   * Nothing is rendered until the summary arrives: a turn that changed no file
+   * never emits the event at all, but an announcement whose summary is gone
+   * (disposed Session, restarted Host) resolves to a hidden row rather than an
+   * empty card.
+   */
+  private applyWorkspaceChanges(event: SessionEvent): void {
+    const d = event.data as WorkspaceChangesEventData | undefined
+    const turn = d?.turn
+    if (typeof turn !== 'number' || !Number.isInteger(turn) || turn < 1) return
+
+    const known = this.changesIndex.get(turn)
+    if (known !== undefined) {
+      const existing = this.items[known]
+      if (existing?.kind === 'changes') {
+        existing.seq = event.seq
+        existing.summary = undefined
+        existing.error = undefined
+        existing.loading = true
+        this.stamp(existing)
+        this.bump()
+        this.changesRequestHandler?.(turn, event.seq)
+        return
+      }
+    }
+
+    const idx = this.items.length
+    this.items.push(this.stamp({
+      kind: 'changes',
+      seq: event.seq,
+      turn,
+      loading: true,
+    }))
+    this.changesIndex.set(turn, idx)
+    this.bump()
+    this.changesRequestHandler?.(turn, event.seq)
+  }
+
+  /**
+   * Fill in one turn's changed-files summary, or resolve it to nothing.
+   *
+   * Called by the controller once the deliverables route answers. A `undefined`
+   * summary with no `error` means the Host has no record for this turn (it was
+   * disposed, or the Host restarted) — the Web UI shows no card in that case and
+   * so does this one, which is why the row is left present-but-empty rather than
+   * spliced out (removing an item would invalidate every index the model keeps).
+   */
+  setChangesSummary(turn: number, summary: ChangesSummary | undefined, error?: string): void {
+    const idx = this.changesIndex.get(turn)
+    if (idx === undefined) return
+    const item = this.items[idx]
+    if (item?.kind !== 'changes') return
+    item.loading = false
+    item.summary = summary
+    item.error = error
+    this.stamp(item)
+    this.bump()
   }
 }
 

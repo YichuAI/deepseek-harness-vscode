@@ -19,6 +19,7 @@ import { readFileSync } from 'node:fs'
 import { HarnessClient } from './harness/client.ts'
 import { BrowserSessionAuth, type AuthStore } from './harness/auth.ts'
 import { AppController, attachmentKindFor } from './app/controller.ts'
+import { DSH_REVIEW_SCHEME } from './review/virtualDocument.ts'
 import type { PendingAttachmentPayload, WebviewAction } from './view/provider.ts'
 import { HarnessWebviewViewProvider, type UiState } from './view/provider.ts'
 import { CompositeDisposable } from './disposable.ts'
@@ -245,6 +246,35 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   )
 
+  // ─── revert straight from the native diff ──────────────────────────────────
+  //
+  // The review card already offers Revert, but the diff editor is where a person
+  // actually reads a change — and walking back to the sidebar to disagree with
+  // it is the round trip this removes. The lens is attached to the AFTER side
+  // only, so one comparison shows one action instead of two.
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      'deepseekHarness.revertReviewFile',
+      (reviewId: string, filePath: string) => {
+        void controller.dispatch({ type: 'reviewRejectFile', reviewId, filePath })
+      },
+    ),
+    vscode.languages.registerCodeLensProvider(
+      { scheme: DSH_REVIEW_SCHEME },
+      {
+        provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
+          const parsed = parseReviewUri(document.uri)
+          if (parsed === undefined) return []
+          return [new vscode.CodeLens(new vscode.Range(0, 0, 0, 0), {
+            title: 'Revert this file',
+            command: 'deepseekHarness.revertReviewFile',
+            arguments: [parsed.reviewId, parsed.filePath],
+          })]
+        },
+      },
+    ),
+  )
+
   // ─── config-change handler (§17: retarget + reconnect) ─────────────────────
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
     if (!e.affectsConfiguration(SECTION)) return
@@ -308,4 +338,22 @@ function readConfig(): { host: string; port: number; showSystemMessages: boolean
   const autoApproveApprovals = cfg.get<boolean>('autoApproveApprovals') ?? false
   const autoDiscover = cfg.get<boolean>('autoDiscover') ?? true
   return { host, port, showSystemMessages, autoSession, autoApproveApprovals, autoDiscover }
+}
+
+/**
+ * Read the coordinates back out of a `dsh-review://` URI.
+ *
+ * The review id lives in the URI's AUTHORITY, because `Uri.parse` keeps a
+ * leading slash on `path` for a hierarchical URI — reading the id off the path
+ * yields '' and the identifier is lost. Only the `after` side carries the
+ * revert lens, so a comparison offers one action rather than one per side.
+ */
+function parseReviewUri(uri: vscode.Uri): { reviewId: string; filePath: string } | undefined {
+  const parts = uri.path.replace(/^\/+/, '').split('/')
+  const side = parts.pop()
+  if (side !== 'after') return undefined
+  const reviewId = uri.authority
+  const filePath = decodeURIComponent(parts.join('/'))
+  if (reviewId === '' || filePath === '') return undefined
+  return { reviewId, filePath }
 }

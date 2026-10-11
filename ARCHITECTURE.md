@@ -1,4 +1,4 @@
-# Architecture — DeepSeek Harness VS Code v0.0.2
+# Architecture — DeepSeek Harness VS Code v0.1.8
 
 One page. Three stable boundaries: **wiring** (`extension.ts`), **orchestration** (`AppController`), **semantics** (`ConversationModel`). Future feature PRs extend outward from these boundaries, not inward.
 
@@ -48,8 +48,9 @@ type ConversationItem =
   | UserMessageItem      // kind: 'user'
   | AssistantMessageItem // kind: 'assistant' (streaming flag, usage, reasoning)
   | SystemItem           // kind: 'system' (own type, not UserItem + flag)
-  | ToolItem             // kind: 'tool' (call + result MERGED by callId)
+  | ToolItem             // kind: 'tool' (call + result MERGED by callId, + reviewId)
   | StatusItem           // kind: 'status' (turn start/end)
+  | ChangesItem          // kind: 'changes' (v0.1.8: one card per turn's changed files)
 ```
 
 Key changes:
@@ -69,6 +70,7 @@ Key changes:
 | `tool/call` | → create `ToolItem` (state: `running`) |
 | `tool/result` | → **update** existing `ToolItem` by `callId` (state: `completed`/`error`) |
 | `turn/start` / `turn/end` | → `status` line; sets `running` |
+| `workspace/changes` | → `changes` card (v0.1.8); one per turn, repeat replaces the coordinate |
 | `session/title` | updates the snapshot title |
 | **any other type** | **ignored** (the harness protocol is merge-extensible) |
 
@@ -270,6 +272,9 @@ not an RPC at all and never appears in this list — see F8 below.
 
 Never called, ever: `settings/*`, `credentials/*`, `terminal/*`,
 `directoryPicker/*`, or any approval/permission mutation outside the list above.
+
+The changed-files routes (`changes.summary`, `changes.diff`) are **not RPCs at all**
+and never appear in this list — see [Change reporting and undo](#change-reporting-and-undo-v018).
 
 
 ## Control surface (`src/conversation/control.ts`)
@@ -475,6 +480,128 @@ absent. `listWorkspaces()` therefore **reconstructs the registry from
 An empty result here is never benign: `findHarnessWorkspace()` would find
 nothing, the binding would never resolve, and the UI would sit at
 "Disconnected" while the handshake looked perfectly healthy.
+
+## Change reporting and undo (v0.1.8)
+
+There are two independent records of "what changed", and they are not
+interchangeable:
+
+| | per-call review | per-turn changed files |
+|---|---|---|
+| built from | a file tool's own `before`/`after` | Host-side, at turn boundaries |
+| covers | what that one file tool wrote | everything the turn touched |
+| sees a `sed -i` in a shell command | **no** | **yes** |
+| can be reverted | yes — it carries the text | only via a review it overlaps |
+
+A **review** is created when a `tool/call` + `tool/result` pair completes, from the
+before/after text the file tool itself reported. It is the only source that keeps
+enough text to restore a file.
+
+A **turn record** is not built by this plugin at all. The Host's
+`@deepseek-ai/dsh-workspace-changes` plugin snapshots the working tree at turn start
+and again at turn end — through a **private git index** into a temporary object
+directory (`GIT_OBJECT_DIRECTORY` + `GIT_ALTERNATE_OBJECT_DIRECTORIES`), with git run
+through its `subprocess` capability — and additionally takes whole-file copies around
+`write`/`edit`/mutating-`str_replace_editor` calls. That is why it also covers a file
+changed by `sed -i` inside a shell command, which no tool result ever mentions, and why
+it is the only source that describes a whole turn rather than one call in it. It
+records **hunks**, not whole-file text — it is a diff, not a backup.
+
+### The announcement, and the two routes
+
+At the end of every top-level turn that changed something, the Host appends a durable
+Session event:
+
+```json
+{ "type": "workspace/changes", "seq": 412, "data": { "turn": 7 } }
+```
+
+The event's own `seq` **is** the coordinate — the routes are addressed by it, not by
+the turn number:
+
+```
+GET /api/changes.summary?sessionId=<sid>&seq=<seq>          → ChangesSummary
+GET /api/changes.diff?sessionId=<sid>&seq=<seq>&index=<n>   → ChangesDiff
+```
+
+Three properties matter:
+
+- They are **plain authenticated GETs** taking query parameters, sitting beside the
+  gateway rather than behind it. There is no `{args}` envelope and no `/api/<ns>/<method>`
+  path. `getRoute()` in `harness/client.ts` handles this shape:
+  `401` throws (and feeds the auth-required path), **`404` returns `undefined`**,
+  an empty body returns `undefined`, and a gateway-shaped `{ok, value}` body is unwrapped
+  if a future host decides to wrap it.
+- **`404` means "no card", not "error".** The Host keeps summaries in memory for the
+  Session's lifetime only, so a host restart drops them. A `undefined` answer resolves
+  the card to nothing, matching the Web UI. A *thrown* error is different and keeps the
+  row, because a transient failure must not read as "this turn changed nothing".
+- There is a third route, `POST /api/changes.open`, which asks the **desktop app** to
+  open the file. It is deliberately not used: VS Code's own editor is a better target,
+  and the route is Windows/desktop-centric.
+
+### Card placement and model semantics
+
+The card is a `ConversationItem` of kind `changes`, living in the **transcript's tool
+row** next to the call that produced it — not in a separate tree view. It carries the
+usual `uid`/`rev` render identity, so the v0.1.7 reconciler treats it like any other
+item.
+
+One card per turn, enforced by a `Map<turn, index>` rather than by appending:
+
+- a **repeat** announcement for a turn already on screen **replaces** the coordinate
+  (`seq`, `summary`) instead of stacking a second card — a turn can announce twice when
+  `turn/end` re-records;
+- a summary resolving to `undefined` **resolves** the row to present-but-hidden rather
+  than removing it, because removing an item would invalidate `toolIndexByCallId` and
+  `changesIndex`;
+- fetches are **serialized** (`changesFetchChain`) and bounded to the last
+  `MAX_CHANGES_TURNS` (10) turns, and re-check the active session id after the `await`,
+  so a session switch mid-flight cannot land a summary in the wrong transcript.
+
+### Hunk rebuild, and the URI authority contract
+
+`hunksToSides()` rebuilds both sides from the hunk list: `+` lands only on the after
+side, `-` only on the before side, context on both, and the side a line does not belong
+to emits `''`. That blank is the point — without it the two columns drift apart and a
+comparison reads as if everything moved.
+
+Both virtual-document providers now read the id from **`uri.authority`**:
+
+```
+dsh-review://<reviewId>/<encoded-path>/before|after
+dsh-changes://<id>/before|after
+```
+
+Reading it off `path` was the bug fixed in v0.1.8: `Uri.parse('dsh-review://review-1/foo/before').path`
+is `/foo/before` — a hierarchical URI keeps the leading slash — so
+`path.split('/')[0]` is the empty string and the store lookup never matched. Every diff
+opened through the provider rendered blank.
+
+### The undo, and why there is no "accept"
+
+A review row offers **Revert** only. There is no accept counterpart, because a mutation
+reaches disk *before* a review can be built from its result — "accept" could only ever
+mark a fact as acknowledged, and a button that does nothing but imply the change had
+been waiting for permission is worse than no button. This is the design position
+(documented in the README): **DSH is the only writer, and the plugin observes rather
+than gates.**
+
+The revert itself is a **write of the captured `before` text**, with a drift guard: it
+first checks that the file on disk still matches the `after` captured at review time,
+and refuses (marking the file conflicted) if it has moved on. That guard is what makes an
+undo safe to offer without asking, and what lets it say no.
+
+Undo from a turn card is **scoped to the reviews that turn produced**, because a summary
+carries paths and line counts but not restorable text. Mapping a summary path to a review
+file is tried in three passes — exact, then unique-suffix, then unique-basename — and the
+last two only count when exactly **one** candidate matches, since guessing among several
+would revert the wrong file. A turn that changed files only through shell commands says
+so rather than pretending to act.
+
+Hunk-level revert exists in `ReviewMaterializer` (`rejectHunk`, with the same drift
+guard) but no UI reaches it any more — a revert is all-or-nothing per file. Restoring it
+is the "partial revert" item on the roadmap.
 
 ## Markdown rendering
 
@@ -726,9 +853,21 @@ src/
 │   └── state.ts              # UiState shape + mapping helpers
 ├── conversation/
 │   ├── model.ts              # ConversationModel fold
-│   └── types.ts              # ConversationItem union (5 kinds)
+│   └── types.ts              # ConversationItem union (6 kinds)
 ├── workspace/
 │   └── binding.ts            # findHarnessWorkspace / ensureHarnessWorkspace
+├── approval/
+│   ├── store.ts              # pending-answer lifecycle for both waterfalls
+│   └── types.ts              # PendingApproval / pending question shapes
+├── review/
+│   ├── controller.ts         # review lifecycle (store ↔ materializer)
+│   ├── store.ts              # captured before/after per file + hunk
+│   ├── materializer.ts       # the only module that writes a revert
+│   ├── virtualDocument.ts    # dsh-review:// before|after provider
+│   ├── changesDocument.ts    # dsh-changes:// provider + hunksToSides
+│   └── types.ts              # Review / ReviewFile / ReviewHunk
+├── context/
+│   └── collector.ts          # editor context (active file, selection)
 ├── harness/
 │   ├── protocol.ts           # wire types (mirror of 0.2.0-rc.2 Remote)
 │   ├── client.ts             # HarnessClient — only network edge
@@ -746,7 +885,7 @@ media/
 ├── origin.png                # source material (excluded from VSIX)
 └── markdown-it.umd.min.js    # bundled for VSIX (114 KB)
 scripts/
-├── protocol-test.ts          # fake-harness protocol test, 268 assertions (no dsh web)
+├── protocol-test.ts          # fake-harness protocol test, 295 assertions (no dsh web)
 ├── protocol-probe.ts         # asks a live `dsh web` what it actually serves
 ├── integration-test.ts       # closed-loop test against real dsh
 └── gen-icon.ts               # icon generation from origin.png

@@ -5,6 +5,69 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] — 2026-10-11
+
+Tagline: **a ledger of what the turn changed — and an undo, not a permission slip.**
+Tagline (ZH): **一张本回合改了什么的账本——以及一个撤销键，而不是一张许可单。**
+
+### Added
+
+- **A changed-files card, one per turn.** The Host records what every top-level turn
+  touched and announces it as a `workspace/changes` Session event; the plugin now turns
+  that announcement into a card in the conversation stream's tool row. The card is fed by
+  a plain authenticated `GET /api/changes.summary?sessionId=&seq=`, addressed by the
+  announcing event's own `seq` — that event *is* the coordinate.
+
+  This is deliberately not the same thing as the per-call review card. A review is built
+  from a file tool's own `before`/`after`, so it can only ever report what a file tool
+  reported. The turn record is built Host-side from a git snapshot of the working tree at
+  turn start and turn end (through a private index, into a temporary object directory),
+  plus whole-file copies taken around `write`/`edit`/mutating `str_replace_editor` calls —
+  so it also covers a file changed by `sed -i` inside a shell command, and it is the only
+  source that describes the whole turn rather than one call in it.
+- **Revert one file, or revert the whole turn.** Each row gets a `Revert this file`, and
+  the card a `Revert all`. Both are scoped to the reviews that turn produced, because a
+  summary carries paths and line counts but not the text needed to restore them — only a
+  review keeps a `before`. A turn whose changes all came from shell commands says so
+  plainly instead of pretending to act.
+- **A native diff for any file in the turn**, opened as an ordinary VS Code diff editor.
+  The Host serves hunks, not whole-file text, so both sides are rebuilt from the hunk list
+  and kept line-aligned (`+`/`-`/context), with the other side emitting a blank so column N
+  means the same source line on both sides. Clicking a path in the card opens the file in
+  the editor, optionally at the line it was changed.
+
+### Changed
+
+- **The review card stopped asking for permission.** A review describes a mutation the
+  turn has *already made to disk* — DSH writes, then reads back next step, and that
+  ordering is what its whole loop is built on. "Accept" was therefore a button that did
+  nothing except imply the change had been waiting for it. Both accepts are gone; the two
+  rejection buttons are now one `Revert all`, and the per-file `✕`/`✓` pair is one
+  `Revert this file`. The card reads "Changed by this call" rather than presenting itself
+  as something awaiting approval.
+
+### Fixed
+
+- **Every diff opened through the native review provider rendered blank.**
+  `Uri.parse('dsh-review://review-1/foo/before').path` is `/foo/before` — a hierarchical
+  URI keeps the leading slash — so the id was read from `path.split('/')[0]`, which is the
+  empty string, and the store lookup never matched. The id is read from `uri.authority`,
+  where it was always meant to be. The new changes provider had the same requirement, which
+  is how the bug surfaced.
+
+### Notes
+
+- The regression gate is now **295 assertions** (was 268). The new group pins the two
+  routes, the hunk-to-sides alignment, the URI authority contract, and the model-side card
+  semantics: one card per turn, a repeat announcement replacing the coordinate instead of
+  stacking a second card, and a summary the Host no longer serves resolving to no card
+  rather than to an error.
+- Deliberately not done, and why: `POST /api/changes.open` (the Host's own native-open
+  route) is skipped because VS Code's own editor is a strictly better target than the
+  desktop window; partial (hunk-level) revert is not implemented — it is recorded on the
+  roadmap; and there is **no** `onDidSaveTextDocument` reflow, because DSH re-reads disk
+  every step and therefore has nothing to be told about a file that changed underneath it.
+
 ## [0.1.7] — 2026-10-11
 
 Tagline: **the longer the conversation, the cheaper each streamed chunk.**

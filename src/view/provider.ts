@@ -84,12 +84,27 @@ export type WebviewAction =
   | { type: 'toggleSystemMessages' }
   | { type: 'moveToSecondarySideBar' }
   | { type: 'appendInput'; text: string }
-  | { type: 'reviewAcceptFile'; reviewId: string; filePath: string }
+  // ─── review (change reporting, NOT a gate) ─────────────────────────────────
+  // There is deliberately no `reviewAccept*`: a review describes a mutation the
+  // turn has already made to disk, so "accepting" it was a no-op with a button.
+  // What remains is the half that does something — seeing it, and undoing it.
   | { type: 'reviewRejectFile'; reviewId: string; filePath: string }
   | { type: 'reviewRejectHunk'; reviewId: string; filePath: string; hunkId: string }
   | { type: 'reviewOpenDiff'; reviewId: string; filePath: string }
-  | { type: 'reviewAcceptAll'; reviewId: string }
   | { type: 'reviewRejectAll'; reviewId: string }
+  // ─── end-of-turn changed files (`workspace/changes`) ───────────────────────
+  /**
+   * Open the native editor on a path mentioned in the transcript or on the
+   * changed-files card. `line` is 1-based and optional; when present the editor
+   * scrolls to it and selects the line.
+   */
+  | { type: 'openFile'; path: string; line?: number }
+  /** Open the native diff for one file of one turn's changed-files card. */
+  | { type: 'changesOpenDiff'; turn: number; index: number }
+  /** Undo one file of a turn's changes (matched to the turn's reviews). */
+  | { type: 'changesRevertFile'; turn: number; path: string }
+  /** Undo every file this turn changed that we hold a review for. */
+  | { type: 'changesRevertTurn'; turn: number }
   | { type: 'approvalRespond'; rpcId: string; outcome: 'allowed-once' | 'rejected' }
   /**
    * Hand a waterfall back to the Host without answering it (stays pending for

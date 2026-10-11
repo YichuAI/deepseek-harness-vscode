@@ -66,6 +66,8 @@ import {
   type ApprovalOutcome,
   type AskUserQuestionAnswer,
   type AssistantStreamFrame,
+  type ChangesDiff,
+  type ChangesSummary,
   type ClientRequest,
   type CommandDescriptor,
   type FileReferenceCandidate,
@@ -98,6 +100,8 @@ import {
   type WorkspaceId,
   type WorkspaceListValue,
   type WorkspaceView,
+  CHANGES_DIFF_PATH,
+  CHANGES_SUMMARY_PATH,
 } from './protocol.ts'
 
 /** A typed view onto a business error from the harness. */
@@ -727,6 +731,37 @@ export class HarnessClient implements Disposable {
   }
 
   /**
+   * Read the Host's record of one turn's changed files.
+   *
+   * `workspace/changes` is a Session event whose data carries only the turn; the
+   * coordinate this route is addressed by is the EVENT'S OWN `seq`. Returns
+   * `undefined` when the Host no longer serves the summary — a disposed Session,
+   * or a Host restarted since the turn ran (the recorder keeps its summaries in
+   * memory for the Session's lifetime only).
+   */
+  changesSummary(sessionId: SessionId, seq: number): Promise<ChangesSummary | undefined> {
+    return this.getRoute<ChangesSummary>(CHANGES_SUMMARY_PATH, {
+      sessionId,
+      seq: String(seq),
+    })
+  }
+
+  /**
+   * Read one listed file's turn-start / turn-end comparison.
+   *
+   * `index` addresses the file inside the summary's own `files` array — the
+   * route keeps no id of its own, so the pair (seq, index) is the whole handle.
+   * `undefined` means the Host no longer serves it.
+   */
+  changesDiff(sessionId: SessionId, seq: number, index: number): Promise<ChangesDiff | undefined> {
+    return this.getRoute<ChangesDiff>(CHANGES_DIFF_PATH, {
+      sessionId,
+      seq: String(seq),
+      index: String(index),
+    })
+  }
+
+  /**
    * Answer one approval waterfall. The `approval/request` frame (seen on the
    * `$events` stream) carries an `eventId`; we POST it to `/api/$events/result`
    * with our `clientId` in a `client-request` envelope.
@@ -1075,6 +1110,61 @@ export class HarnessClient implements Disposable {
       throw new HarnessRpcError(err.code, err.message, err.details)
     }
     return env.result.value
+  }
+
+  /**
+   * GET one of the Host's plain authenticated routes — the deliverables
+   * `changes.*` family — and decode the body.
+   *
+   * These routes sit BESIDE the gateway rather than on it, so they take query
+   * parameters instead of a `{ args }` envelope. Every other rule still holds:
+   * loopback only, cookie required, 401 means "mint one". A 404 here is not
+   * "unsupported method" — it means the resource is GONE (Session disposed, or
+   * the Host restarted and no longer holds the turn's record), which is a normal
+   * state the UI renders as "no card" rather than as an error.
+   */
+  private async getRoute<T>(routePath: string, query: Record<string, string>): Promise<T | undefined> {
+    if (!LOOPBACK_HOSTS.has(this.opts.host)) {
+      throw new Error(`Refusing to talk to non-loopback host ${this.opts.host}: this plugin only drives a local DeepSeek Harness.`)
+    }
+    await this.opts.auth.init()
+    const cookie = this.opts.auth.cookieHeader()
+    if (cookie === undefined && (this.profile?.auth ?? 'cookie') === 'cookie') throw this.authRequired()
+    const origin = `http://${this.opts.host}:${String(this.opts.port)}`
+    const search = new URLSearchParams(query).toString()
+    let res
+    try {
+      res = await httpRequest({
+        host: this.opts.host,
+        port: this.opts.port,
+        method: 'GET',
+        path: search.length > 0 ? `${routePath}?${search}` : routePath,
+        headers: { ...(cookie === undefined ? {} : { cookie }), origin },
+      })
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      throw new Error(`Cannot reach dsh web at ${this.opts.host}:${String(this.opts.port)} — ${message}`)
+    }
+    if (res.status === 401) throw this.authRequired()
+    if (res.status === 404) return undefined
+    if (res.status !== 200) {
+      throw new Error(`HTTP ${String(res.status)} on ${routePath}: ${res.body.trim().slice(0, 200)}`)
+    }
+    const body = res.body.trim()
+    if (body.length === 0) return undefined
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(body)
+    } catch {
+      throw new Error(`Harness returned a non-JSON body on ${routePath}.`)
+    }
+    // The route answers the record itself. Accept a gateway-shaped envelope too,
+    // so a host that later decides to wrap it does not silently blank the card.
+    if (parsed !== null && typeof parsed === 'object' && 'ok' in parsed) {
+      const env = parsed as { ok?: unknown; value?: unknown }
+      return env.ok === true ? (env.value as T) : undefined
+    }
+    return parsed as T
   }
 
   /** POST a `client-request` to /api/$events/result to settle an approval. */

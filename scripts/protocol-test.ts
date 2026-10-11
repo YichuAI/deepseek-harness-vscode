@@ -382,6 +382,35 @@ function failBody(code: string, message: string): string {
   return JSON.stringify({ type: 'server-response', rpcId: 'x', result: { ok: false, error: { code, message, details: {} } } })
 }
 
+/**
+ * The changed-files summary the fake host serves, shaped exactly as the real
+ * route validates it (`isChangesSummary` / `isChangedFile` upstream).
+ */
+const CHANGES_SUMMARY_BODY = {
+  turn: 7,
+  total: 2,
+  added: 12,
+  deleted: 3,
+  files: [
+    { path: 'src/app/controller.ts', display: 'src/app/controller.ts', added: 10, deleted: 2 },
+    { path: 'notes.md', display: 'notes.md', added: 2, deleted: 1 },
+  ],
+}
+/** A `seq` the fake host answers 404 for: the summary is gone with the Session. */
+const CHANGES_SUMMARY_MISSING_SEQ = 999
+/** One served comparison, hunks included, as `isChangesDiff` accepts it. */
+const CHANGES_DIFF_BODY = {
+  kind: 'text',
+  path: 'src/app/controller.ts',
+  display: 'src/app/controller.ts',
+  before: true,
+  after: true,
+  coarse: false,
+  hunks: [
+    { oldStart: 1, oldLines: 3, newStart: 1, newLines: 4, lines: [' const a = 1', '-const b = 2', '+const b = 3', '+const c = 4', ' const d = 5'] },
+  ],
+}
+
 interface FakeMuxState {
   open: boolean
   streamId?: string
@@ -405,6 +434,8 @@ function makeHarness(auth: AuthMode, controls: Set<string>): {
     streams: { endpoint?: unknown; streamId?: unknown; payload?: unknown }[]
     /** Hits on the raw-byte staging route (file attachments). */
     uploads: { sessionId: string; name: string; mediaType: string; bytes: number; head: string }[]
+    /** Plain authenticated GETs — the deliverables `changes.*` routes. */
+    gets: { path: string; query: Record<string, string> }[]
   }
   /** Push one forwarded `$events` frame (emit / waterfall / ready). */
   pushEvent: (frame: Record<string, unknown>) => void
@@ -422,6 +453,7 @@ function makeHarness(auth: AuthMode, controls: Set<string>): {
     streams: [] as { endpoint?: unknown; streamId?: unknown; payload?: unknown }[],
     /** Raw-byte staging route hits (file attachments do not ride the RPC surface). */
     uploads: [] as { sessionId: string; name: string; mediaType: string; bytes: number; head: string }[],
+    gets: [] as { path: string; query: Record<string, string> }[],
   }
   const muxSockets = new Map<Duplex, FakeMuxState>()
 
@@ -599,6 +631,22 @@ function makeHarness(auth: AuthMode, controls: Set<string>): {
     if (auth === 'cookie' && !authenticated(req)) {
       res.writeHead(401, { 'content-type': 'text/plain' })
       res.end('unauthorized')
+      return
+    }
+
+    // The deliverables `changes.*` routes sit BESIDE the gateway: plain
+    // authenticated GETs taking query parameters, not a `{args}` envelope. They
+    // are the one place a changed-files card gets its data from.
+    if (req.method === 'GET' && (url.pathname === '/api/changes.summary' || url.pathname === '/api/changes.diff')) {
+      seen.gets.push({ path: url.pathname, query: Object.fromEntries(url.searchParams) })
+      if (url.pathname === '/api/changes.summary' && url.searchParams.get('seq') === String(CHANGES_SUMMARY_MISSING_SEQ)) {
+        // Gone with the Session: the real host drops summaries it no longer holds.
+        res.writeHead(404, { 'content-type': 'text/plain' })
+        res.end('gone')
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(url.pathname === '/api/changes.summary' ? CHANGES_SUMMARY_BODY : CHANGES_DIFF_BODY))
       return
     }
 
@@ -2242,6 +2290,131 @@ async function main(): Promise<void> {
 
     wfClient.dispose()
     await wf.stop()
+  }
+
+  // ─── M. changed files: the report, and the undo ─────────────────────────────
+  //
+  // A turn's changed-files record is the ONE source that covers everything the
+  // turn touched — including files a shell command edited, which no file tool
+  // ever reports. Nothing here is a gate: the card exists so a person can SEE
+  // what already happened and undo it.
+  //
+  // Its own harness: `main()`'s is already torn down by group L above, and this
+  // group needs a live listener for the two new GET routes.
+  {
+    const cf = makeHarness('none', PRESENT_CONTROLS)
+    const cfPort = await cf.start()
+    const cfAuth = new BrowserSessionAuth({
+      host: '127.0.0.1', port: cfPort,
+      store: { load: async () => undefined, save: async () => {} }, log: () => {},
+    })
+    await cfAuth.init()
+    const cfClient = new HarnessClient({ host: '127.0.0.1', port: cfPort, auth: cfAuth, log: () => {} })
+    await cfClient.connect()
+
+    // M1. The routes are plain authenticated GETs carrying query parameters.
+    const summary = await cfClient.changesSummary('session-1', 42)
+    const summaryGet = cf.seen.gets.find(g => g.path === '/api/changes.summary')
+    check('changes.summary is a plain GET route, not an RPC envelope',
+      summaryGet !== undefined, JSON.stringify(cf.seen.gets.map(g => g.path)))
+    eq('...addressed by sessionId and the announcing event seq',
+      JSON.stringify(summaryGet?.query ?? null), JSON.stringify({ sessionId: 'session-1', seq: '42' }))
+    eq('...decoding into the summary the host served', summary?.total, 2)
+    eq('...with per-file line counts intact', summary?.files[0]?.added, 10)
+    check('...and both a durable path and a display path per file',
+      summary?.files[0]?.path === 'src/app/controller.ts'
+      && summary?.files[0]?.display === 'src/app/controller.ts')
+
+    // A summary the host no longer holds is "no card", not a failure.
+    const goneSummary = await cfClient.changesSummary('session-1', CHANGES_SUMMARY_MISSING_SEQ)
+    eq('a summary the host no longer serves resolves to undefined (no card)',
+      goneSummary, undefined)
+
+    const diff = await cfClient.changesDiff('session-1', 42, 1)
+    const diffGet = cf.seen.gets.find(g => g.path === '/api/changes.diff')
+    eq('changes.diff addresses one listed file by its index',
+      JSON.stringify(diffGet?.query ?? null), JSON.stringify({ sessionId: 'session-1', seq: '42', index: '1' }))
+    check('...and answers a text comparison carrying hunks',
+      diff?.kind === 'text' && diff.hunks.length === 1, diff?.kind)
+
+    // M2. Hunks rebuild into two line-ALIGNED sides.
+    const changesDoc = await import('../src/review/changesDocument.ts')
+    const sides = changesDoc.hunksToSides(CHANGES_DIFF_BODY.hunks)
+    const before = sides.before.split('\n')
+    const after = sides.after.split('\n')
+    // The fixture hunk is: context, a `-`, two `+`, context. Each side keeps the
+    // context and its own half; the other half becomes '' so index N always
+    // means the same source line on both columns.
+    eq('a rebuilt comparison keeps both sides the same height', before.length, after.length)
+    eq('...the before column holds the context and the deleted line',
+      before, ['const a = 1', 'const b = 2', '', '', 'const d = 5'])
+    eq('...the after column holds the context and both added lines',
+      after, ['const a = 1', '', 'const b = 3', 'const c = 4', 'const d = 5'])
+    check('...so a deletion leaves a blank rather than shifting the rest up',
+      before[1] === 'const b = 2' && after[1] === '')
+    check('...and every addition sits opposite a blank on the before side',
+      after[2] === 'const b = 3' && before[2] === '' && after[3] === 'const c = 4' && before[3] === '')
+
+    // M3. The virtual URI carries its id in the AUTHORITY. Reading it off the
+    //     path yields '' — the bug that silently blanked every native diff.
+    const virtualDoc = await import('../src/review/virtualDocument.ts')
+    const fakeStore = {
+      getById: (id: string) => (id === 'review-7'
+        ? { files: [{ path: 'src/app/controller.ts', beforeText: 'OLD', afterText: 'NEW' }] }
+        : undefined),
+    }
+    const provider = new virtualDoc.ReviewVirtualDocumentProvider(fakeStore as never)
+    const reviewUri = (side: string): never => ({
+      scheme: 'dsh-review', authority: 'review-7',
+      path: '/src%2Fapp%2Fcontroller.ts/' + side,
+    }) as never
+    eq('the review id is read from the URI authority',
+      provider.provideTextDocumentContent(reviewUri('after')), 'NEW')
+    eq('...and the before side serves the captured original',
+      provider.provideTextDocumentContent(reviewUri('before')), 'OLD')
+    eq('...while a URI with no authority resolves to nothing',
+      provider.provideTextDocumentContent({ scheme: 'dsh-review', authority: '', path: '/x/after' } as never), '')
+
+    // M4. A `workspace/changes` announcement becomes exactly one card per turn.
+    const model = new ConversationModel('session-1')
+    const asked: { turn: number; seq: number }[] = []
+    model.setChangesRequestHandler((turn, seq) => { asked.push({ turn, seq }) })
+    model.applyEvent(ev('turn/start', { turn: 3 }, 10))
+    model.applyEvent(ev('workspace/changes', { turn: 3 }, 11))
+    const cards = () => model.snapshot().items.filter(i => i.kind === 'changes')
+    eq('an announcement opens exactly one changed-files card', cards().length, 1)
+    eq('...and asks the controller for its summary', asked.length, 1)
+    eq('...naming the announcing event seq, which is what the route takes', asked[0]?.seq, 11)
+    check('...starting out loading rather than claiming "no changes"',
+      (cards()[0] as { loading?: boolean }).loading === true)
+
+    model.setChangesSummary(3, CHANGES_SUMMARY_BODY as never)
+    const settled = cards()[0] as { loading?: boolean; summary?: { total?: number } }
+    eq('the served summary fills the card in', settled.summary?.total, 2)
+    check('...and the card stops loading', settled.loading === false)
+
+    // A turn may announce twice (a `turn/end` re-record). That REPLACES the
+    // coordinate instead of stacking a second card on the same turn.
+    model.applyEvent(ev('workspace/changes', { turn: 3 }, 14))
+    eq('a repeat announcement does not stack a second card', cards().length, 1)
+    eq('...it re-asks with the newer coordinate', asked[asked.length - 1]?.seq, 14)
+    check('...and drops the now-stale summary until the new one lands',
+      (cards()[0] as { summary?: unknown }).summary === undefined)
+
+    // A gone summary resolves the card to nothing rather than to an error.
+    model.setChangesSummary(3, undefined)
+    const resolved = cards()[0] as { summary?: unknown; loading?: boolean }
+    check('a gone summary leaves the card resolved with nothing to draw',
+      resolved.summary === undefined && resolved.loading === false)
+
+    // The v0.1.7 reconciliation contract holds for the new item kind too.
+    const stamped = cards()[0] as { uid?: number; rev?: number }
+    check('the card carries a render identity like every other item',
+      typeof stamped.uid === 'number' && typeof stamped.rev === 'number',
+      JSON.stringify([stamped.uid, stamped.rev]))
+
+    cfClient.dispose()
+    await cf.stop()
   }
 
   console.log(`\n${failures === 0 ? 'all checks passed' : `${String(failures)} CHECK(S) FAILED`} (${String(step)} total)\n`)

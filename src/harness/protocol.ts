@@ -708,6 +708,90 @@ export interface FileReferenceCandidate {
   kind: 'file' | 'directory'
 }
 
+// ─── turn changes (`workspace/changes` + the deliverables routes) ─────────────
+/**
+ * The `workspace/changes` Session event.
+ *
+ * Written by the Host's `@deepseek-ai/dsh-workspace-changes` plugin at the end
+ * of every top-level turn that changed something. The payload names the turn
+ * and nothing else — **the event's own `seq` is the coordinate** the summary
+ * route is addressed by. One turn may announce more than once (a `turn/end`
+ * re-record after tool results settled); the LATEST announcement for a turn is
+ * the one that counts.
+ */
+export interface WorkspaceChangesEventData {
+  turn: number
+}
+
+/** One file a turn changed, as the summary route lists it. */
+export interface ChangedFile {
+  /** Durable path: relative to the turn's working directory, absolute elsewhere. */
+  path: string
+  /** Display path used for ordering and labels (`../`, `~`, or absolute). */
+  display: string
+  added: number
+  deleted: number
+  binary?: true
+  /** The Host did not capture the file (over `maxFileBytes`); no counts. */
+  oversized?: true
+}
+
+/**
+ * `GET /api/changes.summary?sessionId=&seq=` — the Host's record of one turn's
+ * changed files. Served only while the Session lives; a Host restart drops it.
+ *
+ * Mirrors the official client's `isChangesSummary` guard exactly (`turn >= 1`,
+ * safe-integer counts, `files` all well-formed).
+ */
+export interface ChangesSummary {
+  turn: number
+  total: number
+  added: number
+  deleted: number
+  files: readonly ChangedFile[]
+}
+
+/** One hunk of a served comparison. `lines` are unified-diff prefixed (`+ - `). */
+export interface ChangesHunk {
+  oldStart: number
+  oldLines: number
+  newStart: number
+  newLines: number
+  lines: readonly string[]
+}
+
+/**
+ * `GET /api/changes.diff?sessionId=&seq=&index=` — one listed file's comparison.
+ *
+ * `kind` decides the shape: `text` carries hunks, `binary` and `oversized` are
+ * refusals the Host serves instead. `coarse` means the line comparison hit
+ * `diffTimeoutMs` and degraded to one hunk replacing every line. `before` /
+ * `after` say whether that side exists — the pair is how a creation or a
+ * deletion is told apart from an edit.
+ */
+export type ChangesDiff =
+  | { kind: 'binary'; path: string; display: string }
+  | { kind: 'oversized'; path: string; display: string }
+  | {
+    kind: 'text'
+    path: string
+    display: string
+    before: boolean
+    after: boolean
+    coarse: boolean
+    hunks: readonly ChangesHunk[]
+  }
+
+/**
+ * Route paths served by the Host's deliverables plugin.
+ *
+ * These are NOT Typert gateway methods: they are plain authenticated GET/POST
+ * routes that live beside `/api/`, so they take query parameters rather than an
+ * RPC envelope, and every other `/api/*` rule still applies (cookie required,
+ * 404 once the Session is gone).
+ */
+export const CHANGES_SUMMARY_PATH = '/api/changes.summary'
+export const CHANGES_DIFF_PATH = '/api/changes.diff'
 
 /** Endpoint string for a Remote method: `namespace/method`. */
 export function endpointOf(namespace: string, method: string): string {

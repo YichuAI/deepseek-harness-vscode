@@ -1,9 +1,9 @@
-# DeepSeek Harness Connector for VS Code (v0.1.7)
+# DeepSeek Harness Connector for VS Code (v0.1.8)
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
 [![VS Code Marketplace](https://img.shields.io/badge/VS%20Code-Marketplace-blue.svg)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
-[![Version](https://img.shields.io/badge/version-0.1.7-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.7)
+[![Version](https://img.shields.io/badge/version-0.1.8-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.8)
 
 > Native VS Code client for DeepSeek Harness.
 >
@@ -24,6 +24,38 @@ VS Code ─────┘
 ```
 
 VS Code reads the workspaces and sessions the browser already has, and continues the **same** session — so a browser refresh of that session sees exactly what VS Code sent.
+
+## Design: DSH owns the write; the plugin observes and tells
+
+Two facts about how DSH works decide almost everything else here.
+
+**DSH writes to disk and reads it back on the next step.** That ordering is not an implementation detail you can route around — it is what each step is built on. A file tool reports its change, and the following step opens the file as it now is. So the tempting move, intercepting the write — buffering it, proxying it, turning it into a `WorkspaceEdit` for VS Code to apply — buys a tidier-looking review flow at the price of breaking step-to-step consistency. And it breaks late and sideways: a wrong result several steps on, with no visible thread back to the interception. This plugin does not intercept writes. **DSH is the only writer.**
+
+**The plugin is an observer, not a gatekeeper.** By the time you see a change, it is already on disk. That made "Accept" a button that did nothing except imply the change had been waiting for permission, so it is gone. What is left is a report: here is what changed, here is the diff, here is the undo. This is the same relationship two people have on one repository — you do not ask permission to save a file, you look at what the other person did.
+
+Three consequences, all deliberate:
+
+- **Human and AI are equals at the file level.** DSH writes, you write, and neither is asked to confirm the other. What keeps you from colliding is not a lock — it is that both of you can see the diff and either of you can undo. The plugin's job is to make that record visible in the conversation stream, next to the call that produced it, rather than standing between the two of you.
+- **There is no reflow mechanism, and none is needed.** DSH re-reads the file every step, so it is never working from a stale copy of something you edited underneath it. If you want the AI to know about your edit, you say so in the conversation, or it reads git history. Nothing has to be pushed at it.
+- **What the browser can show, VS Code shows natively.** Where the plugin has something to present — a diff, a file the AI pointed at — it opens VS Code's own editor instead of reimplementing a viewer in the webview. The webview is for the conversation; the editor is for the code.
+
+What is ruled out is as much a part of the design as what is included. Registering DSH as a **Copilot language model provider** would put a dropdown entry in the picker and put *something else's* agent loop behind it — no tool calling, no approvals, no context management, none of the orchestration that is the actual product. Trading the harness for a model entry is a bad trade. Driving DSH over **ACP** instead of the web transport is the same shape of mistake in miniature: the `acp` profile is a stdio JSON-RPC server that describes itself as automation-only, and it carries neither elicitation nor the DSH display cards — so it would lose the approval/question waterfall and the changed-files record that the HTTP+WS transport already delivers.
+
+## What's new in v0.1.8
+
+**A ledger of what the turn changed — and an undo, not a permission slip.**
+
+- **New: a changed-files card, one per turn.** The Host records what each top-level turn touched and announces it as a `workspace/changes` Session event; the card now appears in the conversation stream's tool row, fed by a plain authenticated `GET /api/changes.summary`, addressed by the announcing event's own `seq`.
+
+  This is deliberately a different source from the per-call review card. A review is built from a file tool's own `before`/`after`, so it can only report what a file tool reported. The turn record is built Host-side from a git snapshot of the working tree at turn start and turn end, plus whole-file copies taken around the mutating calls — so it also covers a file changed by `sed -i` inside a shell command, and it is the only source that describes the whole turn rather than one call in it.
+- **New: revert one file, or revert the whole turn.** A `Revert this file` on each row, a `Revert all` on the card. Both are scoped to the reviews that turn produced, because a summary carries paths and line counts but not the text needed to restore anything — only a review keeps a `before`. A turn whose changes all came from shell commands says so plainly instead of pretending to act.
+- **New: a native diff for any file in the turn**, as an ordinary VS Code diff editor. The Host serves hunks rather than whole-file text, so both sides are rebuilt from the hunk list and kept line-aligned, with a blank on the side a line does not belong to. Clicking a path in the card opens the file in the editor.
+- **Changed: the review card stopped asking for permission.** Both accepts are removed, the two rejection buttons are now one `Revert all`, and the per-file `✕`/`✓` pair is one `Revert this file`. See [the design section](#design-dsh-owns-the-write-the-plugin-observes-and-tells) for why.
+- **Fixed: every diff opened through the native review provider rendered blank.** `Uri.parse('dsh-review://review-1/foo/before').path` is `/foo/before` — a hierarchical URI keeps the leading slash — so the id was read from `path.split('/')[0]`, which is the empty string, and the store lookup never matched.
+
+Verification: the regression gate is now **295 assertions** (was 268). The new group pins the two routes, the hunk-to-sides alignment, the URI authority contract, and the card semantics — one card per turn, a repeat announcement replacing the coordinate rather than stacking a second card, and a summary the Host no longer serves resolving to no card rather than to an error. Live integration stays **29/29**.
+
+See [CHANGELOG.md](./CHANGELOG.md) for the full diff.
 
 ## What's new in v0.1.7
 
@@ -155,9 +187,9 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full diff.
 - Send a plain-text prompt to that session. If no session exists, one is created automatically.
 - Stream the assistant's reply with **Markdown rendering** (code blocks, lists, tables, links).
 - Show tool calls as **collapsed cards** with name-aware titles (`Read src/foo.ts`, `Search "pattern"`, `Run npm test`).
-- **Review agent code changes** — diff cards with per-file Accept/Reject, native VS Code diff editor, bulk Accept All / Reject All.
+- **See what the agent changed** — a changed-files card per turn (including files changed by a shell command), a native VS Code diff for any of them, and an undo, per file or for the whole turn. Per-call diff cards for file tools work the same way, and carry a `Revert this file` lens in the native diff itself. Nothing here asks for approval — the change is already on disk; see [the design section](#design-dsh-owns-the-write-the-plugin-observes-and-tells).
 - **Approve or deny agent actions** — a pending panel above the composer with Allow once / Deny buttons (the gate reads the Host's stated reason, not a tool-name allowlist).
-- **Attach file context** — use `@file:path` or `@file:path:L10-L20` in your prompt; file content is read and inlined automatically. Right-click in explorer or editor for quick insertion.
+- **Reference files** — use `@<relative-path>` in your prompt; the mention is sent as typed and the Host resolves it with its own filesystem tool. Right-click in explorer or editor for quick insertion.
 - Hide plugin-injected system messages by default; toggle with the `SYS` button.
 - Stop the active turn.
 - Reopen the stream and refetch history on disconnect.
@@ -206,7 +238,7 @@ For your safety, the following remain out of scope:
    Or install the VSIX from [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases):
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.1.7.vsix
+   code --install-extension harness-connector-deepseek-0.1.8.vsix
    ```
 
 3. Nothing to configure. The extension auto-connects: it reads the browser-session
@@ -333,7 +365,7 @@ that implements the `0.2.1-alpha.2` server half exactly — so no `dsh web` is
 needed:
 
 ```bash
-npm run protocol-test    # 268 assertions: the two-stream transport split
+npm run protocol-test    # 295 assertions: the two-stream transport split
                          # ($events allowlist vs session/follow), wire negotiation
                          # (dot/slash, cookie gating, event socket), auth and cookie
                          # derivation, {args} payloads (wrapped vs bare), the approval
@@ -352,8 +384,11 @@ npm run protocol-test    # 268 assertions: the two-stream transport split
                          # uid, advancing rev, no bubble after turn/end), the
                          # webview's incremental reconciliation (a no-op push
                          # builds zero DOM and re-parses zero markdown; one chunk
-                         # rebuilds one row), the batch projection budget, and the
-                         # webview script's integrity
+                         # rebuilds one row), the batch projection budget, the
+                         # changed-files routes (plain authenticated GETs, a gone
+                         # summary as "no card"), the hunk-to-sides line alignment,
+                         # the virtual URI authority contract, the one-card-per-turn
+                         # model semantics, and the webview script's integrity
 ```
 
 To ask your **real** `dsh web` what it actually serves (endpoint style, event
@@ -380,8 +415,8 @@ npm install
 npm run build        # esbuild → dist/extension.js
 npm run watch        # rebuild on change
 npm run typecheck
-npm run package      # → harness-connector-deepseek-0.1.7.vsix
-npm run protocol-test      # 268 protocol assertions against a fake harness
+npm run package      # → harness-connector-deepseek-0.1.8.vsix
+npm run protocol-test      # 295 protocol assertions against a fake harness
 npm run protocol-probe     # report what your real dsh web exposes
 ```
 
@@ -428,10 +463,13 @@ Press `F5` in VS Code to launch an Extension Development Host with the extension
 - History loads the last ~50 messages; "load older" is a future feature.
 - Session deep-links in "Open Web UI" are intentionally not guessed — only the Harness home opens.
 - Unknown harness event types are ignored (the protocol is merge-extensible); they do not crash the client but also do not render.
-- Diff review revert uses `git checkout` — uncommitted changes to the target file will be lost on Reject.
+- **A revert writes the captured `before` text back — it does not use `git checkout`.** It also checks first that the file on disk still matches the `after` it captured at review time; if the file has moved on since, the revert is refused and the file is marked conflicted rather than overwritten. That guard is why an undo is safe to offer without asking, and why it can decline.
+- **A turn's changed-files card lists what the turn changed, but only a file tool's own change can be undone from it.** The undo is scoped to the reviews that turn produced, because a Host summary carries paths and line counts, not the text needed to restore anything. A turn that changed files only through shell commands will say so.
+- A changed-files summary lives for the Session's lifetime on the Host, so a card can resolve to "no changes to show" after a host restart. That renders as no card, matching the Web UI.
 
-## Roadmap (v0.1.8+)
+## Roadmap (v0.1.9+)
 
+- **Partial revert — hunk level.** The materializer already knows how to revert a single hunk (and refuses when the file has drifted), but no UI reaches it any more: a revert is all-or-nothing per file today. Restoring it means offering per-hunk undo in the changes card and in the native diff, driven by the hunk list the Host already serves rather than by whole-file text it does not keep.
 - Per-item state patches: a streaming push still ships the whole transcript (~52 KB per push on a 40-turn session). The renderer no longer rebuilds it, but the structured clone across `postMessage` is the remaining per-chunk cost.
 - Inspector: filter box / type highlight / export as JSONL
 - Search: scope to workspace, pagination, highlight rendering

@@ -1143,6 +1143,12 @@ export const CLIENT_SCRIPT = /* js */ `
       item.running ? '1' : '', item.streaming ? '1' : '',
       item.result ? (item.result.text + (item.result.isError ? '!' : '')) : ''];
     if (item.kind === 'tool' && item.reviewId) f.push(reviewSigFor(item.reviewId));
+    // A changed-files card carries no text of its own, so its signature is the
+    // shape of the summary it is showing.
+    if (item.kind === 'changes') {
+      f.push(item.error || '', item.loading ? 'asking' : 'settled');
+      if (item.summary) f.push(String(item.summary.total), String(item.summary.added), String(item.summary.deleted));
+    }
     return f.join('|');
   }
 
@@ -1151,7 +1157,6 @@ export const CLIENT_SCRIPT = /* js */ `
     for (let i = 0; i < currentReviews.length; i++) {
       const rv = currentReviews[i];
       if (rv.id !== reviewId) continue;
-      if (rv.state !== 'pending') return '';
       let s = rv.state;
       const files = rv.files || [];
       for (let j = 0; j < files.length; j++) {
@@ -1216,6 +1221,7 @@ export const CLIENT_SCRIPT = /* js */ `
     }
     if (item.kind === 'system') return renderSystem(item);
     if (item.kind === 'tool') return renderTool(item);
+    if (item.kind === 'changes') return renderChangesCard(item);
     return renderMessage(item);
   }
 
@@ -1236,6 +1242,173 @@ export const CLIENT_SCRIPT = /* js */ `
     body.className = 'sys-body'; body.textContent = item.text;
     d.appendChild(body);
     return d;
+  }
+
+  // ─── end-of-turn changed files ─────────────────────────────────────────────
+  //
+  // A REPORT, not a gate. By the time this card exists the turn has already
+  // written these files to disk; the card is how the human is told what changed,
+  // and how they undo it. That is why there is no Accept anywhere in it and why
+  // the action is called Revert rather than Reject — nothing was ever held back
+  // waiting for a verdict, so the only thing a person can meaningfully do here
+  // is disagree with what already happened.
+  //
+  // The list comes from the Host's own per-turn record, which covers every file
+  // the turn touched — including ones a shell command edited, which no file
+  // tool ever reported.
+
+  var CHANGES_FOLD = 4;
+  /** Turn key -> whether the file list is expanded. View state, not model state. */
+  var changesExpanded = {};
+
+  function renderChangesCard(item) {
+    const d = document.createElement('div');
+    d.className = 'changes';
+
+    if (item.error) {
+      d.className += ' error';
+      const e = document.createElement('div');
+      e.className = 'changes-error';
+      e.textContent = 'Changed files unavailable — ' + escapeText(item.error);
+      d.appendChild(e);
+      return d;
+    }
+
+    const summary = item.summary;
+    if (!summary) {
+      if (item.loading) {
+        d.className += ' loading';
+        d.textContent = 'Reading this turn\u2019s changes\u2026';
+      } else {
+        // The Host has nothing for this turn (disposed Session, restarted Host).
+        // The Web UI renders no card at all in that case, and neither do we —
+        // but the row stays in the transcript so keys and indices keep matching.
+        d.style.display = 'none';
+      }
+      return d;
+    }
+
+    const files = summary.files || [];
+    const turnKey = 't' + item.turn;
+    const expanded = changesExpanded[turnKey] === true;
+
+    const head = document.createElement('div');
+    head.className = 'changes-head';
+
+    const title = document.createElement('span');
+    title.className = 'changes-title';
+    if (files.length === 1 && files[0]) {
+      const only = files[0].display || files[0].path;
+      title.textContent = 'Edited ' + shortPath(only);
+      title.title = only;
+    } else {
+      title.textContent = 'Edited ' + String(summary.total) + ' file' + (summary.total === 1 ? '' : 's');
+    }
+    head.appendChild(title);
+
+    const stats = document.createElement('span');
+    stats.className = 'changes-stats';
+    stats.innerHTML = '<span class="added">+' + String(summary.added) + '</span> '
+      + '<span class="removed">-' + String(summary.deleted) + '</span>';
+    head.appendChild(stats);
+
+    const revertAll = document.createElement('button');
+    revertAll.className = 'secondary';
+    revertAll.textContent = 'Revert all';
+    revertAll.title = 'Undo the file changes this turn made';
+    revertAll.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      post({ type: 'changesRevertTurn', turn: item.turn });
+    });
+    head.appendChild(revertAll);
+    d.appendChild(head);
+
+    const list = document.createElement('div');
+    list.className = 'changes-files';
+    const shown = expanded ? files : files.slice(0, CHANGES_FOLD);
+    for (let i = 0; i < shown.length; i++) {
+      list.appendChild(renderChangesRow(item, shown[i], i));
+    }
+    d.appendChild(list);
+
+    if (files.length > CHANGES_FOLD) {
+      const fold = document.createElement('button');
+      fold.className = 'changes-fold secondary';
+      fold.textContent = expanded ? 'Collapse' : 'All ' + String(files.length) + ' files';
+      fold.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        changesExpanded[turnKey] = !expanded;
+        redrawChangesCard(item);
+      });
+      d.appendChild(fold);
+    }
+    return d;
+  }
+
+  function renderChangesRow(item, file, index) {
+    const row = document.createElement('div');
+    row.className = 'changes-file';
+
+    // The path opens the real file. Paths from the Host's record are relative to
+    // the turn's working directory when they are inside it; the host side
+    // resolves that against the workspace root.
+    const path = document.createElement('span');
+    path.className = 'cf-path';
+    path.textContent = shortPath(file.display || file.path);
+    path.title = (file.display || file.path) + ' — click to open';
+    path.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      post({ type: 'openFile', path: file.path });
+    });
+
+    const stats = document.createElement('span');
+    stats.className = 'cf-stats';
+    if (file.binary) stats.textContent = 'binary';
+    else if (file.oversized) stats.textContent = 'too large';
+    else {
+      stats.innerHTML = '<span class="added">+' + String(file.added) + '</span> '
+        + '<span class="removed">-' + String(file.deleted) + '</span>';
+    }
+
+    const diffBtn = document.createElement('button');
+    diffBtn.className = 'secondary icon';
+    diffBtn.textContent = 'Diff';
+    diffBtn.title = 'Open the native diff for this file';
+    diffBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      post({ type: 'changesOpenDiff', turn: item.turn, index: index });
+    });
+
+    const revertBtn = document.createElement('button');
+    revertBtn.className = 'secondary icon';
+    revertBtn.textContent = '\u21A9';
+    revertBtn.title = 'Undo this file';
+    revertBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      post({ type: 'changesRevertFile', turn: item.turn, path: file.path });
+    });
+
+    row.appendChild(path);
+    row.appendChild(stats);
+    row.appendChild(diffBtn);
+    row.appendChild(revertBtn);
+    return row;
+  }
+
+  /**
+   * Re-draw one card in place after its fold was toggled.
+   *
+   * The fold is pure view state, so it must not go through the model — but the
+   * reconciler only redraws an item when its rev moved. Swapping the node here
+   * keeps the cached element (and therefore the reconciler's bookkeeping) valid.
+   */
+  function redrawChangesCard(item) {
+    const key = itemKey(item);
+    const known = itemNodes.get(key);
+    if (!known || !known.el || !known.el.parentNode) return;
+    const fresh = renderChangesCard(item);
+    known.el.parentNode.replaceChild(fresh, known.el);
+    known.el = fresh;
   }
 
   function renderTool(item) {
@@ -1270,9 +1443,9 @@ export const CLIENT_SCRIPT = /* js */ `
     // Review card (if review linked to this tool)
     if (item.reviewId) {
       const rv = currentReviews.find(r => r.id === item.reviewId);
-      if (rv && rv.state === 'pending') {
-        d.appendChild(renderReviewCard(rv));
-      }
+      // Drawn for every state, not only pending: a card that disappears the
+      // instant it is reverted hides the fact that a revert ever happened.
+      if (rv) d.appendChild(renderReviewCard(rv));
     }
 
     const body = document.createElement('div');
@@ -1305,10 +1478,12 @@ export const CLIENT_SCRIPT = /* js */ `
     header.className = 'review-header';
     const title = document.createElement('span');
     title.className = 'review-title';
-    title.textContent = 'Changed Files';
+    title.textContent = 'Changed by this call';
     const stateBadge = document.createElement('span');
     stateBadge.className = 'review-state ' + rv.state;
-    stateBadge.textContent = rv.state;
+    // "pending" is the store's word for "on disk, not yet dealt with". There is
+    // no verdict to wait for, so the card states what actually happened.
+    stateBadge.textContent = rv.state === 'pending' ? 'applied' : rv.state;
     header.appendChild(title);
     header.appendChild(stateBadge);
     card.appendChild(header);
@@ -1341,26 +1516,18 @@ export const CLIENT_SCRIPT = /* js */ `
       fileRow.appendChild(stats);
       fileRow.appendChild(openBtn);
 
-      // Per-file accept/reject buttons
+      // Undo only. There is no "keep" button because keeping is what already
+      // happened — the card cannot un-apply a change that is on disk.
       if (f.state === 'pending') {
-        const rejectBtn = document.createElement('button');
-        rejectBtn.className = 'secondary icon';
-        rejectBtn.textContent = '✕';
-        rejectBtn.title = 'Reject (revert changes)';
-        rejectBtn.addEventListener('click', (e) => {
+        const revertBtn = document.createElement('button');
+        revertBtn.className = 'secondary icon';
+        revertBtn.textContent = '\u21A9';
+        revertBtn.title = 'Revert this file';
+        revertBtn.addEventListener('click', (e) => {
           e.stopPropagation();
           post({ type: 'reviewRejectFile', reviewId: rv.id, filePath: f.path });
         });
-        const acceptBtn = document.createElement('button');
-        acceptBtn.className = 'icon';
-        acceptBtn.textContent = '✓';
-        acceptBtn.title = 'Accept (keep changes)';
-        acceptBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          post({ type: 'reviewAcceptFile', reviewId: rv.id, filePath: f.path });
-        });
-        fileRow.appendChild(rejectBtn);
-        fileRow.appendChild(acceptBtn);
+        fileRow.appendChild(revertBtn);
       } else {
         const stateLabel = document.createElement('span');
         stateLabel.className = 'rf-state ' + f.state;
@@ -1376,21 +1543,14 @@ export const CLIENT_SCRIPT = /* js */ `
     if (rv.state === 'pending') {
       const actions = document.createElement('div');
       actions.className = 'review-actions';
-      const rejectAllBtn = document.createElement('button');
-      rejectAllBtn.className = 'secondary';
-      rejectAllBtn.textContent = 'Reject All';
-      rejectAllBtn.addEventListener('click', (e) => {
+      const revertAllBtn = document.createElement('button');
+      revertAllBtn.className = 'secondary';
+      revertAllBtn.textContent = 'Revert all';
+      revertAllBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         post({ type: 'reviewRejectAll', reviewId: rv.id });
       });
-      const acceptAllBtn = document.createElement('button');
-      acceptAllBtn.textContent = 'Accept All';
-      acceptAllBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        post({ type: 'reviewAcceptAll', reviewId: rv.id });
-      });
-      actions.appendChild(rejectAllBtn);
-      actions.appendChild(acceptAllBtn);
+      actions.appendChild(revertAllBtn);
       card.appendChild(actions);
     }
     return card;

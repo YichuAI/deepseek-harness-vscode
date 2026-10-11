@@ -25,18 +25,23 @@ export class ReviewVirtualDocumentProvider implements vscode.TextDocumentContent
   constructor(private readonly store: ReviewStore) {}
 
   provideTextDocumentContent(uri: vscode.Uri): string {
-    // URI structure: dsh-review://<reviewId>/<encoded-file-path>/before|after
-    const parts = uri.path.split('/')
+    // URI structure: dsh-review://<reviewId in authority>/<encoded-file-path>/before|after
+    //
+    // The review id must come from `authority`. `Uri.parse` keeps a leading
+    // slash on `path` for a hierarchical URI, so `path.split('/')` starts with
+    // an empty segment — reading the id off it yields '' and every diff opened
+    // through this provider silently renders blank.
+    const reviewId = uri.authority
+    const parts = uri.path.replace(/^\/+/, '').split('/')
     const side = parts.pop() // 'before' or 'after'
-    const reviewId = parts.shift()
-    const filePath = parts.join('/')
+    const filePath = decodeURIComponent(parts.join('/'))
 
     if (!reviewId || !side || !filePath) return ''
 
     const review = this.store.getById(reviewId)
     if (!review) return ''
 
-    const file = review.files.find(f => f.path === decodeURIComponent(filePath))
+    const file = review.files.find(f => f.path === filePath)
     if (!file) return ''
 
     if (side === 'before') return file.beforeText ?? ''

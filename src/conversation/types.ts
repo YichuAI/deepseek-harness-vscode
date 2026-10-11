@@ -12,6 +12,8 @@
  * appear as a single collapsible card in the UI.
  */
 
+import type { ChangesSummary } from '../harness/protocol.ts'
+
 /**
  * Per-item render identity, stamped by {@link ConversationModel}.
  *
@@ -62,6 +64,8 @@ export interface SystemItem extends ItemIdentity {
 export interface ToolItem extends ItemIdentity {
   kind: 'tool'
   seq: number
+  /** The turn that issued this call — how a changed-files card finds the reviews it may undo. */
+  turn?: number
   callId: string
   name: string
   arguments: string
@@ -80,12 +84,37 @@ export interface StatusItem extends ItemIdentity {
   running: boolean
 }
 
+/**
+ * The end-of-turn changed-files card.
+ *
+ * Produced by the Host's `workspace/changes` Session event and filled from the
+ * deliverables summary route. This is a REPORT, not a gate: by the time it
+ * exists the turn has already written whatever it wrote, and the card exists so
+ * the human can SEE that — and undo it if they disagree. There is deliberately
+ * no "accept" step, because nothing was ever held back.
+ *
+ * The summary is fetched asynchronously (it lives on the Host, not in the event
+ * log), so `loading` distinguishes "still asking" from "the Host has nothing
+ * for this turn". A turn that changed no file never produces the event at all.
+ */
+export interface ChangesItem extends ItemIdentity {
+  kind: 'changes'
+  seq: number
+  /** The turn this card reports on. One card per turn; a repeat announcement replaces the coordinate. */
+  turn: number
+  summary?: ChangesSummary
+  loading: boolean
+  /** Set only when the route failed for a reason other than "gone". */
+  error?: string
+}
+
 export type ConversationItem =
   | UserMessageItem
   | AssistantMessageItem
   | SystemItem
   | ToolItem
   | StatusItem
+  | ChangesItem
 
 export interface SessionSnapshot {
   sessionId: string

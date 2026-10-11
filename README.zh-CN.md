@@ -1,9 +1,9 @@
-# DeepSeek Harness Connector for VS Code (v0.1.7)
+# DeepSeek Harness Connector for VS Code (v0.1.8)
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
 [![VS Code Marketplace](https://img.shields.io/badge/VS%20Code-Marketplace-blue.svg)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
-[![Version](https://img.shields.io/badge/version-0.1.7-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.7)
+[![Version](https://img.shields.io/badge/version-0.1.8-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.8)
 
 > DeepSeek Harness 的原生 VS Code 客户端。
 >
@@ -24,6 +24,71 @@ VS Code ─────┘
 ```
 
 VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**会话——所以浏览器刷新该会话时能看到 VS Code 发送的内容。
+
+## 设计：写盘归 DSH，插件只观察与告知
+
+DSH 的两个事实，几乎决定了这里其余一切的取舍。
+
+**DSH 先把改动写进磁盘，下一步再把它读回来。** 这个先后顺序不是可以绕开的实现细节——每一步
+都建立在它上面。文件工具报告自己的改动，紧接着的那一步打开的就是此刻磁盘上的那个文件。所以
+那个看起来很诱人的做法——拦截写入、缓冲它、代理它、把它变成交给 VS Code 执行的
+`WorkspaceEdit`——代价是打破步与步之间的一致性，换来一个表面更好看的审阅流程。而且它坏得很
+晚、很偏：错误结果出现在好几步之后，中间看不出跟那次拦截有什么联系。本插件不拦截写入。
+**DSH 是唯一的写盘者。**
+
+**插件是观察者，不是守门人。** 等你看见一个改动时，它已经落盘了。这让「接受」变成了一个除了
+暗示「此前一直在等它批准」之外什么也没做的按钮，所以它被删掉了。剩下的是报告：改了什么、
+diff 在这儿、撤销在这儿。这跟两个人在同一个仓库里的关系是一样的——你保存文件不需要谁批准，
+你看的是另一个人做了什么。
+
+三个后果，全是有意为之：
+
+- **在文件这一层，人和 AI 是对等的。** DSH 会写，你也会写，谁也不向谁请求确认。让你们不撞车
+  的不是锁，而是两边都能看见 diff、两边都能撤销。插件要做的是把这份记录摆在对话流里、摆在
+  产生它的那次调用旁边，而不是站在你们两个人中间。
+- **没有回流机制，也不需要。** DSH 每一步都重新读盘，所以它手上永远不会是一份过期的副本——
+  即使那个文件在你这边刚被改过。你想让 AI 知道你的改动，就在对话里说，或者让它读 git 记录。
+  没有什么需要「推」给它的。
+- **浏览器能展示的，VS Code 用原生方式展示。** 插件有东西要呈现时——一个 diff、一个 AI 指出
+  的文件——它打开 VS Code 自己的编辑器，而不是在 webview 里重新实现一个查看器。webview 负责
+  对话，编辑器负责代码。
+
+被排除掉的东西，跟被包含的东西一样是设计的一部分。把 DSH 注册成 **Copilot 语言模型**，等于在
+选择器里多一个条目，背后却换成别人的 agent 循环——没有工具调用、没有审批、没有上下文管理，
+一个真正的产品该有的编排全没了。拿 harness 去换一个模型条目，是一笔亏本买卖。改走 **ACP**
+而不用 web 传输，是同一种错的缩小版：`acp` profile 是一个自称 automation-only 的 stdio
+JSON-RPC 服务，既不带 elicitation，也不带 DSH 的展示卡片——那会丢掉审批/提问瀑布和改动记录，
+而这两样 HTTP+WS 传输本来就已经给到了。
+
+## v0.1.8 新特性
+
+**一张本回合改了什么的账本——以及一个撤销键，而不是一张许可单。**
+
+- **新增：每回合一张改动卡片。** Host 会记录每个顶层回合动过什么，并以 `workspace/changes`
+  Session 事件播报；卡片现在出现在对话流工具行里，数据来自一个普通的带鉴权
+  `GET /api/changes.summary`，用播报事件自己的 `seq` 寻址。
+
+  它和「按调用」的 review 卡片刻意用了不同的来源。review 是用文件工具自己的 `before`/`after`
+  拼的，所以只可能报告文件工具报告过的东西。回合记录是 Host 侧在回合开始与结束各对工作区做一次
+  git 快照、再在会改盘的调用前后留整份文件副本拼出来的——所以**也能覆盖 shell 命令里
+  `sed -i` 改掉的文件**，而且它是唯一描述「整个回合」而不是「其中某一次调用」的来源。
+- **新增：单文件回退，或整回合回退。** 每个文件行一个「回退此文件」，卡片上一个「全部回退」。
+  两者都只在**该回合产出的 review** 范围内生效，因为摘要只带路径与行数，不带还原所需的文本
+  ——只有 review 留着 `before`。如果某回合的改动全部来自 shell 命令，它会直说，而不是假装执行。
+- **新增：回合里任意文件的原生 diff**，以 VS Code 自己的 diff 编辑器打开。Host 只给 hunk、不给
+  整份文件文本，所以两侧都从 hunk 列表重建并保持逐行对齐，一行不属于某一侧就在那侧补空。点
+  卡片里的路径可在编辑器中打开该文件。
+- **变更：review 卡片不再征求许可。** 两个「接受」都已删除，两个拒绝按钮合并为一个「全部回退」，
+  每文件那两个 `✕`/`✓` 合并为一个「回退此文件」。原因见[设计一节](#设计写盘归-dsh插件只观察与告知)。
+- **修复：经原生 review provider 打开的每一个 diff 都是空白。**
+  `Uri.parse('dsh-review://review-1/foo/before').path` 是 `/foo/before`——层级 URI 会保留开头
+  的斜杠——而代码从 `path.split('/')[0]` 取 id，取到的是空字符串，store 查找永远不命中。
+
+门禁：回归测试现为 **295 项断言**（原 268）。新增的一组钉住两条路由、hunk 到两侧的对齐、
+URI authority 契约，以及卡片语义——每回合一张卡、重复播报是替换坐标而不是叠第二张卡、Host
+已不再提供的摘要解析为「没有卡片」而不是报错。真机集成仍为 **29/29**。
+
+完整差异见 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
 
 ## v0.1.7 新特性
 
@@ -211,6 +276,7 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 **Diff 审查、审批工作流 & 文件内容内联** —— 补齐与 Cursor/Cline 最大的体验差距：代码变更可以在 VS Code 内完成审查和审批，无需切换到 Web UI。
 
 - **Diff 审查与内联代码应用** —— Agent 写入或编辑文件时，侧边栏自动出现审查卡片，展示每个变更文件的 `+新增`/`-删除` 行数。点击 **Diff** 打开 VS Code 原生 diff 编辑器。支持逐文件 Accept（保留）/ Reject（通过 `git checkout` 安全回退），也可批量操作。
+  - **已在 v0.1.8 更正：** Accept 已经删除。改动落到磁盘是在 review 被建出来之前，所以「接受」除了暗示「此前一直在等它批准」之外什么也没做；剩下的按钮是「回退此文件」与「全部回退」。回退也不是 `git checkout`，而是把抓到的 `before` 写回去，并先校验文件没有漂移。详见上面的 v0.1.8 段与[设计一节](#设计写盘归-dsh插件只观察与告知)。
 - **审批工作流集成** —— `approval/requested` 事件现在以内联卡片形式展示，带 **Allow once** / **Deny** 按钮。不再需要切浏览器审批。安全允许列表限制哪些工具可以在 VS Code 内审批，高风险操作仍需 Web UI。
   - **已在 v0.1.4 更正：** 这里的"内联卡片"是靠 `callId` 匹配工具行画出来的，匹配不上就不显示；门槛用的是一份工具名允许列表，
     而本机宿主的 shell 工具叫 `pwsh`，白名单里没有它——所以每次真实升级都被拒。现在待答项走独立面板，
@@ -237,9 +303,9 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 - 向该会话发送纯文本提示。若无会话，自动创建。
 - 实时流式传输助手回复，支持 **Markdown 渲染**（代码块、列表、表格、链接）。
 - 将工具调用显示为**折叠卡片**，带语义化标题（`Read src/foo.ts`、`Search "pattern"`、`Run npm test`）。
-- **审查 Agent 代码变更** —— diff 卡片支持逐文件 Accept/Reject，原生 VS Code diff 编辑器，批量 Accept All / Reject All。
+- **看见 Agent 改了什么** —— 每回合一张改动卡片（包含被 shell 命令改掉的文件）、任意文件的 VS Code 原生 diff，以及撤销：单文件或整回合。文件工具的按调用 diff 卡片同理，并在原生 diff 里自带一个「回退此文件」的 CodeLens。这里没有任何一处征求批准——改动已经在盘上了，原因见[设计一节](#设计写盘归-dsh插件只观察与告知)。
 - **审批或拒绝 Agent 操作** —— 输入框上方的待答面板，带 Allow once / Deny 按钮（门槛看的是宿主给出的**理由**，不是工具名允许列表）。
-- **附加文件上下文** —— 在提示中使用 `@file:path` 或 `@file:path:L10-L20`，文件内容自动读取并内联。右键资源管理器或编辑器可快速插入。
+- **引用文件** —— 在提示中使用 `@<相对路径>`；提及按原样发出，由宿主用自己的文件系统工具解析。右键资源管理器或编辑器可快速插入。
 - 默认隐藏插件注入的系统消息；通过 `SYS` 按钮切换。
 - 停止当前回合。
 - 断线时重新打开流并重新获取历史记录。
@@ -287,7 +353,7 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
    或从 [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases) 安装 VSIX：
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.1.7.vsix
+   code --install-extension harness-connector-deepseek-0.1.8.vsix
    ```
 
 3. **不用配置任何东西。** 扩展会自动连接：它读取 `dsh web` 写在 `$DSH_HOME/.credentials.yaml` 里的浏览器会话签名密钥，自己签出同一个 `dsh-auth-…` cookie。**没有需要粘贴的 token。**
@@ -403,13 +469,16 @@ path"`、`@dir/`，可带 `:L<n>` / `:L<n>-L<m>` 后缀；从 `@` 补全列表�
 一个独立的 Node 脚本用真实客户端代码驱动一个**假**的 harness（不预设具体版本——插件是协商的，这个假实现也是）—— 不需要 `dsh web`：
 
 ```bash
-npm run protocol-test    # 268 项断言：双流传输拆分（$events 白名单 vs
+npm run protocol-test    # 295 项断言：双流传输拆分（$events 白名单 vs
                          # session/follow）、线缆协商（点分/斜杠、cookie 门禁、
                          # 事件套接字）、认证、cookie 派生、{args} payload、
                          # 审批与提问两条瀑布（Allow/Deny 的确切信封、cancel 撤卡、
                          # next 委托）、assistant 流、已移除端点的 404 处理、
                          # 控制面能力探测与全量值状态折叠、经真实控制器的
-                         # @ 补全状态契约、用可驱动 DOM 桩跑通的待答面板
+                         # @ 补全状态契约、用可驱动 DOM 桩跑通的待答面板、
+                         # 改动卡片的两条路由（普通带鉴权 GET、摘要已消失即
+                         # 「没有卡片」）、hunk 到两侧的逐行对齐、虚拟 URI 的
+                         # authority 契约、每回合一张卡的模型语义
 ```
 
 想让**真实**的 `dsh web` 自己报出它提供了什么（端点风格、事件套接字，以及
@@ -433,8 +502,8 @@ npm install
 npm run build        # esbuild → dist/extension.js
 npm run watch        # 变更时自动重建
 npm run typecheck
-npm run package      # → harness-connector-deepseek-0.1.7.vsix
-npm run protocol-test      # 针对假 harness 的 268 项协议断言
+npm run package      # → harness-connector-deepseek-0.1.8.vsix
+npm run protocol-test      # 针对假 harness 的 295 项协议断言
 npm run protocol-probe     # 报告真实 dsh web 暴露了什么
 ```
 
@@ -467,10 +536,13 @@ npm run protocol-probe     # 报告真实 dsh web 暴露了什么
 - 历史记录加载最近约 50 条消息；"加载更早"是未来版本的计划。
 - "Open Web UI" 中的会话深链接不做猜测——只打开 Harness 首页。
 - 未知的 harness 事件类型会被忽略（协议是可合并扩展的）；它们不会导致客户端崩溃，但也不会渲染。
-- Diff 审查的 Reject 使用 `git checkout` 回退——目标文件上未提交的本地修改会在 Reject 时丢失。
+- **一次回退是把抓到的 `before` 文本写回去——不走 `git checkout`。** 它还会先检查盘上的文件是否仍等于 review 建立时抓到的 `after`；如果文件此后动过，回退会被拒绝并把该文件标为冲突，而不是覆盖。正是这道闸让「不用问就能撤销」这件事是安全的，也是它能说「不」的原因。
+- **回合的改动卡片列出的是这个回合改了哪些文件，但其中只有文件工具自己的改动能从中撤销。** 撤销范围限定在该回合产出的 review 内，因为 Host 的摘要只带路径与行数，不带还原所需的文本。某个回合若只通过 shell 命令改了文件，它会直说。
+- 改动摘要在宿主上只活到 Session 结束，所以宿主重启后卡片可能解析为「没有改动可显示」。这会渲染成没有卡片，与 Web UI 一致。
 
-## 路线图（v0.1.8+）
+## 路线图（v0.1.9+）
 
+- **部分回退——hunk 级。** materializer 其实已经会回退单个 hunk（并且会在文件漂移时拒绝），但现在没有任何 UI 能触达它：今天的回退是每文件全有或全无。要恢复它，意味着在改动卡片和原生 diff 里提供逐 hunk 撤销，数据来自 Host 本来就提供的 hunk 列表，而不是它并不保留的整份文件文本。
 - 按条目下发状态增量：流式推送目前仍整份发送对话流（40 轮会话约 52 KB/次）。渲染端已不再重建它，但跨 `postMessage` 的结构化克隆仍是每个分块剩下的代价。
 - 检查器：过滤框 / 类型高亮 / 导出 JSONL
 - 搜索：限定工作区、分页、命中高亮

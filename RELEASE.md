@@ -1,8 +1,19 @@
 # Release Process
 
 This document describes how to cut and publish a release of
-**DeepSeek Harness Connector for VS Code**. v0.2.0 ships as a GitHub Release +
-VSIX asset; Marketplace publishing is optional and documented in step 5.
+**DeepSeek Harness Connector for VS Code**.
+
+**Prefer the tag.** Since v0.2.1 the whole flow runs in
+`.github/workflows/release.yml` — push a tag and CI verifies, packages, creates the
+GitHub Release, and (if a `VSCE_PAT` secret exists) publishes to the Marketplace:
+
+```bash
+git tag v<ver> && git push origin v<ver>
+```
+
+What follows is the same flow by hand, and the checklist the workflow encodes. Keep
+both in step: the manual path is what you use when CI is unavailable, and it is the
+only way to see what each check is actually doing.
 
 The repo lives at `git@github.com:YichuAI/deepseek-harness-vscode.git`. Pushing
 over HTTPS fails here (no credential helper), so the remote is SSH. A repo-local
@@ -35,13 +46,21 @@ Run **all** of these from the project root
 # 1.1 clean typecheck
 npm run typecheck          # → tsc --noEmit, exit 0
 
-# 1.2 build the bundle
+# 1.2 every version surface must agree with package.json
+npm run check-versions     # → all checks pass; add --online to include the
+                           #   published Release and the Marketplace listing
+                           #   (needs network), --release at tag time
+
+# 1.3 build the bundle
 npm run build              # → dist/extension.js
 
-# 1.3 protocol test (fake harness — no dsh web needed)
-npm run protocol-test      # → all 312 assertions ✓
+# 1.4 protocol test (fake harness — no dsh web needed)
+npm run protocol-test      # → all 342 assertions ✓
 
-# 1.4 integration test (writes a session — needs a host running)
+# 1.5 end-to-end chains (real filesystem; reports its own coverage)
+npm run e2e-test           # → every written chain passes, coverage reported
+
+# 1.6 integration test (writes a session — needs a host running)
 #     start one in another terminal:
 #       cd ../deepseek-harness && npm run dsh -- web          (fixed port 3080)
 #     the desktop app works too, but it starts its host with `--port 0`, so the
@@ -50,28 +69,36 @@ npm run protocol-test      # → all 312 assertions ✓
 #       DSH_PORT=3081 npm run integration-test
 npm run integration-test   # → 39/39 checks ✓, closed loop OK
 
-# 1.6 package the VSIX
+# 1.7 package the VSIX
 npm run package            # → harness-connector-deepseek-<ver>.vsix
 ```
 
 Manual checks:
 
-- [ ] `package.json` `version` matches the intended tag.
+- [ ] `package.json` `version` matches the intended tag. `npm run check-versions`
+      asserts this together with every other surface — do not eyeball it.
 - [ ] `CHANGELOG.md` has an entry for this version under `## [<version>] — <date>`.
 - [ ] Docs are **bilingual**: every edit to `README.md` / `CHANGELOG.md` /
       `ARCHITECTURE.md` / `RELEASE.md` has been mirrored into its `*.zh-CN.md`
       twin. This is a standing rule, not a per-release judgement call.
 - [ ] `CHANGELOG.md` and `ARCHITECTURE.md` still quote the **current** assertion
       count from `npm run protocol-test` (it has grown 50 → 64 → 98 → 83 → 156 →
-      178 → 180 → 190 → 211 → 231 → 243 → 268 → 295 → 312 as the rc.2 rewrite replaced the rc.6 fake harness and
-      the waterfall/pending-panel groups landed; stale counts are the most common
-      doc drift here).
+      178 → 180 → 190 → 211 → 231 → 243 → 268 → 295 → 312 → 342 as the rc.2
+      rewrite replaced the rc.6 fake harness and the waterfall/pending-panel
+      groups landed; stale counts are the most common doc drift here — and since
+      v0.2.1 `check-versions` fails the build on it rather than leaving it to
+      this line).
+- [ ] `README.md`'s newest "What's new" heading is this version, and the README
+      keeps **exactly one** release's notes. History goes in the CHANGELOG.
 - [ ] `LICENSE` present (MIT).
 - [ ] The expected VSIX size in step 2 was measured **after** the last edit to a
       shipped doc. `README.md` / `CHANGELOG.md` / `ARCHITECTURE.md` and their
       `*.zh-CN.md` twins live *inside* the VSIX, so editing one after packaging
       invalidates the number — re-package and re-measure, never adjust by eye.
-      (This is how v0.2.0's baseline ended up 856 bytes short.)
+      (This is how v0.2.0's baseline ended up 856 bytes short. `RELEASE.md`
+      itself is *not* shipped, which is why the number can be written here
+      afterwards.)
+
 - [ ] No secrets / API keys / real prompt content in `test/fixtures/`
       (fixtures must use `<redacted:...>` placeholders).
 - [ ] `.vscodeignore` excludes `src/`, `scripts/`, `test/`, configs **and
@@ -88,7 +115,7 @@ Manual checks:
 unzip -l harness-connector-deepseek-<ver>.vsix
 ```
 
-Expected (v0.2.0 = 14 files, 312,853 bytes, ~305 KB):
+Expected (v0.2.1 = 14 files, 312,745 bytes, ~305 KB):
 
 ```
 [Content_Types].xml
@@ -229,6 +256,25 @@ tag remains. Communicate the rollback in the release notes.
 
 ---
 
+## 8. CI
+
+Three workflows live in `.github/workflows/`:
+
+| Workflow | Trigger | What it does |
+| --- | --- | --- |
+| `ci.yml` | every branch push, every PR | typecheck · `check-versions` · `protocol-test` · build · package · assert the VSIX holds exactly the 14 expected files and no sources |
+| `e2e.yml` | push to `main`, PR | the same gate on `ubuntu-latest`, `windows-latest`, `macos-latest` — the protocol test parses three OS listener-table dialects, so the matrix earns its cost on its own — plus `npm run e2e-test` |
+| `release.yml` | a `v*` tag | `check-versions --release` (the tag must exist *and* point at HEAD) · tests · build · package · read the version back **out of** the VSIX · create the GitHub Release with the matching CHANGELOG section · publish to the Marketplace if `VSCE_PAT` is set |
+
+`ci.yml` needs `fetch-depth: 0`: `check-versions` compares against the newest reachable
+tag, and a shallow clone has none.
+
+Marketplace publishing is opt-in through a repository secret. Without `VSCE_PAT` that
+step reports a notice and the release still completes — the GitHub Release is the
+artifact of record either way.
+
+---
+
 ## Appendix — versioning policy
 
 - `0.0.x` — features ship as patches while the protocol keeps moving; the wire
@@ -245,10 +291,14 @@ tag remains. Communicate the rollback in the release notes.
   safe while the number has neither a release nor a Marketplace publish behind it; once a
   user can install it, the number is frozen and the fix becomes the next version.
 - Release notes live **inside** the VSIX: `README.md`/`CHANGELOG.md` ship through vsce as
-  `readme.md`/`changelog.md`, and the `*.zh-CN.md` twins ship verbatim. So the 312,853-byte
-  baseline belongs to the tree at `581ba27`; the 0.1.8 note added afterwards makes a fresh
-  build of the same sources slightly larger. Expected, not a regression — re-measure at the
-  next release rather than carrying the old figure forward.
+  `readme.md`/`changelog.md`, and the `*.zh-CN.md` twins ship verbatim. So every baseline
+  below belongs to one particular tree, and editing a shipped doc afterwards invalidates it.
+  Re-measure; do not carry the old figure forward.
+  (`v0.2.1` = 312,745 bytes; `v0.2.0` = 312,853 at `581ba27`; `v0.1.9` = 309,620;
+  `v0.1.7` = 288,750. v0.2.1 is 108 bytes *smaller* than its predecessor: the
+  READMEs lost the historical release notes and the CHANGELOG gained them, which
+  happened to net out slightly negative. A shrunken file is not itself a problem
+  — a baseline nobody re-measured is.)
 
 ## Appendix — SSH setup on this machine
 

@@ -12,6 +12,7 @@ import type { ControlState } from '../conversation/control.ts'
 import type { SessionUsageState } from '../conversation/usage.ts'
 import type { ReviewSummary } from '../review/types.ts'
 import type { ApprovalSummary, QuestionSummary } from '../approval/types.ts'
+import type { ConnectionHint } from './diagnosis.ts'
 
 /** One raw frame captured for the live event inspector (F7). */
 export interface InspectorFrame {
@@ -63,6 +64,15 @@ export interface UiState {
    *  are best-effort (the removed `host.describe` used to supply them). */
   hostInfo?: { version?: string; home?: string; provider?: string; model?: string }
   errorMessage?: string
+  /**
+   * Why the connection is not up, classified.
+   *
+   * `errorMessage` is the transport's own wording and is kept verbatim for the
+   * log; this is the same failure translated into "here is what to do". Only
+   * set while `connection !== 'connected'`, and cleared on success so a stale
+   * diagnosis never outlives the problem it described.
+   */
+  connectionHint?: ConnectionHint
   muxStatus?: string
   /** Workspace:
    *   undefined → not resolved yet

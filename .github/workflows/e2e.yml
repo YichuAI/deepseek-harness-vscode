@@ -1,0 +1,65 @@
+name: E2E
+
+# Cross-platform matrix.
+#
+# The five chains in `test/e2e/` are mostly not written yet (see the job summary),
+# but two real things run here today and they are worth the matrix on their own:
+#
+#   • the protocol test parses the OS listener table to find a Host, and it has
+#     three dialects — `netstat -ano` on Windows, `lsof -nP -iTCP -sTCP:LISTEN`
+#     on macOS, `/proc/net/tcp` on Linux. Running it on all three is the only
+#     way those parsers are ever exercised against their real target.
+#   • `check-versions` reads the repository's line endings and file layout, which
+#     is exactly the sort of thing that works on one platform and not another.
+#
+# `@vscode/test-electron` for the Extension Host chains is deliberately not wired
+# in yet: a suite that downloads VS Code on three platforms and asserts nothing
+# would be worse than no suite.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  matrix:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Version surfaces agree
+        run: npm run check-versions
+
+      - name: Protocol test (listener-table dialects, line endings, paths)
+        run: npm run protocol-test
+
+      - name: End-to-end chains
+        run: npm run e2e-test
+
+      - name: Build
+        run: npm run build

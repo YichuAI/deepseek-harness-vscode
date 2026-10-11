@@ -1,9 +1,11 @@
-# DeepSeek Harness Connector for VS Code (v0.2.0)
+# DeepSeek Harness Connector for VS Code
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-[![VS Code Marketplace](https://img.shields.io/badge/VS%20Code-Marketplace-blue.svg)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
-[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.2.0)
+[![VS Code Marketplace](https://img.shields.io/vs-marketplace/v/lucasliang.harness-connector-deepseek)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
+[![安装量](https://img.shields.io/vs-marketplace/i/lucasliang.harness-connector-deepseek)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
+[![最新版本](https://img.shields.io/github/v/release/YichuAI/deepseek-harness-vscode)](https://github.com/YichuAI/deepseek-harness-vscode/releases)
+[![许可证](https://img.shields.io/github/license/YichuAI/deepseek-harness-vscode)](./LICENSE)
 
 > DeepSeek Harness 的原生 VS Code 客户端。
 >
@@ -24,6 +26,16 @@ VS Code ─────┘
 ```
 
 VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**会话——所以浏览器刷新该会话时能看到 VS Code 发送的内容。
+
+## 它能做什么
+
+- **接着你已经有的会话用。** 工作区与会话都是从运行中的 Host 读来的，不导入、不镜像、不分叉。
+- **对话就在侧边栏里**，工具行、审批、提问、附件、改动卡片都画在产生它的那一段对话流里。
+- **在 VS Code 里就能答审批与提问。** 两条瀑布都由插件结算，你不必为了解开一次运行而一直开着浏览器标签。
+- **报告每个回合改了什么，并且能撤销。** 数据来自 Host 自己的回合记录——所以 shell 命令改掉的文件也包含在内，不只是文件工具报告过的那些。
+- **凡是代码相关的，都交给 VS Code 自己的编辑器。** diff 就是真正的 diff 编辑器，路径点击就打开文件。不在 webview 里重新实现一套查看器。
+- **自己找到 Host**，包括桌面端那种每次启动都换一个系统分配端口的 Host。
+- **不替你启动任何进程。** 扩展不 spawn `dsh web`，只附着到你已经在跑的那个。
 
 ## 设计：写盘归 DSH，插件只观察与告知
 
@@ -60,285 +72,49 @@ diff 在这儿、撤销在这儿。这跟两个人在同一个仓库里的关系
 JSON-RPC 服务，既不带 elicitation，也不带 DSH 的展示卡片——那会丢掉审批/提问瀑布和改动记录，
 而这两样 HTTP+WS 传输本来就已经给到了。
 
-## v0.2.0 新特性
+## 凭据：这个扩展能读到什么
 
-**两个只有用起来才会冒出来的 bug。**
+**装之前请先读这一节。** 「零配置连接」是有代价的，代价是一项真实的权限；它应该是被写明的
+限制，而不是一个藏在连接说明底下的副作用。
 
-- **修复：输入框下面的引用芯片把提示词一起吞了。** webview 里那份 `@` 语法副本是一个普通字符串，交给 `new RegExp` 使用——而字符串字面量会在 `RegExp` 看到它之前先吃掉反斜杠：`'[^\s"]'` 到手时已是 `'[^s"]'`，一个能匹配空格、换行、以及后面那些 `@` 的字符类。所以先写 `@readmefor_human.md 这里多了文字`、下一行再写 `@RELEASE.md`，只会得到**一个**芯片，内容包含这全部；`:L10-L20` 的行号范围也彻底失效。现在它是正则字面量——它旁边两行的 `/\\s/` 一直就是这么写的。
-- **修复：已经答完的提问（或已经批准的审批）会一直留在屏幕上。** mux 客户端**永远不会**收到 `question/resolved` / `approval/resolved`，只有撤回用的 `cancel`，所以那张卡就一直停在输入框上面显示「Answering…」，按钮全死、也没有东西放它走。现在那个 POST 本身就是结算；POST 失败则把卡片退回去。
+`dsh web` 会把一个持久化签名密钥放在 `$DSH_HOME/.credentials.yaml`
+（`client-connection/browser-session`）。浏览器会话 cookie 是对
+`{version, authority, issuedAt, expiresAt}` 的 HMAC，密钥就是这个。cookie 本身不包含
+launch token 的任何痕迹，而这个密钥只生成一次、之后每个 `dsh web` 进程复用。所以任何能读到
+该文件的东西都能签出**字节级相同**的 cookie。扩展就是自己读它、自己签，这就是为什么没有需要
+粘贴的东西。
 
-门禁：**312 项断言**（原 295），新增的驱动的是编译产物里的 webview 脚本与真实控制器——包括「POST 失败」那条顺利路径测不到的支线。真机集成仍为 **39/39**。
+**而那个文件里同时存着你的模型 API key。** 由此可以推出：
 
-完整差异见 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
+- 能读它，就**等价于**能完全控制这个 harness home。这不是提权，也没有绕过一道「防你自己」的
+  边界——但它确实意味着扩展进程能看到与这个 VS Code 客户端毫无关系的密钥。
+- 它确实绕过了那个每进程 launch token 闸门。那个闸门防的是**远程调用者**（DNS rebinding、
+  CSRF），不是防已经以你的身份运行在本机上的代码。
+- **任何凭据内容都不会进日志、不会发给 webview、不会出现在诊断报告里。** 日志只记录「发生过
+  一次签发」，从不记录材料本身。cookie 存在 VS Code 的 secret storage（系统钥匙串）里，
+  **不会**写进 `settings.json`。`DeepSeek Harness: Diagnostics` 导出的是一份脱敏报告，你可以
+  先完整读一遍再决定发不发出去。
+- 把 `deepseekHarness.autoSession` 设为 `false` 就完全拒绝自签。那是安全开关，不是便利开关：
+  关掉之后扩展就是没有鉴权状态。
 
-## v0.1.9 新特性
+**这是一个权宜之计，我们更希望它没必要存在。** 官方路径是拿每个进程一次性生成的 launch token
+去换——但那个 token **不落盘**，所以官方文档要求你手动从终端复制，而且每次 `dsh web` 重启都会
+换一个。一个正式的本地客户端授权流程才是正解：一个 socket，或者一个 `0600` 权限、只对单个
+客户端有效的一次性 token 文件，就能让编辑器连上来而完全不必把原始签名密钥交给它。在 Harness
+提供这些之前，读那个文件是唯一能保住「零配置」的路径；而**被写明的限制，好过沉默的特权**。
 
-**一张本回合改了什么的账本——以及一个撤销键，而不是一张许可单。**
+## v0.2.1 新特性
 
-- **新增：每回合一张改动卡片。** Host 会记录每个顶层回合动过什么，并以 `workspace/changes`
-  Session 事件播报；卡片现在出现在对话流工具行里，数据来自一个普通的带鉴权
-  `GET /api/changes.summary`，用播报事件自己的 `seq` 寻址。
+**版本号再也没法各自跑偏，撤销也再没机会吃掉你的改动。**
 
-  它和「按调用」的 review 卡片刻意用了不同的来源。review 是用文件工具自己的 `before`/`after`
-  拼的，所以只可能报告文件工具报告过的东西。回合记录是 Host 侧在回合开始与结束各对工作区做一次
-  git 快照、再在会改盘的调用前后留整份文件副本拼出来的——所以**也能覆盖 shell 命令里
-  `sed -i` 改掉的文件**，而且它是唯一描述「整个回合」而不是「其中某一次调用」的来源。
-- **新增：单文件回退，或整回合回退。** 每个文件行一个「回退此文件」，卡片上一个「全部回退」。
-  两者都只在**该回合产出的 review** 范围内生效，因为摘要只带路径与行数，不带还原所需的文本
-  ——只有 review 留着 `before`。如果某回合的改动全部来自 shell 命令，它会直说，而不是假装执行。
-- **新增：回合里任意文件的原生 diff**，以 VS Code 自己的 diff 编辑器打开。Host 只给 hunk、不给
-  整份文件文本，所以两侧都从 hunk 列表重建并保持逐行对齐，一行不属于某一侧就在那侧补空。点
-  卡片里的路径可在编辑器中打开该文件。
-- **变更：review 卡片不再征求许可。** 两个「接受」都已删除，两个拒绝按钮合并为一个「全部回退」，
-  每文件那两个 `✕`/`✓` 合并为一个「回退此文件」。原因见[设计一节](#设计写盘归-dsh插件只观察与告知)。
-- **修复：经原生 review provider 打开的每一个 diff 都是空白。**
-  `Uri.parse('dsh-review://review-1/foo/before').path` 是 `/foo/before`——层级 URI 会保留开头
-  的斜杠——而代码从 `path.split('/')[0]` 取 id，取到的是空字符串，store 查找永远不命中。
+- **每一个版本展示面现在是被检查的，而不是靠记性。** 同一个扩展曾经在四个地方显示四个不同的版本——Marketplace 列表、`package.json`、最新的 Release，以及 README 里一条还活着的旧 `v0.0.3` 标题。这些都不是代码缺陷，它们是各自手写的字符串，彼此从没被比对过。现在 `npm run check-versions` 会把所有这些面——包括文档里自称的断言条数——统一对着 `package.json` 比对，任何不一致直接让构建失败。README 的徽章换成了 shields 的实时端点而不是写死的数字，发布历史也从 README 搬进了 CHANGELOG——它本来就该在那儿。
+- **凭据这件事搬到了 README 最前面。** 见上一节：扩展会读一个同时存着你 API key 的文件，这一点现在是明说的，而不是埋在连接步骤里的第 3 条。
+- **回退会拒绝，而不是覆盖。** 撤销此前已经会检查盘上文件是否还等于 review 那一刻抓到的内容；它没做好的是**拒绝时有没有把话说清楚**。现在部分回退会报告它实际还原了几个文件，而那之后又被动过的文件会在卡片上被标为冲突并给出查看 diff 的入口，而不是弹一个转身就消失的提示。
+- **新增 Diagnostics 命令。** 运行时版本、扩展版本、连接状态、协商出来的能力、最近一次错误，全在一份可以脱敏导出的文档里。
 
-门禁：回归测试现为 **295 项断言**（原 268）。新增的一组钉住两条路由、hunk 到两侧的对齐、
-URI authority 契约，以及卡片语义——每回合一张卡、重复播报是替换坐标而不是叠第二张卡、Host
-已不再提供的摘要解析为「没有卡片」而不是报错。真机集成现为 **39/39**（原 29）：新增的十条断言
-让一个真实回合跑过真实模型，所以「播报→路由」的交接、按索引寻址某个文件、hunk 的前缀、
-以及每个 hunk 头与它自己正文的一致性，都是对着活的 Host 量出来的，不是对着夹具。
+门禁：**342 项断言**（原 312）——新增的那些钉住了失败分类器、脱敏规则，以及「被拒绝的回退会留下原因」这件事。此外还有第一条真正跑起来的端到端链路：**15 项断言**驱动 `ReviewMaterializer` 对着一个真实的临时目录跑，其中就包含这个版本要处理的那种情况——文件在回合之后被改过，所以回退必须拒绝，而改动必须活下来。
 
-完整差异见 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
-
-> **关于版本号。** 一份改动，三个名字：先切成 **v0.1.8**，再改切为 **v0.2.0**，回退之后以
-> **v0.1.9** 发布。`v0.1.8` 有标签（`806ce47`）但没有对应的 Release——那个名字下没有产物。
-
-## v0.1.7 新特性
-
-**对话越长，每个流式分块越便宜。**
-
-- **修复：webview 每个流式分块都会把整条对话流重画一遍。** `renderVersion` 每来一个分块就
-  变，而 webview 把「变了」当作「把 `#messages` 拆了重来」——顺带把每一条助手消息重新过
-  一遍 markdown-it。于是一个分块的代价正比于会话长度，这才是「聊得越久越卡」的真实机制。
-  在一条 40 轮的对话上实测，每 40 个字符新文本：
-
-  | | 修复前 | 修复后 |
-  |---|---|---|
-  | 新建 DOM 节点 | 291 | **4** |
-  | markdown 解析次数 | 约 42 | **1** |
-  | 重解析的 markdown 字节 | 43 KB | **1.4 KB** |
-
-  每个条目现在带 `uid`（它的 DOM key——流式增量更新、工具行拿到结果时都不变）和 `rev`
-  （它自己的变更签名，每次被改都加盖）。webview 按这两个字段做调和，所以一个分块只重画
-  一行，其余每一行都保留原有节点——以及已经解析好的 markdown。`uid` 取自进程级计数器，
-  所以为同一会话重建的模型（重连、fork、切换）不会发出一个 webview 手里已有节点的 id。
-- **修复：回合已结束后到达的增量会多出一个重复气泡。** 实时助手流与持久日志之间没有顺序
-  保证，所以一个分块可能落在 `turn/end` 之后——或者落在它所重复的那条权威
-  `assistant/message` 之后。它找不到流式占位符，就从空重建缓冲区，在已完成的答案下面再
-  追加一个助手气泡。现在，属于已结束回合、或已定稿步骤的增量会被直接丢弃。
-- **修复：一次流式 flush 会按帧数重复投影模型。** `applyMuxFrame()` 在逐帧循环里构建完整
-  快照，而一次 flush 装着一整轮的增量。现在整批只投影一次，与这批本来就只有一次的推送对齐。
-- **修复：会话 `<select>` 每次状态推送都重建**——也就是每个流式分块都重建——会在用户正在
-  操作时把选择丢掉，只为了重画一份完全一样的列表。现在加了签名守卫。
-
-门禁：回归测试现为 **268 项断言**（原 243），新增两组：一组在模型层钉住流式身份契约与
-「不产生僵尸气泡」的规则；另一组直接驱动真实 webview 脚本，断言「`renderVersion` 变了但
-条目没变」的推送**不建任何 DOM、不解析任何 markdown**，而一个流式分块只重画一行。真机
-集成仍为 **29/29**。
-
-完整差异见 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
-
-## v0.1.6 新特性
-
-**问一句、答一句，不再把整条对话流重画两遍。**
-
-- **修复：一次审批/提问事件会把对话流重建两遍。** 一个审批或 `ask_user_question` 会推送
-  两次完整状态——`ApprovalStore` 自己的变更监听器一次，刚改完 store 的调用方再一次——
-  而每一次被接受的状态推送都会让 webview 把 `#messages` 拆掉、逐条重建（连带 markdown
-  重新解析）。两次落在同一个 tick 里，中间没有绘制的机会。在一条 72 条记录的会话上实测：
-  每个事件 **2 次推送 / 约 70 KB / 2 次完整重建**，一次作答往返合计 **6 次推送 / 约 212 KB
-  / 6 次重建**。另外两个同伙也一并收掉：`pushReviewApprovalState()` 无条件 `model.touch()`
-  （审批和提问**根本不在对话流里画**，`renderTool` 里写明了），以及 `session/follow` 批处理
-  回调即使批里什么都没变也照推。现在：**每个事件 1 次推送、0 次重建**。
-- **修复：检查器的事件环形缓冲区搭上了每一次状态推送**，开着关着都搭。最多 300 帧 × 2 KB
-  ≈ 600 KB 的结构化克隆，而推送在流式输出里是逐块触发的——实测**单次推送 1,318,580 字节**，
-  而且没人读。现在只有面板在屏幕上才发布（打开的那一刻一次性补全历史）：**1.29 MB → 35 KB**。
-- **修复：检查器列表无限膨胀。** 它每次变化都把整个数组 append 一遍，而缓冲区是环形的、头
-  部会移动——于是每来一帧就多堆一份全部行（300、600、900…）。改为整体重建，上限 300 行。
-- **修复：把提问交回 Web UI 成功时反而报错。** 一次成功的交接弹的是红色错误提示。
-- **移除 `ToolItem.approvalRpcId`** 及其写入方 `setApprovalRpcId()`——写的人没有、读的人也没有，
-  而它带的 `renderVersion` 自增会在每次审批时逼出第二次对话流重建。
-
-完整差异见 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
-
-## v0.1.5 新特性
-
-**Host 换了端口、或者被重启之后，不用再重载 VS Code 了。**
-
-- **Reconnect 按钮常驻**（状态行一个，面板标题一个）。点它总是把旧连接拆干净、重新协商
-  一次——这才是重点，因为最需要它的场景恰恰是**面板还显示着 Connected** 的那种：Host 被
-  重启了，我们握着的 socket 其实已经死了，而没有任何东西告诉过我们。普通的 `connect()`
-  会在那个过期的状态上直接早退，这正是过去"只能重载窗口"的原因。连接请求是串行化的，
-  连点两下是排队，不会两个协商互相拆台。
-- **Host 自动发现。** 配置的端口没人应答时，先读 `$DSH_HOME/profiles/<name>/cordis.patch.yml`
-  里钉过的 `webserver.port`，再枚举操作系统的 loopback 监听表，用 Host **自己的匿名拒绝
-  文本**逐个确认（`401` + `dsh web authentication required; reopen the URL printed by dsh web.`
-  ——这句话来自 connection carrier 而不是 web 前端，所以哪个入口启动的 Host 都会这么说）。
-  这正是**桌面端**需要的：它用 `--port 0` 启动 Host，端口由系统每次重新分配，只通过
-  Node IPC 报给 Electron。本机实测：46 个 loopback 监听，命中恰好一个，并正确归因到
-  `desktop` profile 里钉的端口。发现的端口只在本次会话内使用，**不写回设置**——它每次
-  启动都会变，写进去只会留下一个下次必然过期的钉子。
-- **修好了「强制重连之后，你正在看的那个会话会丢」。** `disconnect()` 拆掉了
-  `session/follow` 订阅，却把 `activeSessionId` 留着，于是对话还停在屏幕上、背后已经没有
-  任何东西在喂它。现在重连会重新选中同一个会话（重建 model、重新订阅、重拉历史，也就是
-  文档里写的**重建**而不是游标续传），只有当 Host 上确实没有这个会话时才退回最新的那个。
-- **修好了「每次切换会话泄漏一个 `session/follow` 订阅」。** 它们被丢进一个 disposable 袋
-  里再也没被释放；而重连现在每次都会重新选中会话，泄漏只会加速。
-- **修好了「明明没发 cookie，却报签名密钥被轮换」。** `authRequired()` 无条件记录了一次
-  拒绝，于是"压根没有会话"（`autoSession` 关了，或者 `$DSH_HOME/.credentials.yaml` 还不
-  存在）被描述成"运行中的 Host 拒绝了我们存储的 cookie——它的签名密钥几乎肯定被重新生成
-  了"。这会让人去查错误的东西。
-
-完整 diff 见 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
-
-## v0.1.4 新特性
-
-**审批和 Agent 提问现在都能在侧边栏里回答了 —— 而且点"允许"真的等于允许。**
-
-这次的起因只有一句话：*"云端提问题的时候无法在 vscode 里审批。"* 而把它修好，靠的是先把一条
-契约钉死：**`POST /api/$events/result` 上的 `outcome.value` 就是宿主瀑布的返回值。**
-下面五条修复里有三条，其实是同一个事实的三个侧面。
-
-- **修好了 Agent 提问（`user-questions/request`）在 VS Code 里完全没有出口。** 客户端一直把它
-  正确翻译成 `question/requested`，然后控制器把这一帧丢在地上：既不渲染，也无法回答。
-  后果比"少一张卡片"严重——宿主侧 `ask_user_question` **阻塞**着那次工具调用，
-  没人回答，这一轮就停在那里。现在它和审批共用同一个待答面板。
-  - 单问题单选：点选项即作答（与 Web UI 的选项卡片一致）；多问题或复选：显式点 **Answer**
-    一次提交整批，未作答的会就地报错，而不是把一批空答案发上去。
-  - 自由文本始终可用，走 `custom` 字段（不是 `selected`）。
-- **修好了"点'允许'从来没有允许过任何东西"。** 审批的应答体发的是 `{ kind: 'result' }`，
-  **没有 `value`**。但 `value` 就是宿主瀑布的返回值，省略它等于用 `undefined` 结算；
-  而 `ApprovalService.decide` 会把一切不在词表内的返回值（包括 `undefined`）归一化成
-  `'unavailable'` —— 一次**静默的 fail-closed 拒绝**，而且照常写一条看起来完全正常的
-  `approval/decided` 审计。真机实测：裸形状 → `outcome: "unavailable"`，工具报
-  *"requires approval, but no approval channel is available"*；带值形状 →
-  `outcome: "allowed-once"`，命令真的执行了。
-- **修好了"点'拒绝'也被记成'没有可用的审批通道'"。** 原来把拒绝编码成
-  `{ kind: 'rejected', error: … }`，那会**取消**宿主瀑布，`decide` 里的 containment
-  再把它归一化成 `'unavailable'`。拒绝是一个携带词表字符串的 **result**，不是传输层错误。
-- **修好了"在 Web UI 里回答过之后，VS Code 的卡片永远点得动"。** 对 mux 客户端，宿主
-  **只**用一个 `cancel` 帧表示撤销（0.2.1 不转发 `approval/resolved` / `question/resolved`），
-  而旧代码只把它记进日志。现在 `cancel` 会被翻译成 `waterfall/resolved` 并撤掉对应卡片。
-- **修好了"审批卡只在能匹配到工具行时才画得出来"。** 它原来嵌在 ToolItem 里，靠 `callId`
-  匹配；没有匹配行（会话没在前台、工具行还没折进来）就等于不存在。现在待答项有自己的面板，
-  位于输入框上方——正是你准备打字时会看的地方。
-- **改了：审批的放行门槛改成看"理由"，不再看工具名。** 原来的白名单是
-  `write/edit/read/grep/…`——它列的这些名字本机宿主根本没有（shell 工具叫 `pwsh`），
-  于是**每一次真实的 shell 升级都会被拒**，而这条路径恰好最常见。名字本来也说明不了
-  申请有多大权限，理由才说明（*"escalate sandbox to danger-full-access: …"* 是宿主自己
-  写的风险陈述），而且理由现在会**原样显示**在按钮旁边。现在只在理由声明了
-  full/unrestricted access 时不给内联允许；那张卡仍会显示、仍可拒绝、并多一个
-  **Answer in Web UI** 把它交回浏览器。被拒绝的按钮不再没有解释——`blockedBy` 会说明原因。
-- **新增 `delegateWaterfall`** —— 把仍开着的瀑布交回宿主链（`outcome: {kind:'next'}`）。
-  这是真正的委托而不是忽略：我们放弃自己的 delivery，请求继续留给 Web UI；
-  只有当没有别的 delivery 时，宿主才会用 `next()` 结算。
-- 面板不再把"已解决"的请求画出来。
-
-验证：回归门 **190 → 211 项**全绿（新增 G2 组，覆盖面板渲染、Allow/Deny 各自发出的**确切**载荷、
-高危卡不给 Allow 但给交回、单选点击即答（按**标签**而不是下标）、多问题必须显式提交、
-空答案被就地拦下、自由文本走 `custom`、已解决项离开面板）；真机集成 **21 → 25 项**全绿，
-其中两条为新链路实测：宿主把 `user-questions/request` 交付给 mux 客户端且答案回到了被阻塞的
-工具调用；宿主交付 `approval/request` 且"允许"**真的授予了**越界升级（命令执行成功）。
-
-完整 diff 见 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
-
-## v0.1.3 新特性
-
-**回话终于能收到了，图片终于能发了，`@` 引用改用宿主自己的语法。**
-
-> 中文版 README 的"新特性"长期停在 v0.0.3；0.0.9 ~ 0.1.2 的完整记录见英文版
-> [README.md](./README.md) 与 [CHANGELOG.md](./CHANGELOG.md)，本段只记 0.1.3 与 0.1.4。
-
-- **修好了"能连上但收不到回话"。** 插件一直把传输层建模成"一条 `$events` 承载所有帧"。
-  真机（`0.2.1-alpha.2`）上 `$events` 是一份固定的转发白名单：它会发一个 `ready`
-  （所以面板老老实实显示 Connected），然后**一条对话流量都没有**。对话在**另一条**逻辑流
-  `session/follow` 上（`snapshot` → `event` → 实时 `assistant-stream`）。两条流现在各开一条，
-  各按自己的词汇表翻译。
-- **图片支持：粘贴、拖拽、选文件都行。** 剪贴板里的图、拖进输入区、或走
-  `DeepSeek Harness: Attach File to Session` 命令，都会变成输入框上方的一个待发 chip（带本地缩略图），
-  发送时作为内联图片部件走 `session/prompt`。只发图片、不发文字可以；一次发多张也可以。
-  （chip 是**暂存**区，没点发送之前什么都不会发出去。）
-- **非图片文件现在真的能送到 agent 手里。** 旧版本把字节往 `session/attachment` 上怼，
-  但那根本不是上传接口——它是"按 id 读附件"。真正上传走
-  `POST /api/session/uploadFileBinary`（原始字节），prompt 里用返回的 receipt 引用。
-  一个必须说清的限制：receipt 同时绑定会话**和** `dsh web` 进程，宿主重启即失效。
-- **`@` 引用不再粘贴文件正文。** 原来的 `@file:path` + `readFileSync` 内联是插件自己发明的。
-  现在支持 `@path`、`@"含空格的 path"`、`@dir/`，可带 `:L<n>` / `:L<n>-L<m>`，
-  补全走宿主自己的 `fileReferences/list`。选中候选**不附任何东西**，文件由 agent 自己去读。
-  （除了对齐宿主，内联还有个实际代价：它每轮都改动提示前缀，等于每次发送都作废 KV cache。）
-- **修好了"历史永远是空的"——而且更糟：每次重连都会把对话擦掉。** `session/page` 原先写死
-  `throughSeq: 0`，但那是个**日志游标**，不是条数。游标只在 `session/follow` 的开场帧里发布，
-  现在客户端从那里学。空页原先会被当成事实折进模型，于是每次 socket 重连都清空一次记录。
-  现在空页不再清屏。
-- **自动连接失败时有 `Connect` 按钮可点了。** 自动连接是尽力而为，本机实测在宿主一切正常的情况下
-  `auth` 也可能返回未就绪——那时面板"没得点、也没得读"。现在状态行会显示
-  `Connect` / `Retry` / `Connecting…`，并且**只在未连接时**在面板标题栏显示一个插头图标。
-  （v0.1.5 把这个门禁换成了**常驻的 Reconnect 按钮**——连接已经死掉、面板却还写着
-  Connected 的那种情况，恰恰是旧门禁把它藏起来的时候。）
-- **移除 `DeepSeek Harness: Set Session Token from Launch URL`。** 从 `$DSH_HOME/.credentials.yaml`
-  本地自签已经是实际唯一可用路径；一个每次 `dsh web` 重启都换的 token 只剩维护成本。
-- **修掉一处误诊。** "没有这个方法"（HTTP 404）和"这个 workspace 不存在"
-  （200 + `workspace/not-found`）曾被混为一谈，于是普通业务错误会劝你去**升级宿主**。
-- **修掉一个让每次调用都变慢的参数形状重试。** 记住的正确形状原先被排在**最后**试，
-  于是每次调用先白烧两次失败往返，wire 形状还会因宿主宽容度而漂移。现在记住的形状优先。
-
-完整 diff 见 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
-
-## v0.0.3 新特性
-
-**Diff 审查、审批工作流 & 文件内容内联** —— 补齐与 Cursor/Cline 最大的体验差距：代码变更可以在 VS Code 内完成审查和审批，无需切换到 Web UI。
-
-- **Diff 审查与内联代码应用** —— Agent 写入或编辑文件时，侧边栏自动出现审查卡片，展示每个变更文件的 `+新增`/`-删除` 行数。点击 **Diff** 打开 VS Code 原生 diff 编辑器。支持逐文件 Accept（保留）/ Reject（通过 `git checkout` 安全回退），也可批量操作。
-  - **已在 v0.1.9 更正：** Accept 已经删除。改动落到磁盘是在 review 被建出来之前，所以「接受」除了暗示「此前一直在等它批准」之外什么也没做；剩下的按钮是「回退此文件」与「全部回退」。回退也不是 `git checkout`，而是把抓到的 `before` 写回去，并先校验文件没有漂移。详见上面的 v0.1.9 段与[设计一节](#设计写盘归-dsh插件只观察与告知)。
-- **审批工作流集成** —— `approval/requested` 事件现在以内联卡片形式展示，带 **Allow once** / **Deny** 按钮。不再需要切浏览器审批。安全允许列表限制哪些工具可以在 VS Code 内审批，高风险操作仍需 Web UI。
-  - **已在 v0.1.4 更正：** 这里的"内联卡片"是靠 `callId` 匹配工具行画出来的，匹配不上就不显示；门槛用的是一份工具名允许列表，
-    而本机宿主的 shell 工具叫 `pwsh`，白名单里没有它——所以每次真实升级都被拒。现在待答项走独立面板，
-    门槛改成读宿主给出的**理由**。详见上面的 v0.1.4 段。
-- **@file 内容内联** —— 文件引用（`@file:path` 或 `@file:path:L10-L20`）的内容现在被直接读取并内联到用户消息中，确保 agent 始终能看到文件内容。`context` 元数据（活动文件、选区）仅在会话首次发送时附带。
-  - **已在 v0.1.3 更正：** `@file:path` 这套语法和"内联正文"都是插件自己发明的，宿主另有语法。
-    现在改用 `@path` / `@"含空格的 path"` / `@dir/`（可带 `:L<n>` 行号后缀），
-    **并且不再粘贴正文**——文件由 agent 自己读。详见上面的 v0.1.3 段。
-- **右键菜单集成** —— 在资源管理器中右键文件 → **Add to Harness Chat**。在编辑器中选中文本 → 右键 → **Send Selection to Harness**。均使用工作区相对路径。
-
-详见 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
-
-### 历史版本
-
-- **v0.0.2** —— 对话 UX & 架构基线版：Assistant Markdown 渲染、Tool 卡片合并、System 消息折叠、惰性创建 workspace/session、流式渲染修复、架构加固。
-- **v0.0.1** —— 首个公开版本：验证 VS Code 与浏览器共享同一个 Harness 会话。
-
-## v0.0.3 做什么
-
-- 连接到**本地** `dsh web`（仅限回环地址——`127.0.0.1` / `localhost`）。
-- 将当前 VS Code 文件夹匹配到 Harness 工作区。若无匹配，工作区在**首次发送时惰性创建**——无弹窗。
-- 列出该工作区已有的会话。
-- 打开会话并渲染其历史记录。
-- 向该会话发送纯文本提示。若无会话，自动创建。
-- 实时流式传输助手回复，支持 **Markdown 渲染**（代码块、列表、表格、链接）。
-- 将工具调用显示为**折叠卡片**，带语义化标题（`Read src/foo.ts`、`Search "pattern"`、`Run npm test`）。
-- **看见 Agent 改了什么** —— 每回合一张改动卡片（包含被 shell 命令改掉的文件）、任意文件的 VS Code 原生 diff，以及撤销：单文件或整回合。文件工具的按调用 diff 卡片同理，并在原生 diff 里自带一个「回退此文件」的 CodeLens。这里没有任何一处征求批准——改动已经在盘上了，原因见[设计一节](#设计写盘归-dsh插件只观察与告知)。
-- **审批或拒绝 Agent 操作** —— 输入框上方的待答面板，带 Allow once / Deny 按钮（门槛看的是宿主给出的**理由**，不是工具名允许列表）。
-- **引用文件** —— 在提示中使用 `@<相对路径>`；提及按原样发出，由宿主用自己的文件系统工具解析。右键资源管理器或编辑器可快速插入。
-- 默认隐藏插件注入的系统消息；通过 `SYS` 按钮切换。
-- 停止当前回合。
-- 断线时重新打开流并重新获取历史记录。
-- "在 Harness Web UI 中打开"命令。
-- 通过 ⇲ 按钮将视图停靠在右侧边栏（像聊天面板一样）。
-
-## v0.0.3 刻意不做的事
-
-为安全起见，以下仍不在范围内：
-
-- 不调用 `commands/execute`，不访问 `credentials` 或 `settings` API。
-- 不切换模型。
-- 不做内联补全、终端/LSP 集成。
-- 理由中声明了 full/unrestricted access 的审批不能在侧边栏内放行——卡片只给 Deny 和一个 **Answer in Web UI** 交回入口。
-- 不建立第二份会话数据库——Harness Session 是**唯一**的真相源。
-- 不自动安装/启动/升级 `dsh`。
-- 不 fork 或修改 Harness 源码。
+完整差异见 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)，更早的每一个版本也都在那里。
 
 ## 环境要求
 
@@ -369,14 +145,12 @@ URI authority 契约，以及卡片语义——每回合一张卡、重复播报
    或从 [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases) 安装 VSIX：
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.2.0.vsix
+   code --install-extension harness-connector-deepseek-0.2.1.vsix
    ```
 
 3. **不用配置任何东西。** 扩展会自动连接：它读取 `dsh web` 写在 `$DSH_HOME/.credentials.yaml` 里的浏览器会话签名密钥，自己签出同一个 `dsh-auth-…` cookie。**没有需要粘贴的 token。**
 
-   需要 cookie 鉴权的 Harness 会对所有 `/api/*` 强制校验该 cookie。该文件是 0600 权限、
-   只有你自己能读，所以"能读它"本身就等价于"能完全控制这个 harness home"——自签不是提权。
-   详见下文《浏览器会话是怎么来的》。
+   读一下上面的[《凭据》](#凭据这个扩展能读到什么)一节，就知道这意味着什么。
 
 4. 在 VS Code 中打开一个你想绑定到 Harness 工作区的文件夹。
 
@@ -389,25 +163,8 @@ URI authority 契约，以及卡片语义——每回合一张卡、重复播报
 8. 在浏览器中打开 `http://127.0.0.1:3080/` 的同一会话——两端看到的是同一轮对话。
 
 > 没有"设置会话 token"这条命令。cookie 每次连接都从
-> `$DSH_HOME/.credentials.yaml` 本地签发，没有任何需要粘贴的东西。
-
-### 浏览器会话是怎么来的
-
-需要 cookie 鉴权的 Harness 会拒绝所有不带浏览器会话 cookie 的 `/api/*` 调用。上游的
-官方做法是拿每个进程一次性生成的 launch token 去换——但那个 token **不落盘**，官方文档
-要求你手动从终端复制；而且每次 `dsh web` 重启都会换一个。
-
-cookie 本身并不包含 token 的任何痕迹：它是对 `{version, authority, issuedAt,
-expiresAt}` 的 HMAC，密钥持久化在 `$DSH_HOME/.credentials.yaml`
-（`client-connection/browser-session`），只生成一次、之后每个 `dsh web` 进程复用。
-所以任何能读到该文件的东西都能签出**字节级相同**的 cookie——扩展就是这么做的，
-你什么都不用粘。这是插件提供的**唯一**路径：粘贴启动 URL 的命令已经删掉，因为一个
-每次重启都变的 token，在本地自签可用之后只剩下维护成本。
-
-**安全吗？** 该文件权限是 0600（仅属主可读），里面还存着你的模型 API key——
-能读它就已经等于能完全控制这个 harness home。从中签发是*权限等价*，不是提权。
-它确实绕过了那个每进程 token 闸门，但那个闸门防的是**远程调用者**（DNS rebinding、
-CSRF），不是防已经以你的身份运行的代码。
+> `$DSH_HOME/.credentials.yaml` 本地签发，没有任何需要粘贴的东西。粘贴启动 URL
+> 的命令已经删掉，因为一个每次重启都变的 token，在本地自签可用之后只剩下维护成本。
 
 ### 本地签发跑不起来的时候
 
@@ -428,16 +185,17 @@ authority）。
 
 | 设置项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `deepseekHarness.host` | `127.0.0.1` | **v0.0.x 仅允许 `127.0.0.1` 或 `localhost`。** 其他值会被拒绝。 |
+| `deepseekHarness.host` | `127.0.0.1` | 仅允许 `127.0.0.1` 或 `localhost`。其他值会被拒绝。 |
 | `deepseekHarness.port` | `3080` | 默认 `dsh web` 端口。如果你用 `dsh web --port <n>` 启动则需修改。 |
 | `deepseekHarness.showSystemMessages` | `false` | 显示插件注入的系统消息（运行时上下文、审批通知）。默认隐藏；可通过 webview 头部的 `SYS` 按钮实时切换。 |
 | `deepseekHarness.autoSession` | `true` | 从 `$DSH_HOME/.credentials.yaml` 本地签发浏览器会话 cookie。关掉它扩展就没有鉴权了——这是安全开关，不是便利开关。 |
-| `deepseekHarness.autoApproveApprovals` | `false` | **v0.0.9+** 自动用 `allowed-once` 回应所有审批请求。默认关闭——开启意味着工具调用不再逐次确认。 |
-| `deepseekHarness.autoDiscover` | `true` | **v0.1.5+** 配置的端口没人应答时，在回环地址上另找 dsh Host（先看各 profile patch 里钉的 `webserver.port`，再枚举系统监听表，用 Host 自己的拒绝文本确认）。桌面端需要它——桌面端用系统分配的端口启动 Host。发现的端口只在本次会话内使用，绝不写回设置。 |
+| `deepseekHarness.autoApproveApprovals` | `false` | 自动用 `allowed-once` 回应所有审批请求。默认关闭——开启意味着工具调用不再逐次确认。 |
+| `deepseekHarness.autoDiscover` | `true` | 配置的端口没人应答时，在回环地址上另找 dsh Host（先看各 profile patch 里钉的 `webserver.port`，再枚举系统监听表，用 Host 自己的拒绝文本确认）。桌面端需要它——桌面端用系统分配的端口启动 Host。发现的端口只在本次会话内使用，绝不写回设置。 |
 
 ## 命令
 
 - `DeepSeek Harness: Connect` / `Reconnect` / `Disconnect`（连接 / 重连 / 断开）——**Reconnect**（同时也是面板标题的 ⟳ 按钮、以及状态行里常驻的那个按钮）会先拆掉当前连接再重新协商一次
+- `DeepSeek Harness: Diagnostics`（诊断）——一份文档：运行时版本、本扩展的版本、连接状态、这台 Host 实际提供哪些能力、以及最近一次错误。带一个**复制脱敏报告**动作；其中不含任何凭据内容
 - `DeepSeek Harness: Clear Session Token`（清除会话 token）——删除已存储的 cookie 并重连（会重新签一个；切换 `dsh web` 实例前用它）
 - `DeepSeek Harness: New Session`（在当前工作区新建会话）
 - `DeepSeek Harness: Refresh Sessions`（刷新会话列表）
@@ -482,10 +240,10 @@ path"`、`@dir/`，可带 `:L<n>` / `:L<n>-L<m>` 后缀；从 `@` 补全列表�
 
 ## 协议测试
 
-一个独立的 Node 脚本用真实客户端代码驱动一个**假**的 harness（不预设具体版本——插件是协商的，这个假实现也是）—— 不需要 `dsh web`：
+一个独立的 Node 脚本用真实客户端代码驱动一个**假**的 harness（假实现照 `0.2.1-alpha.2` 的服务端那一半写死）—— 不需要 `dsh web`：
 
 ```bash
-npm run protocol-test    # 312 项断言：双流传输拆分（$events 白名单 vs
+npm run protocol-test    # 342 项断言：双流传输拆分（$events 白名单 vs
                          # session/follow）、线缆协商（点分/斜杠、cookie 门禁、
                          # 事件套接字）、认证、cookie 派生、{args} payload、
                          # 审批与提问两条瀑布（Allow/Deny 的确切信封、cancel 撤卡、
@@ -497,6 +255,9 @@ npm run protocol-test    # 312 项断言：双流传输拆分（$events 白名�
                          # authority 契约、每回合一张卡的模型语义
 ```
 
+协议测试**刻意不覆盖**整个产品。它钉的是线缆契约和模型，不是用户的一串动作。
+上面那一层见[《端到端测试》](#端到端测试)。
+
 想让**真实**的 `dsh web` 自己报出它提供了什么（端点风格、事件套接字，以及
 30 个候选方法里哪些存在）：
 
@@ -505,25 +266,65 @@ npm run protocol-probe            # 默认 127.0.0.1:3080
 npm run protocol-probe 127.0.0.1 3080
 ```
 
-要对**真实** `dsh web` 做闭环验证，用集成测试（需先启动 `dsh web`）：
+要对**真实** `dsh web` 做闭环验证，用集成测试（需先启动 `dsh web`——它会本地签 cookie，不用粘
+token）：
 
 ```bash
-DSH_LAUNCH_URL='http://127.0.0.1:3080/?token=<token>' npm run integration-test
+npm run integration-test
+# 桌面端也可以，但它用系统分配的端口启动 Host：
+DSH_PORT=3081 npm run integration-test
 ```
+
+## 端到端测试
+
+协议断言很便宜，也很可靠——那个弄坏引用芯片的版本，协议断言是一条不落地全绿的。它看不见的是
+**一串动作**：连接、重启 Host、重连；浏览器发消息、这边看见；允许、拒绝、超时。这一层是这个
+项目现在要补的。
+
+`test/e2e/` 就是这些链路的去处。**这张表是它的真实状态，而不是意图的路线图**——没写的链路会
+明说，在这套测试自己的输出里说，也在下面说；因为一个悄悄少跑五分之四的测试套件，跟一个全绿的
+套件看起来一模一样。
+
+| # | 链路 | 状态 |
+| --- | --- | --- |
+| 1 | 连接与认证——Host 起来 → VS Code 连上 → Host 重启 → 自动恢复 | ⬜ 未编写——需要一个能在两次连接之间被杀掉再重启的 Host |
+| 2 | 会话一致性——浏览器发消息 → VS Code 同步 → 切换 → 重载 → 历史一致 | ⬜ 未编写——需要真实的扩展宿主 |
+| 3 | 流式输出——长回复 → 工具调用 → 断连 → 不重复、不丢失、不乱序 | ⬜ 未编写——需要一个能掐掉单条连接而不自尽的 Host |
+| 4 | 审批交互——允许、拒绝、超时、Host 报错 → 卡片都进入正确终态 | ⬜ 未编写——需要真实的扩展宿主才能点得到 |
+| 5 | 文件变更——agent 改文件 → 用户又改 → 撤销不得覆盖用户 | ✅ **15 项断言通过**，跑在真实文件系统上 |
+
+第 5 条是「有风险」而不是「有 bug」的那一条，也是唯一一条不需要扩展宿主就能被如实测到的：
+`ReviewMaterializer` 把工作区 API 当构造参数收，所以它能对着一个 `fs` 就是**真实**文件系统的
+桩、在一个真实的临时目录上跑。模拟一套文件系统，只会让测试去附和实现，而不是抓住它。它覆盖了
+普通回退、清单上的那种情况（文件在回合之后被改过 → 回退拒绝 → 你的字节活下来）、编辑器有未保存
+改动、新建文件被删除、新建文件被编辑过、以及被工具删掉的文件被还原。
+
+`npm run e2e-test` 会报出 `1 of 5 chains covered, 4 not written`，并且只在「跑到且失败」时才
+返回非零。三平台矩阵（`ubuntu-latest`、`windows-latest`、`macos-latest`）已接进
+`.github/workflows/e2e.yml`，而且它现在就已经值回票价：协议测试要解析三种不同的系统监听表
+写法，只有在三个平台上跑，那些解析器才会遇到它们真正的目标。
 
 ## 开发
 
 ```bash
 npm install
-npm run build        # esbuild → dist/extension.js
-npm run watch        # 变更时自动重建
+npm run build            # esbuild → dist/extension.js
+npm run watch            # 变更时自动重建
 npm run typecheck
-npm run package      # → harness-connector-deepseek-0.2.0.vsix
-npm run protocol-test      # 针对假 harness 的 312 项协议断言
-npm run protocol-probe     # 报告真实 dsh web 暴露了什么
+npm run check-versions   # 每一个版本展示面都必须和 package.json 一致
+npm run protocol-test    # 针对假 harness 的 342 项协议断言
+npm run protocol-probe   # 报告真实 dsh web 暴露了什么
+npm run package          # → harness-connector-deepseek-0.2.1.vsix
 ```
 
 在 VS Code 中按 `F5` 启动带有该扩展的扩展开发宿主。
+
+有两条习惯现在是仓库强制的，而不是靠自觉：
+
+- **`package.json` 是唯一手写版本号的地方。** 其余每一处——README 的「新特性」标题、安装命令里的
+  VSIX 文件名、CHANGELOG 的第一条、发布基线、文档里自称的断言条数——都由 `npm run check-versions`
+  对着它比对。新增一个会提到版本的展示面，就顺手加一条检查；不要新增一个数字然后指望它别忘。
+- **发布历史写进 CHANGELOG。** README 描述的是产品的当前状态，只保留一个版本的说明。
 
 ## 已验证版本
 
@@ -532,6 +333,10 @@ npm run protocol-probe     # 报告真实 dsh web 暴露了什么
   是否需要 cookie、事件套接字在 0.2.0-rc.2 上是 `/api/remote.mux`、旧版上是 `/api/events.mux`——都在连接时
   自动探测，同一个构建因此能跨 host 版本工作。跑 `npm run protocol-probe` 可以看到
   你的 host 到底提供了什么。
+- **对话流量不在事件套接字上。** 在 `0.2.1-alpha.2` 上，那条复用套接字承载着**两条**词表不同的
+  逻辑流：`$events`（一份固定的转发白名单——会话状态、审批、插件清单）与 `session/follow`
+  （一条会话的记录与实时 assistant 增量）。按「所有东西都从 `$events` 来」写，正是早期某版连上之后
+  就彻底沉默的原因。两条流分开打开，形状钉在 `scripts/protocol-test.ts` 里。
 - **不知道 Host 在哪也能把它找出来。** 对 dsh Host 发起匿名请求，会被 connection carrier
   用一句固定的话拒绝（`dsh web authentication required; reopen the URL printed by dsh web.`），
   本机没有第二个服务会这么说——所以它同时也是一个身份判据。`deepseekHarness.autoDiscover`
@@ -547,17 +352,21 @@ npm run protocol-probe     # 报告真实 dsh web 暴露了什么
 ## 限制
 
 - 仅限回环——不支持远程 / 局域网 / WSL 桥接的主机。
+- **扩展能读到一个存着你 API key 的文件。** 要签会话 cookie 就必须读它。见[《凭据》](#凭据这个扩展能读到什么)。
 - **图片能不能用取决于模型。** 模型是否吃图并不在 `session/modelCatalog` 里发布，插件只能把宿主的裁决透传：不吃图的模型会让 prompt 失败并返回 `MODEL_DOES_NOT_SUPPORT_IMAGES`，面板会提示你去 Controls 换模型。已暂存的附件会**保留**，方便重试。
 - **暂存文件绑定进程。** 上传回执同时绑定会话**和**正在运行的 `dsh web` 进程，宿主重启后必须重新选文件。
 - 历史记录加载最近约 50 条消息；"加载更早"是未来版本的计划。
 - "Open Web UI" 中的会话深链接不做猜测——只打开 Harness 首页。
 - 未知的 harness 事件类型会被忽略（协议是可合并扩展的）；它们不会导致客户端崩溃，但也不会渲染。
-- **一次回退是把抓到的 `before` 文本写回去——不走 `git checkout`。** 它还会先检查盘上的文件是否仍等于 review 建立时抓到的 `after`；如果文件此后动过，回退会被拒绝并把该文件标为冲突，而不是覆盖。正是这道闸让「不用问就能撤销」这件事是安全的，也是它能说「不」的原因。
+- **一次回退是把抓到的 `before` 文本写回去——不走 `git checkout`。** 写之前它会检查盘上的文件是否仍等于 review 建立时抓到的 `after`，以及是否有编辑器带着未保存的改动。两者只要有一个变过，回退就会被拒绝并把该文件标为冲突，而不是覆盖。正是这道闸让「不用问就能撤销」这件事是安全的，也是它能说「不」的原因。
 - **回合的改动卡片列出的是这个回合改了哪些文件，但其中只有文件工具自己的改动能从中撤销。** 撤销范围限定在该回合产出的 review 内，因为 Host 的摘要只带路径与行数，不带还原所需的文本。某个回合若只通过 shell 命令改了文件，它会直说。
 - 改动摘要在宿主上只活到 Session 结束，所以宿主重启后卡片可能解析为「没有改动可显示」。这会渲染成没有卡片，与 Web UI 一致。
 
-## 路线图（v0.2.1+）
+## 路线图（v0.2.2+）
 
+- **上面那五条端到端链路，做实。** 真实的扩展宿主、一个能在回合进行中被杀掉再重启的假 Host，以及
+  Windows / macOS / Linux 三平台矩阵。第 5 条尤其如此——agent 改完、**你**又改、然后撤销——需要
+  的是端到端的形状，而不只是单元层的守卫。
 - **部分回退——hunk 级。** materializer 其实已经会回退单个 hunk（并且会在文件漂移时拒绝），但现在没有任何 UI 能触达它：今天的回退是每文件全有或全无。要恢复它，意味着在改动卡片和原生 diff 里提供逐 hunk 撤销，数据来自 Host 本来就提供的 hunk 列表，而不是它并不保留的整份文件文本。
 - 按条目下发状态增量：流式推送目前仍整份发送对话流（40 轮会话约 52 KB/次）。渲染端已不再重建它，但跨 `postMessage` 的结构化克隆仍是每个分块剩下的代价。
 - 检查器：过滤框 / 类型高亮 / 导出 JSONL

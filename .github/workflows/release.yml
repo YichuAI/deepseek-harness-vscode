@@ -1,0 +1,112 @@
+name: Release
+
+# Tag push → verified artifact → GitHub Release → (optionally) Marketplace.
+#
+# The point of doing this in CI rather than by hand is not convenience. It is
+# that the four surfaces which disagreed on 2026-10-11 — package.json, the README,
+# the CHANGELOG and the Marketplace listing — were each updated by a different
+# manual step, and any one of them could be forgotten. Here the tag is the input
+# and every surface is checked against `package.json` before anything is built.
+#
+#   git tag v0.2.2 && git push origin v0.2.2
+#
+# Marketplace publishing happens only if a `VSCE_PAT` repository secret exists.
+# Without it the step reports a notice and the release still completes — the
+# GitHub Release is the artifact of record either way.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # create the Release and upload the VSIX
+
+jobs:
+  release:
+    name: verify · package · publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # `--release` additionally requires the tag to exist and to point at HEAD.
+      # Any other combination means the tag and the tree disagree, which is the
+      # one failure mode that produces a downloadable artifact with the wrong
+      # version written all over it.
+      - name: Version surfaces agree, and the tag is this commit
+        run: npm run check-versions -- --release
+
+      - name: Protocol test
+        run: npm run protocol-test
+
+      - name: End-to-end chains
+        run: npm run e2e-test
+
+      - name: Build
+        run: npm run build
+
+      - name: Package
+        run: npm run package
+
+      - name: Verify the packaged artifact
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          vsix="harness-connector-deepseek-${ver}.vsix"
+          test -f "$vsix" || { echo "::error::expected $vsix"; exit 1; }
+          ls -l "$vsix"
+          # The version inside the package is the one a user's editor will show,
+          # so it is read back out rather than assumed from the filename.
+          inner=$(unzip -p "$vsix" extension/package.json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).version))')
+          echo "package.json inside the VSIX: $inner"
+          test "$inner" = "$ver" || { echo "::error::VSIX says $inner, tag says $ver"; exit 1; }
+
+      - name: Extract this version's changelog section
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          # Not `--notes-file CHANGELOG.md`, which pastes the entire history.
+          awk -v v="$ver" '
+            index($0, "## [" v "]") == 1 { found = 1 }
+            found && /^## \[/ && index($0, "## [" v "]") != 1 { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "::error::no CHANGELOG section for $ver"; exit 1; }
+          echo "--- release notes ---"; cat notes.md
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          gh release create "v${ver}" \
+            "harness-connector-deepseek-${ver}.vsix" \
+            --title "v${ver}" \
+            --notes-file notes.md \
+            --verify-tag
+
+      - name: Publish to the Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VSCE_PAT:-}" ]; then
+            echo "::notice::VSCE_PAT is not set — skipping the Marketplace publish."
+            echo "The GitHub Release above is the artifact of record."
+            exit 0
+          fi
+          # No --packagePath: vsce rebuilds and re-checks, so the published
+          # package is produced by the same code path as the one just verified.
+          npx vsce publish --no-dependencies -p "$VSCE_PAT"

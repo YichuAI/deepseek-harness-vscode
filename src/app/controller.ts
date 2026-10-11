@@ -27,6 +27,8 @@ import {
 } from '../workspace/binding.ts'
 import type { UiState, InspectorFrame, PendingChip, SearchState } from './state.ts'
 import { connectionToUi, sessionsToUi, workspaceToUi } from './state.ts'
+import { classifyConnectFailure } from './diagnosis.ts'
+import type { ConnectionHint } from './diagnosis.ts'
 import type { PendingAttachmentPayload, WebviewAction } from '../view/provider.ts'
 import type { HarnessWebviewViewProvider } from '../view/provider.ts'
 import { CompositeDisposable } from '../disposable.ts'
@@ -202,6 +204,15 @@ export class AppController {
   private activeSessionId: SessionId | undefined
   private model: ConversationModel | undefined
   private muxStatus: MuxStatus | undefined
+  /**
+   * Why the last connect attempt failed, classified for the status row.
+   * Cleared by `pushFromClient` as soon as a push sees a live connection.
+   */
+  private connectionHint: ConnectionHint | undefined
+  /** Verbatim last connect failure, for Diagnostics. Never credential-bearing. */
+  private lastConnectError: string | undefined
+  /** Port the last discovery landed on, so a failed retry can name it. */
+  private lastDiscoveredPort: number | undefined
   private reviewController: ReviewController | undefined
   /** Native diffs for a turn's changed files (`/api/changes.diff`), keyed by id. */
   private readonly changesDiffs = new ChangesDiffStore()
@@ -298,6 +309,7 @@ export class AppController {
       workspace: this.d.vscodeAPI.workspace,
       onChange: () => this.pushReviewApprovalState(),
       notifyError: (m) => this.d.notifyError(m),
+      notifyInfo: (m) => this.d.notifyInfo(m),
       log: this.d.log,
     })
     this.disposables.add({ dispose: () => this.reviewController?.dispose() })
@@ -395,6 +407,8 @@ export class AppController {
     // forced reconnect look like the panel had been reset to a fresh install.
     const resume = this.activeSessionId
     const alreadyConnected = this.d.client.getState().kind === 'connected'
+    // Scoped to this attempt: a port found last time says nothing about now.
+    this.lastDiscoveredPort = undefined
     try {
       // `force` tears the old socket down before negotiating. It has to, because
       // after a Host restart the client still believes it is `connected` — the
@@ -422,7 +436,14 @@ export class AppController {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       this.d.log.error('connect failed: ' + msg)
-      this.d.notifyError(msg)
+      this.lastConnectError = msg
+      // "Disconnected" was the same rendered string whether nothing was
+      // listening, the Host refused the cookie, or a proxy held the port. The
+      // classification is what turns one shrug into one specific next action.
+      this.connectionHint = classifyConnectFailure(msg, {
+        ...this.d.client.target(), discoveredPort: this.lastDiscoveredPort,
+      })
+      this.d.notifyError(this.connectionHint.title + ' — ' + this.connectionHint.fix)
     }
     this.d.pushState()
   }
@@ -459,6 +480,7 @@ export class AppController {
     // be different again next launch, so persisting it would leave the user with
     // a stale pin to debug — the opposite of the point.
     this.d.client.retarget(target.host, found.port)
+    this.lastDiscoveredPort = found.port
     const via = found.source === 'pinned'
       ? `pinned in the "${found.profile ?? '?'}" profile`
       : 'found by probing loopback'
@@ -1649,12 +1671,30 @@ export class AppController {
   }
 
   // ─── helper: push client-derived state (onStateChange + onMuxStatusChange) ──
+
+  /**
+   * The two things Diagnostics needs that only the controller holds.
+   *
+   * The classifier and the report builder are pure and live in `diagnosis.ts`;
+   * this is the seam that keeps them from having to reach into the controller.
+   */
+  diagnostics(): { lastError?: string; hint?: ConnectionHint } {
+    return {
+      ...(this.lastConnectError !== undefined ? { lastError: this.lastConnectError } : {}),
+      ...(this.connectionHint !== undefined ? { hint: this.connectionHint } : {}),
+    }
+  }
+
   private pushFromClient(): void {
     const conn = connectionToUi(this.d.client.getState(), this.muxStatus)
     this.d.setState({
       connection: conn.connection,
       hostInfo: conn.hostInfo,
       errorMessage: conn.errorMessage,
+      // A hint describes a *current* failure. Any push that finds the connection
+      // healthy retires it, so the status row can never keep explaining a
+      // problem that is already gone.
+      connectionHint: conn.connection === 'connected' ? undefined : this.connectionHint,
       muxStatus: conn.muxStatus,
       // What the host serves decides which controls the panel may offer.
       capabilities: { ...this.d.client.capabilities() },

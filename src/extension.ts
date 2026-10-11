@@ -19,6 +19,7 @@ import { readFileSync } from 'node:fs'
 import { HarnessClient } from './harness/client.ts'
 import { BrowserSessionAuth, type AuthStore } from './harness/auth.ts'
 import { AppController, attachmentKindFor } from './app/controller.ts'
+import { buildDiagnosticsReport } from './app/diagnosis.ts'
 import { DSH_REVIEW_SCHEME } from './review/virtualDocument.ts'
 import type { PendingAttachmentPayload, WebviewAction } from './view/provider.ts'
 import { HarnessWebviewViewProvider, type UiState } from './view/provider.ts'
@@ -177,6 +178,62 @@ export function activate(context: vscode.ExtensionContext): void {
     await controller.doConnect()
   }
 
+  /**
+   * One document that answers "why is this not connected" without a round trip
+   * through a maintainer.
+   *
+   * Opened as an untitled Markdown document rather than a custom panel: it costs
+   * no webview, and the reader gets selection, find and Save As for free. The
+   * report is built by a pure function in `app/diagnosis.ts`, so the redaction
+   * rules and the capability summary are unit-tested without a VS Code host.
+   */
+  const diagnostics = async (): Promise<void> => {
+    const s = getState()
+    const target = client.target()
+    const cfg = vscode.workspace.getConfiguration(SECTION)
+    const { lastError, hint } = controller.diagnostics()
+
+    const report = buildDiagnosticsReport({
+      extensionVersion: String(context.extension?.packageJSON?.['version'] ?? 'unknown'),
+      vscodeVersion: vscode.version,
+      nodeVersion: `Electron ${process.versions['electron'] ?? '?'} / Node ${process.versions.node}`,
+      platform: `${process.platform} ${process.arch}`,
+      host: target.host,
+      port: target.port,
+      connection: s.connection,
+      ...(s.muxStatus !== undefined ? { muxStatus: s.muxStatus } : {}),
+      ...(s.hostInfo !== undefined ? { hostInfo: s.hostInfo } : {}),
+      ...(s.capabilities !== undefined ? { capabilities: s.capabilities } : {}),
+      ...(lastError !== undefined ? { lastError } : {}),
+      ...(hint !== undefined ? { hint } : {}),
+      settings: {
+        host: cfg.get('host'),
+        port: cfg.get('port'),
+        autoSession: cfg.get('autoSession'),
+        autoDiscover: cfg.get('autoDiscover'),
+        autoApproveApprovals: cfg.get('autoApproveApprovals'),
+        showSystemMessages: cfg.get('showSystemMessages'),
+        dshHome: process.env['DSH_HOME'],
+      },
+      generatedAt: new Date().toISOString(),
+    })
+
+    const doc = await vscode.workspace.openTextDocument({ content: report, language: 'markdown' })
+    await vscode.window.showTextDocument(doc, { preview: false })
+
+    const COPY = 'Copy redacted report'
+    const picked = await vscode.window.showInformationMessage(
+      'DeepSeek Harness diagnostics opened — it contains no credential material.',
+      COPY, 'Show Logs',
+    )
+    if (picked === COPY) {
+      await vscode.env.clipboard.writeText(report)
+      void vscode.window.showInformationMessage('Diagnostics copied to the clipboard.')
+    } else if (picked === 'Show Logs') {
+      log.show()
+    }
+  }
+
   context.subscriptions.push(
     vscode.commands.registerCommand('deepseekHarness.connect', wireAction('connect')),
     // Same path as Connect on purpose: `doConnect()` always tears the existing
@@ -198,6 +255,7 @@ export function activate(context: vscode.ExtensionContext): void {
       )
     }),
     vscode.commands.registerCommand('deepseekHarness.showLogs', () => log.show()),
+    vscode.commands.registerCommand('deepseekHarness.diagnostics', diagnostics),
     vscode.commands.registerCommand('deepseekHarness.newSession', wireAction('newSession')),
     vscode.commands.registerCommand('deepseekHarness.refreshSessions', wireAction('refreshSessions')),
     vscode.commands.registerCommand('deepseekHarness.openInSecondarySideBar', wireAction('moveToSecondarySideBar')),

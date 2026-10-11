@@ -1,0 +1,79 @@
+name: CI
+
+# The gate that must be green before anything ships.
+#
+# `check-versions` is first among equals: the release it protects against is not
+# a broken build, it is a build whose version number disagrees with the README,
+# the CHANGELOG, or the tag — which is exactly what happened on 2026-10-11, when
+# the same extension was advertising four different versions in four places.
+#
+# `fetch-depth: 0` is required rather than tidy: `check-versions` compares
+# `package.json` against the newest reachable tag, and a shallow clone has none.
+
+on:
+  push:
+    branches: ['**']
+    tags-ignore: ['v*']   # tag pushes are the release workflow's business
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: typecheck · versions · protocol
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Version surfaces agree
+        run: npm run check-versions
+
+      - name: Protocol test
+        run: npm run protocol-test
+
+      - name: Build
+        run: npm run build
+
+      - name: Package (dry run)
+        run: npm run package
+
+      - name: Assert the VSIX contents
+        run: |
+          set -euo pipefail
+          vsix=$(ls harness-connector-deepseek-*.vsix | head -1)
+          echo "packaged: $vsix"
+          unzip -l "$vsix"
+          # `-Z1` prints bare names, one per line. The obvious `unzip -l | awk`
+          # works only by accident: it needs `NR>3` to step over the header and
+          # a field-count test to drop the two rule lines, and both break if the
+          # header shifts or a filename gains a space.
+          unzip -Z1 "$vsix" > /tmp/vsix-files.txt
+          echo "--- files ---"; cat /tmp/vsix-files.txt
+          # The shipped set is deliberately small and fixed. If a new file shows
+          # up here it is because something stopped being ignored — and the
+          # last time that happened, `src/` was one `.vscodeignore` typo away
+          # from being published.
+          if grep -qE '^(extension/)?(src|scripts|test|node_modules)/' /tmp/vsix-files.txt; then
+            echo "::error::the VSIX contains sources that must stay excluded"; exit 1
+          fi
+          test "$(wc -l < /tmp/vsix-files.txt)" -eq 14 \
+            || { echo "::error::expected 14 files in the VSIX"; exit 1; }

@@ -1,7 +1,17 @@
 # 发布流程
 
 本文档描述如何裁剪并发布 **DeepSeek Harness Connector for VS Code** 的一个版本。
-v0.2.0 以 GitHub Release + VSIX 资产的形式发布；Marketplace 发布是可选的，见第 5 节。
+
+**优先用标签发。** 自 v0.2.1 起整套流程跑在 `.github/workflows/release.yml` 里——推一个
+标签，CI 就会核验、打包、建 GitHub Release，并在存在 `VSCE_PAT` secret 时发布到
+Marketplace：
+
+```bash
+git tag v<版本> && git push origin v<版本>
+```
+
+下面这份是同样的流程手动走一遍，也是那个工作流所编码的检查清单。两者要保持一致：CI 不可用的
+时候走手动路径，而且只有手动走一遍，才看得见每项检查到底在做什么。
 
 仓库地址 `git@github.com:YichuAI/deepseek-harness-vscode.git`。此处 HTTPS 推送会失败
 （没有凭据助手），因此 remote 走 SSH。曾经需要 repo-local 的 `core.sshCommand` 来绕过
@@ -33,18 +43,26 @@ npm install
 # 1.1 干净的类型检查
 npm run typecheck          # → tsc --noEmit, 退出码 0
 
-# 1.2 构建打包
+# 1.2 每一个版本展示面都必须和 package.json 一致
+npm run check-versions     # → 全部检查通过；加 --online 会把已发布的 Release 与
+                           #   Marketplace 列表也算进去（需要网络），
+                           #   打标签时加 --release
+
+# 1.3 构建打包
 npm run build              # → dist/extension.js
 
-# 1.3 协议测试（假 harness——不需要 dsh web）
-npm run protocol-test      # → 全部 312 项断言 ✓
+# 1.4 协议测试（假 harness——不需要 dsh web）
+npm run protocol-test      # → 全部 342 项断言 ✓
 
-# 1.4 协议探测（可选但推荐——需要 dsh web 运行）
+# 1.5 端到端链路（真实文件系统；会自己报告覆盖情况）
+npm run e2e-test           # → 已编写的链路全部通过，覆盖情况会打印出来
+
+# 1.6 协议探测（可选但推荐——需要 dsh web 运行）
 #     打印该 host 的端点风格、是否 cookie 门禁、事件套接字，以及它实际提供哪些
 #     控制面方法。凡是升级过 host 版本，就该跑一次：它是 UI 能提供什么的最终依据。
 npm run protocol-probe     # 接受 [host] [port] 参数，默认 127.0.0.1:3080
 
-# 1.5 集成测试（会写入会话——需要有 host 在跑）
+# 1.7 集成测试（会写入会话——需要有 host 在跑）
 #     先在另一个终端启动一个：
 #       cd ../deepseek-harness && npm run dsh -- web          （固定端口 3080）
 #     桌面端也可以，但它用 `--port 0` 起 host，端口每次启动都重新分配——
@@ -54,25 +72,32 @@ npm run protocol-probe     # 接受 [host] [port] 参数，默认 127.0.0.1:3080
 #     需要时可用 DSH_LAUNCH_URL='http://127.0.0.1:3080/?token=<token>' 覆盖
 npm run integration-test   # → 39/39 项 ✓，闭环通过
 
-# 1.6 打包 VSIX
+# 1.8 打包 VSIX
 npm run package            # → harness-connector-deepseek-<版本>.vsix
 ```
 
 手动检查：
 
-- [ ] `package.json` 的 `version` 与目标标签一致。
+- [ ] `package.json` 的 `version` 与目标标签一致。`npm run check-versions` 会把这件事
+      连同其他每一个展示面一起断言掉——不要用眼睛看。
 - [ ] `CHANGELOG.md` 有对应版本的条目（`## [<版本>] — <日期>`）。
 - [ ] 文档**保持双语**：对 `README.md` / `CHANGELOG.md` / `ARCHITECTURE.md` /
       `RELEASE.md` 的每一处修改，都已镜像到对应的 `*.zh-CN.md`。这是长期约定，
       不是每次发版再临时判断的事。
 - [ ] `CHANGELOG.md` 与 `ARCHITECTURE.md` 里的断言数与 `npm run protocol-test`
-      的**当前**输出一致（它已历经 50 → 64 → 98 → 83 → 156 → 178 → 180 → 190 → 211 → 231 → 243 → 268 → 295 → 312，其中 rc.2 重写用新假
-      harness 替换了 rc.6 假 harness，之后又加入了瀑布/待答面板两组；此处数字过期是最常见的文档漂移）。
+      的**当前**输出一致（它已历经 50 → 64 → 98 → 83 → 156 → 178 → 180 → 190 →
+      211 → 231 → 243 → 268 → 295 → 312 → 342，其中 rc.2 重写用新假 harness
+      替换了 rc.6 假 harness，之后又加入了瀑布/待答面板两组；此处数字过期是最常见的
+      文档漂移——**而自 v0.2.1 起，`check-versions` 会直接让构建失败，不再靠这一行
+      靠人记**）。
+- [ ] `README.md` 最新的「新特性」标题就是这个版本，而且 README 只保留**一个**版本的
+      说明。历史写进 CHANGELOG。
 - [ ] `LICENSE` 存在（MIT）。
 - [ ] 第 2 步里的 VSIX 期望体积，是在**最后一次改动随包文档之后**量出来的。
       `README.md` / `CHANGELOG.md` / `ARCHITECTURE.md` 及其 `*.zh-CN.md` 镜像
       **都被打进 VSIX**，打包之后再改其中一个，那个数字就作废了——重新打包、
-      重新量，**不要凭感觉调**。（v0.2.0 的基线就是这么少了 856 字节的。）
+      重新量，**不要凭感觉调**。（v0.2.0 的基线就是这么少了 856 字节的。`RELEASE.md`
+      本身**不进包**，所以这个数字可以事后写在这里。）
 - [ ] `test/fixtures/` 中无秘钥/API 密钥/真实提示内容
       （固件必须使用 `<redacted:...>` 占位符）。
 - [ ] `.vscodeignore` 排除了 `src/`、`scripts/`、`test/`、配置文件**以及 `.workbuddy/`**
@@ -88,7 +113,7 @@ npm run package            # → harness-connector-deepseek-<版本>.vsix
 unzip -l harness-connector-deepseek-<版本>.vsix
 ```
 
-预期（v0.2.0 = 14 个文件，312,853 字节，约 305 KB）：
+预期（v0.2.1 = 14 个文件，312,745 字节，约 305 KB）：
 
 ```
 [Content_Types].xml
@@ -232,6 +257,24 @@ gh release edit v<版本> --draft
 
 ---
 
+## 8. CI
+
+`.github/workflows/` 下有三个工作流：
+
+| 工作流 | 触发条件 | 做什么 |
+| --- | --- | --- |
+| `ci.yml` | 每个分支的 push、每个 PR | 类型检查 · `check-versions` · `protocol-test` · 构建 · 打包 · 断言 VSIX 里恰好是那 14 个文件且不含源码 |
+| `e2e.yml` | push 到 `main`、PR | 同样的门禁跑在 `ubuntu-latest`、`windows-latest`、`macos-latest` 上——协议测试要解析三种操作系统的监听表写法，光这一点就值回矩阵的成本——外加 `npm run e2e-test` |
+| `release.yml` | 一个 `v*` 标签 | `check-versions --release`（标签必须存在**且**指向 HEAD）· 测试 · 构建 · 打包 · 把版本号**从打出来的 VSIX 里读回来** · 以对应的 CHANGELOG 段落建 GitHub Release · 存在 `VSCE_PAT` 时发布到 Marketplace |
+
+`ci.yml` 需要 `fetch-depth: 0`：`check-versions` 要拿最新的可达标签做比对，而浅克隆里一个
+标签都没有。
+
+Marketplace 发布通过仓库 secret 选择性开启。没有 `VSCE_PAT` 时那一步会报一条 notice，发布
+照常完成——无论哪种情况，GitHub Release 都是那个存档事实。
+
+---
+
 ## 附录 — 版本策略
 
 - `0.0.x`——协议仍在变动，因此功能以补丁形式发布；线缆在连接时协商，所以一个补丁可以
@@ -244,9 +287,11 @@ gh release edit v<版本> --draft
   重打标签只在这个号既没有 Release、也没有 Marketplace 发布记录时才是安全的；一旦用户能装到
   它，这个号就冻结了，后续修复只能发下一个版本。
 - 发布说明本身就在 VSIX **里面**：`README.md`/`CHANGELOG.md` 经 vsce 以 `readme.md`/
-  `changelog.md` 的形式随包，`*.zh-CN.md` 双胞胎原样随包。所以 312,853 字节这条基线属于
-  `581ba27` 那棵树；之后补的 0.1.8 说明会让同一份源码新打出来的包略大一些。这是预期内的，
-  不是回归——下次发版现场重新量，不要把旧数字往下带。
+  `changelog.md` 的形式随包，`*.zh-CN.md` 双胞胎原样随包。所以下面每一条基线都属于某一棵
+  特定的树，事后再改一个随包文档，那个数字就作废了。重新量，不要把旧数字往下带。
+  （`v0.2.1` = 312,745 字节；`v0.2.0` = 312,853，树是 `581ba27`；`v0.1.9` = 309,620；
+  `v0.1.7` = 288,750。v0.2.1 比上一版反而小 108 字节：README 卸掉了历史版本说明，CHANGELOG
+  接管了这些内容，一增一减刚好略负。包变小本身不是问题——没人重新量的基线才是。）
 
 ## 附录 — 本机 SSH 配置
 

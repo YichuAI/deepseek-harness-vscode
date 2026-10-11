@@ -22,6 +22,8 @@ export interface ReviewControllerDeps {
   workspace: typeof vscodeType.workspace
   onChange: () => void
   notifyError: (msg: string) => void
+  /** Used by the aggregate revert report, which is not a failure. */
+  notifyInfo: (msg: string) => void
   log: { info: (m: string) => void; error: (m: string) => void }
 }
 
@@ -66,28 +68,44 @@ export class ReviewController {
    * been waiting for permission. See the `WebviewAction` union.
    */
   async rejectFile(reviewId: string, filePath: string): Promise<void> {
-    const review = this.store.getById(reviewId)
-    if (!review) return
-    const file = review.files.find(f => f.path === filePath)
-    if (!file) return
-
-    const result = await this.materializer.rejectFile(review, file)
-    if (result.ok) {
-      this.store.setFileState(reviewId, filePath, 'rejected')
-      this.d.log.info(`Review ${reviewId}: rejected ${filePath} (reverted)`)
-    } else {
-      this.store.markConflicted(reviewId, filePath, result.message)
-      this.d.notifyError(result.message)
-    }
+    const result = await this.revertOne(reviewId, filePath)
+    if (result === undefined) return
+    if (!result.ok) this.d.notifyError(result.message)
   }
 
-  /** Reject all files in a review. */
+  /**
+   * Revert every file in a review, reporting once.
+   *
+   * One notification instead of one per file. A turn touching twelve files where
+   * the user has since edited three used to produce twelve toasts, and the three
+   * that carried information scrolled away among the nine that said "done". The
+   * refusals are also *not* errors in the ordinary sense: declining to write is
+   * the guard doing its job, which is why the wording says so and the count is
+   * unambiguous about what it did and did not touch.
+   */
   async rejectAll(reviewId: string): Promise<void> {
     const review = this.store.getById(reviewId)
     if (!review) return
+
+    let reverted = 0
+    const refused: string[] = []
     for (const f of review.files) {
-      await this.rejectFile(reviewId, f.path)
+      const result = await this.revertOne(reviewId, f.path)
+      if (result === undefined) continue
+      if (result.ok) reverted++
+      else refused.push(relativeLabel(f.path))
     }
+
+    if (refused.length === 0) {
+      this.d.notifyInfo(`Reverted ${String(reverted)} file(s).`)
+      return
+    }
+    const kept = refused.length === 1 ? refused[0]! : `${String(refused.length)} files`
+    this.d.notifyError(
+      reverted === 0
+        ? `Nothing reverted — ${kept} changed since this turn. Your edits were kept; the card shows why.`
+        : `Reverted ${String(reverted)} file(s). Left ${kept} alone — changed since this turn.`,
+    )
   }
 
   /** Reject a single hunk. */
@@ -107,6 +125,30 @@ export class ReviewController {
       this.store.markConflicted(reviewId, filePath, result.message)
       this.d.notifyError(result.message)
     }
+  }
+
+  /**
+   * The one place a revert actually happens, with no notification of its own.
+   *
+   * Returns `undefined` when there is nothing to act on, so callers can tell
+   * "no such file" apart from "refused" — the aggregate report needs that
+   * distinction to not claim credit for a revert it never attempted.
+   */
+  private async revertOne(reviewId: string, filePath: string): Promise<MaterializeResult | undefined> {
+    const review = this.store.getById(reviewId)
+    if (!review) return undefined
+    const file = review.files.find(f => f.path === filePath)
+    if (!file) return undefined
+
+    const result = await this.materializer.rejectFile(review, file)
+    if (result.ok) {
+      this.store.setFileState(reviewId, filePath, 'rejected')
+      this.d.log.info(`Review ${reviewId}: reverted ${filePath}`)
+    } else {
+      this.store.markConflicted(reviewId, filePath, result.message)
+      this.d.log.error(`Review ${reviewId}: refused to revert ${filePath} (${result.reason}) — ${result.message}`)
+    }
+    return result
   }
 
   summaries(sessionId?: SessionId): ReviewSummary[] {

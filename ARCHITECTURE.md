@@ -592,6 +592,24 @@ first checks that the file on disk still matches the `after` captured at review 
 and refuses (marking the file conflicted) if it has moved on. That guard is what makes an
 undo safe to offer without asking, and what lets it say no.
 
+**A refusal has to be legible, not just correct.** Declining to write is the guard doing
+its job, and for a while the failure mode around it was reporting rather than safety: the
+refusal surfaced as one transient toast per file, and `markConflicted` set the state while
+dropping the reason on the floor — so the card could say `conflicted`, which reports that
+nothing happened and nothing about what to do next. All three parts are now fixed as one
+contract (v0.2.1):
+
+- the reason is **stored** on the file (`ReviewFile.conflictReason`) and travels to the
+  webview in `ReviewSummary`, so the row can explain itself after the toast is gone;
+- it is **cleared** whenever the file leaves the conflicted state, so a stale explanation
+  cannot outlive the problem it described;
+- it is part of the review's **render signature**, because a file refused twice with two
+  different reasons keeps the same `state` — a signature that ignored the reason would
+  leave the first one on screen;
+- `rejectAll` reports **once**, with a count, instead of once per file. A turn touching
+  twelve files where three have since been edited used to produce twelve notifications and
+  bury the three that carried information.
+
 Undo from a turn card is **scoped to the reviews that turn produced**, because a summary
 carries paths and line counts but not restorable text. Mapping a summary path to a review
 file is tried in three passes — exact, then unique-suffix, then unique-basename — and the
@@ -619,6 +637,65 @@ column that `hunksToSides()` splits on — is observed rather than assumed, toge
 each hunk header agreeing with its own body. A `404` is likewise measured to resolve to
 "no card" rather than to a throw, which is the difference between a dropped summary and a
 broken panel.
+
+## Failure classification and Diagnostics (v0.2.1)
+
+`error` used to carry the transport's own message straight into the status row, which meant
+`Disconnected`, `ECONNREFUSED` and "the Host refused our cookie" all rendered as the same
+shrug — and the first thing anyone had to do was work out which one they had.
+
+`app/diagnosis.ts` is a **pure** module — no `vscode`, no network, no filesystem — with
+three exports:
+
+- `classifyConnectFailure(message, ctx)` → `{ kind, title, detail, fix, repair? }`. Five
+  kinds: `runtime-not-running`, `auth-failed`, `wrong-port`, `protocol-incompatible`,
+  `unknown`. The rules are **ordered most-specific-first**, and that order is load-bearing
+  rather than cosmetic: a refusal from the Host arrives as a message that also mentions
+  failing to reach `/api/*`, so a reachability rule tested first would relabel a credential
+  problem as a dead process — and "start `dsh web`" is exactly the wrong advice for it.
+  The verdict reaches the status row as `UiState.connectionHint`, and `pushFromClient`
+  retires it as soon as a push sees a live connection, so a hint can never outlive the
+  failure it describes.
+- `buildDiagnosticsReport(input)` → the Markdown a user attaches to a bug report: versions,
+  connection, the classification, the served/missing capability split, and settings.
+- `redact(text)` → a **backstop**, not the primary control. The primary control is that
+  credential material never enters these fields at all: the browser-session cookie lives in
+  `SecretStorage`, is never logged and never pushed to the webview. But a transport error
+  *is* a URL, upstream launch URLs carry `?token=<43 chars>`, and the Host home is a path we
+  do not author — so the boundary scrubs by shape rather than trusting every future error
+  message to stay clean.
+
+Purity is a constraint, not a style: the integration test cannot import anything that pulls
+in `vscode` (only the protocol test installs the module stub), and a pure classifier is the
+one part of the connect path that can be asserted directly instead of inferred from a
+rendered string.
+
+`DeepSeek Harness: Diagnostics` renders the report into an untitled Markdown document — no
+new panel, and the reader gets find and Save As for free — with a *Copy redacted report*
+action. The controller exposes exactly one seam for it (`diagnostics()`), so the report
+builder never reaches into orchestration state.
+
+## Version discipline (v0.2.1)
+
+`package.json` is the single place a version is authored. `scripts/check-versions.ts`
+compares it against the README's "what's new" heading and install-command filenames, both
+CHANGELOGs' newest entry, `RELEASE.md`'s packaging baseline, the assertion counts the docs
+quote, and — with `--online` — the published GitHub Release and Marketplace listing. With
+`--release` it additionally requires the tag to exist and to point at HEAD.
+
+Two rules make this a gate rather than an aspiration:
+
+- **Anything derivable is derived.** The README badges are live shields endpoints
+  (`github/v/release`, `vs-marketplace/v`) instead of typed numbers. A hardcoded version
+  badge is a number someone has to remember, and it was forgotten twice.
+- **Anything a reader copies verbatim is checked, not templated.** The install command names
+  the real VSIX filename, so a checker verifies it rather than replacing it with `<version>`
+  — which would be accurate and useless.
+
+Release history lives in the CHANGELOG; the README describes the current state and keeps
+exactly one release's notes. The gate asserts that too, because when the README accumulated
+one section per release it quietly became a second changelog, and ended up advertising
+`v0.0.3` and `v0.2.0` in the same document.
 
 ## Markdown rendering
 
@@ -867,7 +944,8 @@ src/
 ├── disposable.ts             # CompositeDisposable helper
 ├── app/
 │   ├── controller.ts         # AppController — orchestration
-│   └── state.ts              # UiState shape + mapping helpers
+│   ├── state.ts              # UiState shape + mapping helpers
+│   └── diagnosis.ts          # pure: classify a failure, build the redacted report
 ├── conversation/
 │   ├── model.ts              # ConversationModel fold
 │   └── types.ts              # ConversationItem union (6 kinds)
@@ -902,11 +980,17 @@ media/
 ├── origin.png                # source material (excluded from VSIX)
 └── markdown-it.umd.min.js    # bundled for VSIX (114 KB)
 scripts/
-├── protocol-test.ts          # fake-harness protocol test, 312 assertions (no dsh web)
+├── protocol-test.ts          # fake-harness protocol test, 342 assertions (no dsh web)
 ├── protocol-probe.ts         # asks a live `dsh web` what it actually serves
+├── check-versions.ts         # every version surface must agree with package.json
 ├── integration-test.ts       # closed-loop test against real dsh
 └── gen-icon.ts               # icon generation from origin.png
-test/fixtures/                # sanitized protocol captures
+test/
+├── fixtures/                 # sanitized protocol captures
+└── e2e/                      # user-action chains (see README → End-to-end tests)
+    ├── run.ts                # runner; reports coverage rather than implying it
+    ├── chain5-revert.ts      # real filesystem: revert vs. later edits
+    └── vscode-stub.ts        # minimal `vscode` stub for the materializer
 ```
 
 ## KV-cache / stability note

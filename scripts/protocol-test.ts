@@ -61,6 +61,8 @@ import {
   parseProcNetListeners, parseWebserverPort, probeHost,
 } from '../src/harness/discovery.ts'
 import { findHarnessWorkspace } from '../src/workspace/binding.ts'
+import { buildDiagnosticsReport, classifyConnectFailure, redact } from '../src/app/diagnosis.ts'
+import { ReviewStore } from '../src/review/store.ts'
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 
@@ -2513,6 +2515,134 @@ async function main(): Promise<void> {
       typed('@"my notes/plan.md" and then prose'), ['my notes/plan.md'])
     eq('an @ inside a word is not a mention', typed('mail bob@example.com'), [])
     eq('and the strip goes away once nothing is referenced', typed('just prose'), [])
+  }
+
+  // ─── O. failure classification, the diagnostics report, and the refusal ──────
+  //
+  // All three are about the same gap: the plugin could tell that something had
+  // failed, and could not tell you which thing. `diagnosis.ts` imports no
+  // `vscode` — which is what lets the integration test use it too, and what
+  // makes the layer that decides *why* a connection failed assertable directly
+  // instead of inferred from a rendered string.
+  {
+    const here = { host: '127.0.0.1', port: 3080 }
+
+    const refused = classifyConnectFailure('Cannot reach dsh web: fetch failed', here)
+    eq('a refused socket is classified as "not running"', refused.kind, 'runtime-not-running')
+    check('...and the fix is to start the Host, not to re-authenticate', /dsh web/.test(refused.fix))
+    check('the transport’s own wording is kept verbatim for the log', refused.detail.includes('fetch failed'))
+
+    // The ordering rule, asserted rather than trusted. A refusal from the Host
+    // arrives as a message that also mentions failing to reach `/api/*`, so a
+    // reachability rule tested first would relabel a credential problem as a
+    // dead process — and "start dsh web" is exactly the wrong advice for it.
+    const refusedAuth = classifyConnectFailure(
+      'dsh web authentication required; reopen the URL printed by dsh web.', here)
+    eq('a Host refusal is classified as auth, not as unreachable', refusedAuth.kind, 'auth-failed')
+    check('...and points at the file the local mint reads', /credentials\.yaml/.test(refusedAuth.fix))
+    eq('the same holds when the message only says 401',
+      classifyConnectFailure('GET /api/session/list -> 401', here).kind, 'auth-failed')
+
+    // A proxy holding the port answers HTML. Same rendered string as the two
+    // above before this existed, and a different problem with a different fix.
+    eq('a foreign HTTP answer is classified as the wrong port',
+      classifyConnectFailure('unexpected response: <!DOCTYPE html>', here).kind, 'wrong-port')
+    check('...and the fix says another service holds the port',
+      /another service/i.test(classifyConnectFailure('<!DOCTYPE html>', here).fix))
+
+    eq('a shape rejection is classified as incompatible',
+      classifyConnectFailure('method-unavailable: session/projections', here).kind, 'protocol-incompatible')
+
+    const mystery = classifyConnectFailure('kaboom', here)
+    eq('an unrecognised failure stays unknown rather than guessing', mystery.kind, 'unknown')
+    eq('...and every hint names a repair', mystery.repair?.command, 'deepseekHarness.diagnostics')
+    check('every classification carries a title and a fix',
+      [refused, refusedAuth, mystery].every((h) => h.title.length > 0 && h.fix.length > 0))
+
+    // Discovery already found a Host elsewhere; saying which port beats telling
+    // the user to go looking.
+    const moved = classifyConnectFailure('fetch failed', { ...here, discoveredPort: 3081 })
+    check('a discovered port is named in the fix rather than scanned for again', moved.fix.includes('3081'))
+  }
+
+  {
+    // The document a user is asked to attach to a bug report. It has to be worth
+    // attaching and safe to attach, and it cannot be both by accident.
+    const base = {
+      extensionVersion: '0.2.1',
+      vscodeVersion: '1.85.0',
+      nodeVersion: 'Electron 25.0.0 / Node 18.0.0',
+      platform: 'win32 x64',
+      host: '127.0.0.1',
+      port: 3080,
+      connection: 'error',
+      capabilities: { 'session/list': true, 'session/page': true, 'goals/list': false, 'schedule/list': false },
+      settings: { host: '127.0.0.1', port: 3080, autoSession: true },
+      generatedAt: '2026-10-11T00:00:00.000Z',
+    }
+
+    const report = buildDiagnosticsReport({
+      ...base,
+      hint: classifyConnectFailure('dsh web authentication required', { host: '127.0.0.1', port: 3080 }),
+      lastError: 'dsh web authentication required; reopen the URL printed by dsh web.',
+    })
+
+    check('the report names the extension version', report.includes('| Extension | 0.2.1 |'))
+    check('...and the target it was pointed at', report.includes('127.0.0.1:3080'))
+    check('...and splits capabilities into served and missing', report.includes('2 served, 2 probed and missing.'))
+    check('...and says why it is not connected', report.includes('Authentication failed'))
+    check('...and states outright that it carries no credentials', /no credential material/.test(report))
+
+    // Redaction is a backstop for the two fields we do not author: a transport
+    // error message, and the Host's home path. The token below is real-shaped.
+    const leaky = buildDiagnosticsReport({
+      ...base,
+      lastError: 'GET http://127.0.0.1:3080/?token=AbCdEf0123456789abcdefghijklmnopqrstuvwxyz01&x=1 -> 401',
+    })
+    check('a launch token inside a transport error does not survive into the report',
+      !leaky.includes('AbCdEf0123456789'))
+    check('...while the error is still shown, so the report stays diagnosable', leaky.includes('-> 401'))
+    eq('a token query parameter is replaced, not dropped',
+      redact('http://h/?token=abc&x=1'), 'http://h/?token=<redacted>&x=1')
+    eq('a bare 43-character mint blob is scrubbed', redact('cookie ' + 'A'.repeat(43)), 'cookie <redacted>')
+    eq('a pinned dsh-auth cookie is scrubbed', redact('dsh-auth-deadbeef=0123456789abcdef'), 'dsh-auth-<redacted>')
+    eq('ordinary prose is untouched', redact('nothing sensitive here'), 'nothing sensitive here')
+
+    const unprobed = buildDiagnosticsReport({ ...base, capabilities: undefined, connection: 'disconnected' })
+    check('an unprobed connection says so instead of claiming zero capabilities', unprobed.includes('Not probed'))
+  }
+
+  {
+    // The refusal path, at the one layer that can be asserted without a
+    // filesystem. The guard itself needs `vscode.workspace`, so the *decision*
+    // is covered where it can be; what is pinned here is that a refusal leaves a
+    // durable, readable trace. It used to set the state and drop the reason, so
+    // the card could say "conflicted" — a word that reports that nothing
+    // happened and nothing about what to do next.
+    const store = new ReviewStore()
+    const reviewId = store.createFromToolResult({
+      sessionId: 'session-o',
+      callId: 'call-o',
+      toolName: 'write',
+      arguments: '{}',
+      resultMeta: { diffs: [{ path: 'src/app.ts', before: 'let a = 1\n', after: 'let a = 2\n' }] },
+    })
+    check('a review was created for the refusal assertions', reviewId !== undefined)
+
+    if (reviewId !== undefined) {
+      const reason = 'src/app.ts has been modified since this review was created.'
+      store.markConflicted(reviewId, 'src/app.ts', reason)
+
+      const summary = store.summaries('session-o').find((r) => r.id === reviewId)
+      const file = summary?.files.find((f) => f.path === 'src/app.ts')
+      eq('a refused revert marks the file conflicted', file?.state, 'conflicted')
+      eq('...and keeps the reason, so the card can explain the refusal', file?.conflictReason, reason)
+      eq('...and the review as a whole reads as conflicted too', summary?.state, 'conflicted')
+
+      store.setFileState(reviewId, 'src/app.ts', 'rejected')
+      const after = store.summaries('session-o').find((r) => r.id === reviewId)?.files.find((f) => f.path === 'src/app.ts')
+      eq('a later successful revert drops the stale reason', after?.conflictReason, undefined)
+    }
   }
 
   console.log(`\n${failures === 0 ? 'all checks passed' : `${String(failures)} CHECK(S) FAILED`} (${String(step)} total)\n`)

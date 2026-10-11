@@ -96,6 +96,8 @@ export class ReviewStore {
     const file = review.files.find(f => f.path === filePath)
     if (!file) return
     file.state = state
+    // The file moved on from being conflicted, so the explanation is stale.
+    if (state !== 'conflicted') delete file.conflictReason
     if (state !== 'partial') {
       for (const h of file.hunks) {
         h.state = state === 'accepted' ? 'accepted' : state === 'rejected' ? 'rejected' : 'pending'
@@ -124,6 +126,8 @@ export class ReviewStore {
     const file = review.files.find(f => f.path === filePath)
     if (!file) return
     file.state = 'conflicted'
+    // Kept, not just counted: the UI has to be able to explain the refusal.
+    file.conflictReason = reason
     recomputeReviewState(review)
     this.notify(review)
   }
@@ -139,6 +143,7 @@ export class ReviewStore {
       files: r.files.map(f => ({
         path: f.path,
         state: f.state,
+        ...(f.conflictReason !== undefined ? { conflictReason: f.conflictReason } : {}),
         addedLines: countAdded(f),
         removedLines: countRemoved(f),
         hunks: f.hunks.map(h => ({ id: h.id, state: h.state })),

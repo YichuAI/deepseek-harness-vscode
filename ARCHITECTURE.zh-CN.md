@@ -439,6 +439,19 @@ review 行只提供**回退**。没有接受的对位物，因为改动落到磁
 review 建立时抓到的 `after`，如果此后动过就拒绝（把该文件标为冲突）。正是这道闸让"不用问
 就能撤销"是安全的，也是它能说「不」的原因。
 
+**一次拒绝必须可读，而不只是正确。** 拒绝写入是这道闸在尽责；在它周围，出问题的从来不是安全
+性而是**报告方式**：拒绝表现为每个文件一个转瞬即逝的提示，而 `markConflicted` 只设了状态、把
+原因丢在地上——于是卡片只能说 `conflicted`，一个告诉你「什么都没发生」、却对下一步一字不提的
+词。三处已作为一份契约一起修好（v0.2.1）：
+
+- 原因被**存下来**（`ReviewFile.conflictReason`）并随 `ReviewSummary` 传到 webview，所以提示
+  消失之后那一行仍然解释得清自己；
+- 文件一旦离开冲突态，原因就被**清掉**，过期的解释不会活得比它描述的问题更久；
+- 它是 review **渲染签名**的一部分：同一个文件被拒绝两次、两次理由不同，`state` 是一样的，
+  签名若忽略理由，屏幕上就会留着第一次的解释；
+- `rejectAll` **只报一次**并带上条数，而不是每文件一次。一个动了 12 个文件、其中 3 个此后被
+  编辑过的回合，过去会产生 12 条通知，把真正有信息的那 3 条埋掉。
+
 从回合卡片撤销的范围**限定在该回合产出的 review 内**，因为摘要只带路径与行数、不带可还原的
 文本。把摘要路径映射到某个 review 文件分三轮尝试——精确、唯一后缀、唯一 basename——后两者
 只在恰好**一个**候选命中时才作数，因为在多个之间猜会回退错文件。某个回合若只通过 shell
@@ -458,6 +471,54 @@ GET 而不是 RPC 方法、hunk 列表能重建出两侧逐行对齐的比较、
 模型。以及 hunk 的**前缀格式**——`hunksToSides()` 用来切分的那个 `+`/`-`/空格列——是被观测
 出来的而不是假定的，同时验证每个 hunk 头与它自己的正文一致。`404` 同样被实测为解析成
 「没有卡片」而不是抛错——那是「摘要被丢掉」和「面板坏了」之间的差别。
+
+## 失败分类与诊断（v0.2.1）
+
+`error` 过去把传输层自己的消息原样塞进状态行，于是 `Disconnected`、`ECONNREFUSED` 和「Host
+拒绝了我们的 cookie」渲染出来是同一句耸耸肩——任何人要做的第一件事，都是先猜自己遇到的是
+哪一个。
+
+`app/diagnosis.ts` 是一个**纯**模块——不碰 `vscode`、不碰网络、不碰文件系统——导出三样东西：
+
+- `classifyConnectFailure(message, ctx)` → `{ kind, title, detail, fix, repair? }`。五种：
+  `runtime-not-running`、`auth-failed`、`wrong-port`、`protocol-incompatible`、`unknown`。
+  规则**按特异性从高到低排序**，而这个顺序是承重的、不是审美：来自 Host 的拒绝，其文案里同时
+  也会提到「没能访问 `/api/*`」，所以把可达性规则排在前面，会把一个凭据问题重新标成「进程死
+  了」——而「去启动 `dsh web`」恰恰是这时候最不该给的建议。判定结果以
+  `UiState.connectionHint` 抵达状态行，并且 `pushFromClient` 一旦看到连接是活的就把它撤下，
+  所以提示永远活不过它描述的那次失败。
+- `buildDiagnosticsReport(input)` → 用户附在缺陷报告里的那份 Markdown：版本、连接、分类结论、
+  能力「提供/缺失」的拆分、配置项。
+- `redact(text)` → **兜底**，不是主要手段。主要手段是凭据根本不会进入这些字段：浏览器会话
+  cookie 存在 `SecretStorage` 里，从不进日志、从不推给 webview。但传输错误**本身就是一个 URL**，
+  上游的启动 URL 会带 `?token=<43 字符>`，而 Host home 是一条不由我们书写的路径——所以边界上
+  按形状擦洗，而不是指望未来每一条报错文案都保持干净。
+
+保持纯粹是约束而非风格：集成测试不能 import 任何会牵进 `vscode` 的东西（只有协议测试装了模块
+桩），而一个纯粹的分类器，是连接路径上唯一可以直接断言、而不是从渲染出来的字符串去反推的部分。
+
+`DeepSeek Harness: Diagnostics` 把报告渲染成一份未命名的 Markdown 文档——不新增面板，读者白得
+查找与另存为——并带一个*复制脱敏报告*动作。控制器只为它开一个接缝（`diagnostics()`），报告构造
+因此永远不需要伸手进编排状态。
+
+## 版本纪律（v0.2.1）
+
+`package.json` 是唯一书写版本号的地方。`scripts/check-versions.ts` 拿它去比对 README 的
+「新特性」标题与安装命令里的文件名、两份 CHANGELOG 的第一条、`RELEASE.md` 的打包基线、文档里
+自称的断言条数，以及（加 `--online` 时）已发布的 GitHub Release 与 Marketplace 列表。加
+`--release` 时还会额外要求标签存在、且指向 HEAD。
+
+两条规则让这件事成为闸门而不是口号：
+
+- **能推导的就推导。** README 的徽章换成了 shields 的实时端点（`github/v/release`、
+  `vs-marketplace/v`），不再是手写的数字。写死的版本徽章是一个需要靠人记住的数字，而它被忘了
+  两次。
+- **读者要照抄的东西，是去检查而不是去模板化。** 安装命令写的是真实的 VSIX 文件名，所以由检查
+  器核验它，而不是把它换成 `<version>`——那样虽然永远准确，但也就没用了。
+
+发布历史写进 CHANGELOG；README 描述当前状态，只保留一个版本的说明。这条也被闸门断言住了，
+因为当 README 每发一版就多一节时，它就悄悄变成了第二份 changelog，最后在同一份文档里同时宣传
+`v0.0.3` 和 `v0.2.0`。
 
 ## Markdown 渲染
 
@@ -644,7 +705,8 @@ src/
 ├── disposable.ts             # CompositeDisposable 辅助
 ├── app/
 │   ├── controller.ts         # AppController — 编排
-│   └── state.ts              # UiState 形状 + 映射辅助
+│   ├── state.ts              # UiState 形状 + 映射辅助
+│   └── diagnosis.ts          # 纯函数：失败分类 + 脱敏诊断报告
 ├── conversation/
 │   ├── model.ts              # ConversationModel 折叠（"它说了什么"）
 │   ├── control.ts            # ControlSurface 折叠（"它能做什么 / 在做什么"）
@@ -685,11 +747,17 @@ media/
 ├── origin.png                # 源材料（VSIX 排除）
 └── markdown-it.umd.min.js    # VSIX 打包用（114 KB）
 scripts/
-├── protocol-test.ts          # 假 harness 协议测试，312 项断言（无需 dsh web）
+├── protocol-test.ts          # 假 harness 协议测试，342 项断言（无需 dsh web）
 ├── protocol-probe.ts         # 向真实 `dsh web` 询问它实际提供什么
+├── check-versions.ts         # 每一个版本展示面都必须和 package.json 一致
 ├── integration-test.ts       # 针对真实 dsh 的闭环测试
 └── gen-icon.ts               # 从 origin.png 生成图标
-test/fixtures/                # 脱敏协议快照
+test/
+├── fixtures/                 # 脱敏协议快照
+└── e2e/                      # 用户动作链路（见 README《端到端测试》）
+    ├── run.ts                # 运行器：报告覆盖情况，而不是暗示它
+    ├── chain5-revert.ts      # 真实文件系统：回退 vs. 之后的编辑
+    └── vscode-stub.ts        # 给 materializer 用的最小 `vscode` 桩
 ```
 
 ## KV-cache / 稳定性说明

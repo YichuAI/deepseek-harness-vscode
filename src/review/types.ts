@@ -42,6 +42,15 @@ export interface ReviewFile {
   afterText: string | null
   hunks: ReviewHunk[]
   state: ReviewState
+  /**
+   * Why a revert was refused, when one was.
+   *
+   * `markConflicted` used to set the state and drop the reason on the floor, so
+   * the card could say "conflicted" and nothing else — which is a word that
+   * tells you an undo did not happen without telling you anything about what to
+   * do next. Cleared whenever the file leaves the conflicted state.
+   */
+  conflictReason?: string
 }
 
 export interface ReviewTransaction {
@@ -64,6 +73,11 @@ export interface ReviewSummary {
   files: Array<{
     path: string
     state: ReviewState
+    /**
+     * Why this file could not be reverted. Present only while `state` is
+     * `conflicted` — it is the message the materializer refused with.
+     */
+    conflictReason?: string
     addedLines: number
     removedLines: number
     hunks: Array<{ id: string; state: HunkState }>

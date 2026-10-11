@@ -157,6 +157,12 @@ export const CLIENT_SCRIPT = /* js */ `
     setDot(conn);
     const labels = { disconnected: 'Disconnected', connecting: 'Connecting…', connected: 'Connected', error: 'Connection error' };
     $('status-text').textContent = labels[conn] || conn;
+    // "Disconnected" was the same three words whether nothing was listening, the
+    // Host refused our cookie, or a proxy held the port — so the first thing you
+    // had to do was guess. When the controller has classified the failure, say
+    // what it is instead of repeating the state you can already see.
+    const hint = state.connectionHint;
+    if (hint && conn !== 'connected') $('status-text').textContent = hint.title;
     // Reconnect. Always visible, because the case that needs it most is the one
     // where the panel still says "Connected": the Host was restarted (or the
     // desktop app came up on a new port) and the socket we are holding is dead.
@@ -180,7 +186,8 @@ export const CLIENT_SCRIPT = /* js */ `
     }
     $('host-info').textContent = bits.join(' · ');
     $('mux-status').textContent = state.muxStatus ? ('stream: ' + state.muxStatus) : '';
-    if (state.errorMessage) $('host-info').textContent = state.errorMessage;
+    if (hint && conn !== 'connected') $('host-info').textContent = hint.fix;
+    else if (state.errorMessage) $('host-info').textContent = state.errorMessage;
 
     // Workspace
     const pendingBanner = $('ws-pending');
@@ -1161,8 +1168,11 @@ export const CLIENT_SCRIPT = /* js */ `
       const files = rv.files || [];
       for (let j = 0; j < files.length; j++) {
         const f = files[j];
+        // The reason is part of the signature, not just the state: a file that
+        // is refused twice with two different reasons keeps state 'conflicted',
+        // and a sig that ignores it would leave the first reason on screen.
         s += ';' + f.path + ',' + f.state + ',' + f.addedLines + ',' + f.removedLines
-          + ',' + ((f.hunks || []).length);
+          + ',' + ((f.hunks || []).length) + ',' + (f.conflictReason || '');
       }
       return s;
     }
@@ -1531,7 +1541,19 @@ export const CLIENT_SCRIPT = /* js */ `
       } else {
         const stateLabel = document.createElement('span');
         stateLabel.className = 'rf-state ' + f.state;
-        stateLabel.textContent = f.state === 'accepted' ? '✓ kept' : f.state === 'rejected' ? '✕ reverted' : f.state;
+        // 'conflicted' is not a neutral state: it means the undo was offered,
+        // clicked, and declined, because writing would have destroyed an edit
+        // made after this turn. Saying just "conflicted" is a word with no next
+        // step, so the label names the outcome and the reason rides along.
+        stateLabel.textContent = f.state === 'accepted' ? '✓ kept'
+          : f.state === 'rejected' ? '✕ reverted'
+          : f.state === 'conflicted' ? '⚠ not reverted' : f.state;
+        if (f.conflictReason) {
+          stateLabel.title = f.conflictReason;
+          // The reason is the actionable part, so the row carries it too — the
+          // label alone is easy to hover past.
+          fileRow.title = f.conflictReason;
+        }
         fileRow.appendChild(stateLabel);
       }
 

@@ -1,9 +1,9 @@
-# DeepSeek Harness Connector for VS Code (v0.1.6)
+# DeepSeek Harness Connector for VS Code (v0.1.7)
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
 [![VS Code Marketplace](https://img.shields.io/badge/VS%20Code-Marketplace-blue.svg)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
-[![Version](https://img.shields.io/badge/version-0.1.6-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.6)
+[![Version](https://img.shields.io/badge/version-0.1.7-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.7)
 
 > DeepSeek Harness 的原生 VS Code 客户端。
 >
@@ -24,6 +24,41 @@ VS Code ─────┘
 ```
 
 VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**会话——所以浏览器刷新该会话时能看到 VS Code 发送的内容。
+
+## v0.1.7 新特性
+
+**对话越长，每个流式分块越便宜。**
+
+- **修复：webview 每个流式分块都会把整条对话流重画一遍。** `renderVersion` 每来一个分块就
+  变，而 webview 把「变了」当作「把 `#messages` 拆了重来」——顺带把每一条助手消息重新过
+  一遍 markdown-it。于是一个分块的代价正比于会话长度，这才是「聊得越久越卡」的真实机制。
+  在一条 40 轮的对话上实测，每 40 个字符新文本：
+
+  | | 修复前 | 修复后 |
+  |---|---|---|
+  | 新建 DOM 节点 | 291 | **4** |
+  | markdown 解析次数 | 约 42 | **1** |
+  | 重解析的 markdown 字节 | 43 KB | **1.4 KB** |
+
+  每个条目现在带 `uid`（它的 DOM key——流式增量更新、工具行拿到结果时都不变）和 `rev`
+  （它自己的变更签名，每次被改都加盖）。webview 按这两个字段做调和，所以一个分块只重画
+  一行，其余每一行都保留原有节点——以及已经解析好的 markdown。`uid` 取自进程级计数器，
+  所以为同一会话重建的模型（重连、fork、切换）不会发出一个 webview 手里已有节点的 id。
+- **修复：回合已结束后到达的增量会多出一个重复气泡。** 实时助手流与持久日志之间没有顺序
+  保证，所以一个分块可能落在 `turn/end` 之后——或者落在它所重复的那条权威
+  `assistant/message` 之后。它找不到流式占位符，就从空重建缓冲区，在已完成的答案下面再
+  追加一个助手气泡。现在，属于已结束回合、或已定稿步骤的增量会被直接丢弃。
+- **修复：一次流式 flush 会按帧数重复投影模型。** `applyMuxFrame()` 在逐帧循环里构建完整
+  快照，而一次 flush 装着一整轮的增量。现在整批只投影一次，与这批本来就只有一次的推送对齐。
+- **修复：会话 `<select>` 每次状态推送都重建**——也就是每个流式分块都重建——会在用户正在
+  操作时把选择丢掉，只为了重画一份完全一样的列表。现在加了签名守卫。
+
+门禁：回归测试现为 **268 项断言**（原 243），新增两组：一组在模型层钉住流式身份契约与
+「不产生僵尸气泡」的规则；另一组直接驱动真实 webview 脚本，断言「`renderVersion` 变了但
+条目没变」的推送**不建任何 DOM、不解析任何 markdown**，而一个流式分块只重画一行。真机
+集成仍为 **29/29**。
+
+完整差异见 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
 
 ## v0.1.6 新特性
 
@@ -252,7 +287,7 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
    或从 [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases) 安装 VSIX：
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.1.6.vsix
+   code --install-extension harness-connector-deepseek-0.1.7.vsix
    ```
 
 3. **不用配置任何东西。** 扩展会自动连接：它读取 `dsh web` 写在 `$DSH_HOME/.credentials.yaml` 里的浏览器会话签名密钥，自己签出同一个 `dsh-auth-…` cookie。**没有需要粘贴的 token。**
@@ -368,7 +403,7 @@ path"`、`@dir/`，可带 `:L<n>` / `:L<n>-L<m>` 后缀；从 `@` 补全列表�
 一个独立的 Node 脚本用真实客户端代码驱动一个**假**的 harness（不预设具体版本——插件是协商的，这个假实现也是）—— 不需要 `dsh web`：
 
 ```bash
-npm run protocol-test    # 243 项断言：双流传输拆分（$events 白名单 vs
+npm run protocol-test    # 268 项断言：双流传输拆分（$events 白名单 vs
                          # session/follow）、线缆协商（点分/斜杠、cookie 门禁、
                          # 事件套接字）、认证、cookie 派生、{args} payload、
                          # 审批与提问两条瀑布（Allow/Deny 的确切信封、cancel 撤卡、
@@ -398,8 +433,8 @@ npm install
 npm run build        # esbuild → dist/extension.js
 npm run watch        # 变更时自动重建
 npm run typecheck
-npm run package      # → harness-connector-deepseek-0.1.6.vsix
-npm run protocol-test      # 针对假 harness 的 243 项协议断言
+npm run package      # → harness-connector-deepseek-0.1.7.vsix
+npm run protocol-test      # 针对假 harness 的 268 项协议断言
 npm run protocol-probe     # 报告真实 dsh web 暴露了什么
 ```
 
@@ -434,8 +469,9 @@ npm run protocol-probe     # 报告真实 dsh web 暴露了什么
 - 未知的 harness 事件类型会被忽略（协议是可合并扩展的）；它们不会导致客户端崩溃，但也不会渲染。
 - Diff 审查的 Reject 使用 `git checkout` 回退——目标文件上未提交的本地修改会在 Reject 时丢失。
 
-## 路线图（v0.1.7+）
+## 路线图（v0.1.8+）
 
+- 按条目下发状态增量：流式推送目前仍整份发送对话流（40 轮会话约 52 KB/次）。渲染端已不再重建它，但跨 `postMessage` 的结构化克隆仍是每个分块剩下的代价。
 - 检查器：过滤框 / 类型高亮 / 导出 JSONL
 - 搜索：限定工作区、分页、命中高亮
 - 内联补全（Inline Completion）

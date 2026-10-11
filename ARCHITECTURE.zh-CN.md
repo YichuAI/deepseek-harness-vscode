@@ -353,7 +353,11 @@ findHarnessWorkspace()          — 只读：匹配文件夹 ↔ harness workspa
 
 ## 流式性能
 
-`EventBuffer` 合并高频 `assistant/chunk` 帧，最多每 **30 ms** 刷新一次。`turn/end` 和 `assistant/message` 强制立即刷新，使 UI 即时定稿。webview 仅在 `renderVersion` 变化时重渲染——绝不按 token 逐次重渲染。
+`EventBuffer` 合并高频 `assistant/chunk` 帧，最多每 **30 ms** 刷新一次。`turn/end` 和
+`assistant/message` 强制立即刷新，使 UI 即时定稿。
+
+下面的「推送预算」说：一次推送必须真的有东西可推。但光有这条不够——流式推送**确实**有东西
+可推，而 webview 仍然让它的代价随会话长度增长。下面两节是同一个问题的两半。
 
 ### 推送预算（v0.1.6）
 
@@ -378,6 +382,61 @@ findHarnessWorkspace()          — 只读：匹配文件夹 ↔ harness workspa
 降到 **1 次推送 / 35 KB / 0 次重建**；一次作答往返从 6 次 / 约 212 KB / 6 次重建降到
 3 次 / 约 106 KB / 0 次。`scripts/protocol-test.ts` 第 I 组把推送次数和"`renderVersion`
 没动"都断言住了——这里若回归，是测试失败，而不是"感觉有点卡"。
+
+### 逐条增量渲染（v0.1.7）
+
+`renderVersion` 每个流式分块都会变——这是有意为之，webview 就是靠它知道有新内容。错在
+**消费端**：任何变化都意味着 `msgs.innerHTML = ''` 然后对每个条目调用 `renderItem()`，于是一个
+分块会把屏幕上每一条助手消息重跑一遍 markdown-it、重建每一行。一个分块的代价因此正比于
+对话流长度，一整轮的代价正比于它的平方。在一条 40 轮的对话上实测，每 40 个字符新文本：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| 新建 DOM 节点 | 291 | 4 |
+| markdown 解析次数 | 约 42 | 1 |
+| 重解析的 markdown 字节 | 43 KB | 1.4 KB |
+
+这个修法靠 `ConversationItem` 上的两个字段（见 `ItemIdentity`），都由
+`ConversationModel.stamp()` 加盖：
+
+- **`uid`** —— DOM key。只赋一次并保持，所以流式文本更新、工具行拿到结果都不变。它只在条目
+  被**替换**时改变（流式占位符变成持久的 `assistant/message`），而那正是确实需要新节点的时刻。
+  计数器是**模块级**而不是实例级：webview 按 `uid` 缓存节点，而为同一会话重建的模型
+  （重连、fork、切换）若从头计数，就会撞上上一份对话流已缓存的那些行。
+- **`rev`** —— 变更签名。条目的每次变更都会推进它，于是「这一行变了吗」是一次整数比较，
+  而不是内容 diff。
+
+`renderTranscript()` 拿 `snap.items` 与一张 `Map<uid, {el, sig}>` 做调和。`sig` 没变的条目
+保留原节点——也就保留了它的子树和已解析的 markdown。被复用的节点是**先摘下再按序挂回**，
+而不是重建；代价是指针操作，不是一次解析加一次 DOM 构建。工具行的签名里还折进了挂在它上面的
+review（`reviewSigFor`），因为 review 卡片是画在工具行**内部**的，而 review store 可以在任何
+条目都没动的情况下变化。
+
+这个守卫还带来第二个更大的效果：一次只差 `renderVersion` 的推送——`session/follow` 的重放，
+或由对话流不显示的字段驱动的状态——现在**不建任何 DOM、不解析任何 markdown**。
+`scripts/protocol-test.ts` 第 K 组用计数 DOM 桩驱动真实的 `CLIENT_SCRIPT`，把这一点和
+「一个流式分块只重画一行」都断言住了。
+
+同一类毛病还有两处较小的贡献者，一并收掉：
+
+- **`applyMuxFrame()` 按帧数重复投影模型。** 它在逐帧循环里构建完整 `snapshot()`
+  （对每个条目做一次 filter 加一次展开），而一次 flush 装着一整轮的增量。现在整批只投影一次，
+  且只在 `model.version` 真的动了时投影——调用方本来每批只发布一次，两个计数从此对齐。
+- **会话 `<select>` 每次推送都重建。** 重建选项会在用户操作途中把选择丢掉。现在加了签名守卫。
+
+#### 已知的剩余代价
+
+流式推送仍然整份发送对话流：40 轮会话约 **52 KB/次**，跨 `postMessage` 做结构化克隆。渲染端
+已不再重建它，所以常数不大，但它的体积仍随对话增长。要砍掉它需要在协议层做按条目的增量
+（`UiState.snapshotPatch` 之类），那是协议变更，不在 0.1.7 里。
+
+#### 已实测、并有意不改的地方
+
+`captureFrame()` 每帧都 `JSON.stringify` 一次来填检查器环形缓冲区，而 0.1.6 只是让它在面板
+关闭时不**发布**。实测：一个典型的 `assistant/stream` 增量约 **1.2 µs**，一条 20 KB 的
+`assistant/message` 约 **47 µs**——按流式每秒约 33 帧算，合下来每秒钟几十微秒。改成惰性计算
+意味着要留住最多 300 个活的 frame 对象，而不是 300 个截断到 2 KB 的字符串：拿有界内存换一个
+舍入误差。不动。
 
 ### 检查器缓冲区的发布时机
 
@@ -496,7 +555,7 @@ media/
 ├── origin.png                # 源材料（VSIX 排除）
 └── markdown-it.umd.min.js    # VSIX 打包用（114 KB）
 scripts/
-├── protocol-test.ts          # 假 harness 协议测试，243 项断言（无需 dsh web）
+├── protocol-test.ts          # 假 harness 协议测试，268 项断言（无需 dsh web）
 ├── protocol-probe.ts         # 向真实 `dsh web` 询问它实际提供什么
 ├── integration-test.ts       # 针对真实 dsh 的闭环测试
 └── gen-icon.ts               # 从 origin.png 生成图标

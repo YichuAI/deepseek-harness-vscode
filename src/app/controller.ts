@@ -521,17 +521,26 @@ export class AppController {
         // REPLACES the whole field (`setState({ snapshot })`, `setState({ queue })`,
         // …) rather than mutating it in place.
         const st = this.d.getState()
-        const before = [this.model?.version, st.snapshot, st.canStop, st.control, st.sessionUsage]
+        const versionBefore = this.model?.version ?? -1
+        const before = [st.snapshot, st.canStop, st.control, st.sessionUsage]
         for (const f of frames) { this.captureFrame(f); this.applyMuxFrame(f) }
+        // Fold the model into UiState ONCE per batch. Doing it inside the
+        // per-frame loop meant a full `snapshot()` — a filter plus a spread over
+        // every item — for every frame in the batch, and one streaming flush
+        // carries a whole turn's worth of deltas.
+        if (this.model && this.model.version !== versionBefore) {
+          const snap = this.model.snapshot()
+          this.d.setState({ snapshot: snap, canStop: snap.running })
+        }
         const now = this.d.getState()
         // Publish only when the batch actually moved something. A `session/follow`
         // batch carries frames for the whole session, so an equally ordinary
         // flush is a replay of what is already on screen — and an unconditional
         // push here made the webview rebuild the transcript for a diff of
         // nothing, on a timer.
-        const moved = (this.model?.version ?? -1) !== before[0]
-          || now.snapshot !== before[1] || now.canStop !== before[2]
-          || now.control !== before[3] || now.sessionUsage !== before[4]
+        const moved = (this.model?.version ?? -1) !== versionBefore
+          || now.snapshot !== before[0] || now.canStop !== before[1]
+          || now.control !== before[2] || now.sessionUsage !== before[3]
         if (moved || this.inspectorOpen) this.d.pushState()
       })
     } catch (e) {
@@ -570,6 +579,14 @@ export class AppController {
     this.d.pushState()
   }
 
+  /**
+   * Fold ONE mux frame into the model / control surface.
+   *
+   * Deliberately does not touch `UiState.snapshot`: the caller owns the
+   * subscription batch and publishes the model once at the end, so a flush of N
+   * frames costs one `snapshot()` rather than N. Pushing the transcript per
+   * frame was the same mistake in a different place — the batch is one paint.
+   */
   private applyMuxFrame(frame: unknown): void {
     if (!this.model || !this.activeSessionId) return
     const f = frame as {
@@ -594,18 +611,13 @@ export class AppController {
         this.d.setState({ sessionUsage: this.usage.snapshot() })
       }
       if (event.type === 'turn/end') void this.syncSessionProjectionAsync()
-      this.d.setState({ snapshot: this.model.snapshot() })
-      const snap = this.d.getState().snapshot
-      this.d.setState({ canStop: snap?.running === true })
       return
     }
     // The host's own running flag (`api-session/status`, forwarded on `$events`).
     // Durable `turn/start` / `turn/end` also flip this, but they arrive a beat
     // later — and not at all when another client drove the turn.
     if (f.type === 'session/status' && f.sessionId === this.activeSessionId) {
-      const running = (frame as { running?: unknown }).running === true
-      this.model?.setRunning(running)
-      this.d.setState({ snapshot: this.model?.snapshot(), canStop: running })
+      this.model.setRunning((frame as { running?: unknown }).running === true)
       return
     }
     // DSH 0.1.6+ carries assistant deltas outside the durable journal, so they
@@ -617,7 +629,6 @@ export class AppController {
         f.step,
         f.chunk as Parameters<ConversationModel['applyStreamChunk']>[2],
       )
-      this.d.setState({ snapshot: this.model.snapshot() })
       return
     }
     if (f.type === 'stream/error' && f.error) {

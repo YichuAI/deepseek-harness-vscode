@@ -8,9 +8,11 @@
  *   3. System items are hidden by default via filtering in snapshot(), so
  *      downstream code never does "if user && system" dances.
  *   4. renderVersion is a monotonically incrementing counter that bumps on
- *      EVERY mutation (including streaming assistant text updates). This is
- *      the sole change-detection signature for the webview — eliminates the
- *      "streaming item text changed but same seq → no re-render" bug.
+ *      EVERY mutation (including streaming assistant text updates). It is the
+ *      "something changed, re-run render()" signal. The webview no longer uses
+ *      it to rebuild the transcript wholesale: each item also carries a `uid`
+ *      (its DOM key) and a `rev` (its own change signature), so a streamed
+ *      chunk re-renders one row instead of every row. See `ItemIdentity`.
  */
 
 import type {
@@ -82,6 +84,19 @@ export interface ToolCompletedHandler {
   }): void
 }
 
+/**
+ * Source of {@link ItemIdentity.uid}, deliberately module-level rather than
+ * per-model.
+ *
+ * The webview caches a DOM node per `uid` and shows it again when the key and
+ * the change signature both match. A per-instance counter would restart at 1
+ * every time a session is (re)selected — a reconnect, a fork, a switch — and
+ * the fresh transcript's `user:1` would then match the *previous* transcript's
+ * cached row and be answered with a stale node. A process-wide counter removes
+ * that possibility by construction: no two items ever share a uid.
+ */
+let nextItemUid = 0
+
 export class ConversationModel {
   private items: ConversationItem[] = []
   private running = false
@@ -95,10 +110,43 @@ export class ConversationModel {
   private streaming = new Map<string, { text: string; reasoning: string }>()
   /** Index of currently streaming assistant item (-1 if none). */
   private streamingAssistantIdx = -1
+  /** Monotonic counter for {@link ItemIdentity.rev} — see {@link stamp}. */
+  private revSeq = 0
+  /**
+   * Highest turn whose `turn/end` has been folded.
+   *
+   * A live delta can still be in flight when the turn ends (a durable
+   * `assistant/message` and the stream's own `end` frame are not ordered against
+   * each other). Without this the late delta started a fresh streaming bubble
+   * at the very bottom of the transcript — a duplicated answer under the
+   * "Turn N — stop" line.
+   */
+  private lastEndedTurn = -1
+  /**
+   * `turn:step` keys already closed by a durable `assistant/message`.
+   *
+   * The durable message is authoritative and replaces the streaming placeholder.
+   * A delta that arrives after it would find no placeholder and start a second
+   * bubble for text the transcript already shows.
+   */
+  private finalizedSteps = new Set<string>()
   /** Callback fired when tool call+result pair completes. */
   private toolCompletedHandler: ToolCompletedHandler | undefined
 
   constructor(private readonly sessionId: SessionId) {}
+
+  /**
+   * Stamp one item with its render identity (see {@link ItemIdentity}).
+   *
+   * Used on creation and again on every mutation: `uid` is assigned once and
+   * kept, `rev` advances every call. That pair is what lets the webview reuse
+   * the DOM node it already built instead of re-rendering the whole transcript.
+   */
+  private stamp<T extends ConversationItem>(item: T): T {
+    item.uid ??= ++nextItemUid
+    item.rev = ++this.revSeq
+    return item
+  }
 
   setToolCompletedHandler(h: ToolCompletedHandler | undefined): void {
     this.toolCompletedHandler = h
@@ -111,6 +159,7 @@ export class ConversationModel {
     const item = this.items[idx]
     if (item?.kind === 'tool') {
       item.reviewId = reviewId
+      this.stamp(item)
       this.bump()
     }
   }
@@ -163,6 +212,8 @@ export class ConversationModel {
     this.streaming.clear()
     this.toolIndexByCallId.clear()
     this.streamingAssistantIdx = -1
+    this.lastEndedTurn = -1
+    this.finalizedSteps.clear()
     this.renderVersion++
     for (const e of events) this.applyEvent(e)
   }
@@ -185,11 +236,11 @@ export class ConversationModel {
 
   /** Optimistic user echo (still needed — send prompt first, event arrives later). */
   optimisticUserEcho(text: string): void {
-    this.items.push({
+    this.items.push(this.stamp({
       kind: 'user',
       seq: this.lastSeq + 0.5,
       text,
-    })
+    }))
     this.renderVersion++
   }
 
@@ -228,18 +279,18 @@ export class ConversationModel {
     }
     if (!text) return
     if (isSystemSource(d.source)) {
-      this.items.push({
+      this.items.push(this.stamp({
         kind: 'system',
         seq: event.seq,
         text,
         source: sourceLabel(d.source),
-      })
+      }))
     } else {
-      this.items.push({
+      this.items.push(this.stamp({
         kind: 'user',
         seq: event.seq,
         text,
-      })
+      }))
     }
     this.bump()
   }
@@ -261,7 +312,13 @@ export class ConversationModel {
   }
 
   private applyStreamChunkData(d: AssistantChunkData): void {
+    // A delta that outlived its turn or its durable message has nowhere to land:
+    // it would recreate the buffer the close already dropped and append a second
+    // bubble for text the transcript is already showing.
+    if (d.turn <= this.lastEndedTurn) return
     const key = `${d.turn}:${d.step}`
+    if (this.finalizedSteps.has(key)) return
+
     let entry = this.streaming.get(key)
     if (!entry) { entry = { text: '', reasoning: '' }; this.streaming.set(key, entry) }
     const c = d.chunk
@@ -274,20 +331,21 @@ export class ConversationModel {
       if (existing && existing.kind === 'assistant' && existing.streaming) {
         existing.text = entry.text
         existing.reasoning = entry.reasoning || undefined
+        this.stamp(existing)
         this.bump()
         return
       }
     }
     if (hasContent) {
       const idx = this.items.length
-      this.items.push({
+      this.items.push(this.stamp({
         kind: 'assistant',
         seq: -(d.turn * 1000 + d.step),
         text: entry.text,
         reasoning: entry.reasoning || undefined,
         toolCallIds: [],
         streaming: true,
-      })
+      }))
       this.streamingAssistantIdx = idx
       this.bump()
     }
@@ -297,6 +355,9 @@ export class ConversationModel {
     const d = event.data as AssistantMessageData
     const key = `${d.turn}:${d.step}`
     this.streaming.delete(key)
+    // The durable message is the authority for this step; any delta still in
+    // flight for it is a stale echo and must not reopen the buffer.
+    this.finalizedSteps.add(key)
     const msg = d.message
     const text = blocksToText(msg.content)
     const reasoning = extractReasoning(msg.content)
@@ -307,7 +368,7 @@ export class ConversationModel {
       }
     }
 
-    const newItem: ConversationItem = {
+    const newItem: ConversationItem = this.stamp({
       kind: 'assistant',
       seq: event.seq,
       text,
@@ -315,7 +376,7 @@ export class ConversationModel {
       toolCallIds,
       usage: d.usage,
       streaming: false,
-    }
+    })
 
     // Replace streaming placeholder if one exists at streamingAssistantIdx.
     if (this.streamingAssistantIdx >= 0) {
@@ -335,7 +396,7 @@ export class ConversationModel {
   private applyToolCall(event: SessionEvent): void {
     const d = event.data as ToolCallData
     const idx = this.items.length
-    this.items.push({
+    this.items.push(this.stamp({
       kind: 'tool',
       seq: event.seq,
       callId: d.callId,
@@ -343,7 +404,7 @@ export class ConversationModel {
       arguments: d.arguments,
       result: undefined,
       state: 'running',
-    })
+    }))
     this.toolIndexByCallId.set(d.callId, idx)
     this.bump()
   }
@@ -365,6 +426,7 @@ export class ConversationModel {
         t.result = { text, isError }
         t.resultMeta = d.meta
         t.state = isError ? 'error' : 'completed'
+        this.stamp(t)
         this.bump()
         // Notify handler so ReviewController can create a review transaction
         if (!isError) {
@@ -379,7 +441,7 @@ export class ConversationModel {
       }
     }
     // Call id unknown → orphan; still append (safe fallback, won't crash UI).
-    this.items.push({
+    this.items.push(this.stamp({
       kind: 'tool',
       seq: event.seq,
       callId,
@@ -387,14 +449,14 @@ export class ConversationModel {
       arguments: '',
       result: { text, isError },
       state: isError ? 'error' : 'completed',
-    })
+    }))
     this.bump()
   }
 
   private applyTurnStart(event: SessionEvent): void {
     const d = event.data as { turn: number }
     this.running = true
-    this.items.push({ kind: 'status', seq: event.seq, text: `Turn ${d.turn} — started`, running: true })
+    this.items.push(this.stamp({ kind: 'status', seq: event.seq, text: `Turn ${d.turn} — started`, running: true }))
     this.bump()
   }
 
@@ -403,8 +465,10 @@ export class ConversationModel {
     this.running = false
     this.streaming.clear()
     this.streamingAssistantIdx = -1
+    // Anything still arriving for this turn (or an earlier one) is a late echo.
+    this.lastEndedTurn = Math.max(this.lastEndedTurn, d.turn)
     const reason = d.reason?.kind ?? 'unknown'
-    this.items.push({ kind: 'status', seq: event.seq, text: `Turn ${d.turn} — ${reason}`, running: false })
+    this.items.push(this.stamp({ kind: 'status', seq: event.seq, text: `Turn ${d.turn} — ${reason}`, running: false }))
     this.bump()
   }
 

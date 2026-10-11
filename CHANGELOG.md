@@ -5,6 +5,58 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] — 2026-10-11
+
+Tagline: **the longer the conversation, the cheaper each streamed chunk.**
+Tagline (ZH): **对话越长，每个流式分块越便宜。**
+
+### Changed
+
+- **The webview rebuilt the whole transcript on every streamed chunk.** `renderVersion`
+  changes on every chunk, and the webview used that as a signal to tear `#messages` down
+  and rebuild every row — re-parsing every assistant message through markdown-it on the
+  way. The cost of one chunk therefore grew with the length of the conversation, which is
+  the actual mechanism behind "it gets laggier the longer I chat". Measured on a 40-turn
+  transcript, for every 40 characters of new text:
+
+  | | before | after |
+  |---|---|---|
+  | DOM nodes built | 291 | **4** |
+  | markdown passes | ~42 | **1** |
+  | markdown bytes re-parsed | 43 KB | **1.4 KB** |
+
+  Each item now carries a `uid` (its DOM key — stable across streaming updates and a tool
+  row gaining its result) and a `rev` (its own change signature, stamped on every
+  mutation). The webview reconciles against those, so a chunk redraws exactly one row and
+  every other row keeps the node — and the parsed markdown — it already has. `uid` comes
+  from a process-wide counter, so a model rebuilt for the same session (reconnect, fork,
+  switch) cannot hand out an id the webview already has a node for.
+- **One streaming flush built the full snapshot once per frame.** `applyMuxFrame()`
+  projected the model into `UiState` inside the per-frame loop, and a flush carries a
+  whole turn's worth of deltas. The projection now happens once per batch, matching the
+  single publish the batch already produced.
+- **The session `<select>` was rebuilt on every state push** — i.e. on every streamed
+  chunk — discarding the user's selection mid-interaction to redraw an identical list. It
+  is now guarded by a signature.
+
+### Fixed
+
+- **A delta that arrived after its turn closed opened a duplicate assistant bubble.** The
+  live assistant stream and the durable journal are not ordered against each other, so a
+  chunk can land after `turn/end` — or after the authoritative `assistant/message` it
+  duplicates. It found no streaming placeholder, recreated the buffer from empty and
+  appended a second bubble under the finished answer. Deltas for an ended turn or an
+  already-finalised step are now dropped.
+
+### Notes
+
+- The inspector ring buffer's `JSON.stringify` per frame was measured rather than assumed:
+  **~1.2 µs** for a typical `assistant/stream` delta and ~47 µs for a 20 KB
+  `assistant/message`. At a streaming cadence of ~33 frames/s that is tens of
+  microseconds per second. It is left alone: computing the raw lazily would mean
+  retaining up to 300 live frame objects instead of 300 truncated 2 KB strings, which is a
+  memory regression bought for nothing.
+
 ## [0.1.6] — 2026-10-11
 
 Tagline: **一次问答不再把整条对话流重画两遍。**

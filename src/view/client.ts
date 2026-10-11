@@ -3,7 +3,8 @@
  * block wrapped with the CSP nonce).
  *
  * Responsibilities:
- *   • Render UiState snapshots (full re-render on renderVersion change only).
+ *   • Render UiState snapshots. The transcript is reconciled item-by-item, so a
+ *     streamed chunk redraws one row rather than rebuilding the conversation.
  *   • Assistant markdown via markdown-it (html:false — unsafe HTML is dropped).
  *   • System / Tool cards are collapsed by default; click-to-expand.
  *   • Post user actions back to the extension host (sendPrompt, selectSession…).
@@ -37,6 +38,13 @@ export const CLIENT_SCRIPT = /* js */ `
   });
 
   let lastRenderVersion = -1;
+  // Incremental transcript state. itemNodes maps an item's key to the element
+  // already drawn for it and the signature it was drawn from; transcriptEmpty
+  // remembers whether the placeholder is the thing on screen. Together they let
+  // a streamed chunk re-render ONE row instead of the whole conversation.
+  let itemNodes = new Map();
+  let transcriptEmpty = false;
+  let lastSessionsSig = '';
   let currentReviews = [];
   let currentApprovals = [];
   let currentQuestions = [];
@@ -194,38 +202,40 @@ export const CLIENT_SCRIPT = /* js */ `
       if (pendingBanner) pendingBanner.style.display = 'none';
     }
 
-    // Sessions
+    // Sessions. Guarded by a signature: this runs on every push, and a push
+    // fires for every streamed chunk. Rebuilding the <select> that often threw
+    // away the user's selection mid-interaction to redraw an identical list.
     const sel = $('session-select');
-    const prev = sel.value;
-    sel.innerHTML = '';
-    if (state.sessions.length === 0) {
-      const opt = document.createElement('option');
-      opt.value = ''; opt.textContent = '(no sessions)';
-      sel.appendChild(opt);
-    } else {
-      for (const s of state.sessions) {
+    const sessionSig = state.sessions.map(function (s) {
+      return s.sessionId + '\\u0001' + s.label + '\\u0001' + (s.running ? '1' : '0');
+    }).join('\\u0002') + '\\u0003' + String(state.activeSessionId);
+    if (sessionSig !== lastSessionsSig) {
+      lastSessionsSig = sessionSig;
+      const prev = sel.value;
+      sel.innerHTML = '';
+      if (state.sessions.length === 0) {
         const opt = document.createElement('option');
-        opt.value = s.sessionId;
-        opt.textContent = s.label;
-        if (state.activeSessionId === s.sessionId) opt.selected = true;
+        opt.value = ''; opt.textContent = '(no sessions)';
         sel.appendChild(opt);
+      } else {
+        for (const s of state.sessions) {
+          const opt = document.createElement('option');
+          opt.value = s.sessionId;
+          opt.textContent = s.label;
+          if (state.activeSessionId === s.sessionId) opt.selected = true;
+          sel.appendChild(opt);
+        }
       }
+      if (prev && state.activeSessionId === undefined) sel.value = prev;
     }
-    if (prev && state.activeSessionId === undefined) sel.value = prev;
 
-    // Messages — rebuild on renderVersion change (streaming fix) OR when
-    // there's no snapshot yet (connection state may have changed).
+    // Messages — reconcile on renderVersion change, or reset when there is no
+    // snapshot at all (the connection state may have changed).
     const msgs = $('messages');
     const snap = state.snapshot;
     if (snap && snap.renderVersion !== lastRenderVersion) {
       lastRenderVersion = snap.renderVersion;
-      if (snap.items.length === 0) {
-        msgs.innerHTML = '<div class="empty">' + (state.activeSessionId ? 'No messages yet. Send a prompt below.' : 'Select a session to view its history.') + '</div>';
-      } else {
-        msgs.innerHTML = '';
-        for (const item of snap.items) msgs.appendChild(renderItem(item));
-      }
-      msgs.scrollTop = msgs.scrollHeight;
+      renderTranscript(msgs, snap, state.activeSessionId);
     } else if (!snap) {
       // No snapshot — show contextual empty state based on connection.
       // This branch runs every render when there's no snap, so the message
@@ -244,6 +254,8 @@ export const CLIENT_SCRIPT = /* js */ `
       }
       var expected = '<div class="empty">' + escapeText(emptyMsg) + '</div>';
       if (msgs.innerHTML !== expected) msgs.innerHTML = expected;
+      itemNodes = new Map();
+      transcriptEmpty = false;
     }
 
     // Input controls
@@ -1100,6 +1112,98 @@ export const CLIENT_SCRIPT = /* js */ `
         n.className = 'ctl-unsupported';
       }
     }));
+  }
+
+  // ─── transcript reconciliation ──────────────────────────────────────────────
+  // The transcript used to be torn down and rebuilt on every renderVersion
+  // change — and renderVersion changes on every streamed chunk. With N turns on
+  // screen that is N markdown re-parses and N rows of DOM per chunk, for the
+  // whole life of the turn: measured at 40 turns, ~42 markdown re-parses and
+  // ~290 fresh nodes for every 40 characters that arrived. That is the actual
+  // mechanism behind "the longer I chat, the laggier it gets".
+  //
+  // Each item instead carries a stable key (uid) and its own change signature
+  // (rev, stamped by ConversationModel on every mutation), so a chunk redraws
+  // exactly one row and every other row keeps the node — and the already-parsed
+  // markdown — it was given the first time.
+  function itemKey(item) {
+    return item.kind + ':' + (item.uid != null ? item.uid : item.seq);
+  }
+
+  /** Everything about one item that decides what it looks like. */
+  function itemSig(item) {
+    if (item.rev != null) {
+      let s = 'r' + item.rev;
+      if (item.kind === 'tool' && item.reviewId) s += '|' + reviewSigFor(item.reviewId);
+      return s;
+    }
+    // No identity stamp (a hand-built snapshot, e.g. in a test): fall back to
+    // reading the content itself.
+    const f = [item.kind, item.seq, item.text || '', item.state || '',
+      item.running ? '1' : '', item.streaming ? '1' : '',
+      item.result ? (item.result.text + (item.result.isError ? '!' : '')) : ''];
+    if (item.kind === 'tool' && item.reviewId) f.push(reviewSigFor(item.reviewId));
+    return f.join('|');
+  }
+
+  /** The part of a review that decides how the tool row holding it looks. */
+  function reviewSigFor(reviewId) {
+    for (let i = 0; i < currentReviews.length; i++) {
+      const rv = currentReviews[i];
+      if (rv.id !== reviewId) continue;
+      if (rv.state !== 'pending') return '';
+      let s = rv.state;
+      const files = rv.files || [];
+      for (let j = 0; j < files.length; j++) {
+        const f = files[j];
+        s += ';' + f.path + ',' + f.state + ',' + f.addedLines + ',' + f.removedLines
+          + ',' + ((f.hunks || []).length);
+      }
+      return s;
+    }
+    return '';
+  }
+
+  function renderTranscript(msgs, snap, activeSessionId) {
+    const items = snap.items;
+    if (items.length === 0) {
+      itemNodes = new Map();
+      if (!transcriptEmpty) {
+        msgs.innerHTML = '<div class="empty">' + (activeSessionId
+          ? 'No messages yet. Send a prompt below.'
+          : 'Select a session to view its history.') + '</div>';
+        transcriptEmpty = true;
+      }
+      return;
+    }
+    transcriptEmpty = false;
+    const next = new Map();
+    const order = [];
+    let changed = false;
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const key = itemKey(item);
+      const sig = itemSig(item);
+      const known = itemNodes.get(key);
+      let el;
+      if (known && known.sig === sig) {
+        el = known.el;
+      } else {
+        el = renderItem(item);
+        changed = true;
+      }
+      next.set(key, { el: el, sig: sig });
+      order.push(el);
+    }
+    // A shorter list with nothing new still has to be repainted (an item was
+    // dropped), which is why both tests are needed.
+    if (!changed && next.size === itemNodes.size) return;
+    itemNodes = next;
+    // Re-attach in order. A reused element was only ever detached, never
+    // rebuilt, so its subtree — and the markdown inside it — is still there.
+    msgs.innerHTML = '';
+    for (let k = 0; k < order.length; k++) msgs.appendChild(order[k]);
+    msgs.scrollTop = msgs.scrollHeight;
   }
 
   // ─── per-item render ────────────────────────────────────────────────────────

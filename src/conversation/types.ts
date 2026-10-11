@@ -12,13 +12,36 @@
  * appear as a single collapsible card in the UI.
  */
 
-export interface UserMessageItem {
+/**
+ * Per-item render identity, stamped by {@link ConversationModel}.
+ *
+ * The webview renders the transcript incrementally, so it needs two answers per
+ * item and must get them in O(1): "is this still the same thing?" and "did it
+ * change since I last drew it?".
+ *
+ *   • `uid` — stable for the life of one item. It survives streaming text
+ *     updates and a tool row gaining its result; it changes only when the item
+ *     itself is replaced (the streaming placeholder becoming the durable
+ *     message). That is the DOM-node key.
+ *   • `rev` — bumped on every mutation of the item. That is the change
+ *     signature.
+ *
+ * Both are optional so an item literal is still valid without them; a reader
+ * that finds them missing (a hand-built snapshot in a test) falls back to a
+ * content signature.
+ */
+export interface ItemIdentity {
+  uid?: number
+  rev?: number
+}
+
+export interface UserMessageItem extends ItemIdentity {
   kind: 'user'
   seq: number
   text: string
 }
 
-export interface AssistantMessageItem {
+export interface AssistantMessageItem extends ItemIdentity {
   kind: 'assistant'
   seq: number
   text: string
@@ -29,14 +52,14 @@ export interface AssistantMessageItem {
   streaming: boolean
 }
 
-export interface SystemItem {
+export interface SystemItem extends ItemIdentity {
   kind: 'system'
   seq: number
   text: string
   source?: string
 }
 
-export interface ToolItem {
+export interface ToolItem extends ItemIdentity {
   kind: 'tool'
   seq: number
   callId: string
@@ -50,7 +73,7 @@ export interface ToolItem {
   reviewId?: string
 }
 
-export interface StatusItem {
+export interface StatusItem extends ItemIdentity {
   kind: 'status'
   seq: number
   text: string

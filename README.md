@@ -1,9 +1,9 @@
-# DeepSeek Harness Connector for VS Code (v0.1.6)
+# DeepSeek Harness Connector for VS Code (v0.1.7)
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
 [![VS Code Marketplace](https://img.shields.io/badge/VS%20Code-Marketplace-blue.svg)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
-[![Version](https://img.shields.io/badge/version-0.1.6-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.6)
+[![Version](https://img.shields.io/badge/version-0.1.7-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.7)
 
 > Native VS Code client for DeepSeek Harness.
 >
@@ -24,6 +24,27 @@ VS Code ─────┘
 ```
 
 VS Code reads the workspaces and sessions the browser already has, and continues the **same** session — so a browser refresh of that session sees exactly what VS Code sent.
+
+## What's new in v0.1.7
+
+**The longer the conversation, the cheaper each streamed chunk.**
+
+- **Fixed: the webview rebuilt the whole transcript on every streamed chunk.** `renderVersion` changes on every chunk, and the webview treated any change as *rebuild `#messages` from scratch* — re-running markdown-it over every assistant message on the way. So the cost of one chunk grew with the length of the conversation, which is the real mechanism behind "it gets laggier the longer I chat." Measured on a 40-turn transcript, per 40 characters of new text:
+
+  | | before | after |
+  |---|---|---|
+  | DOM nodes built | 291 | **4** |
+  | markdown passes | ~42 | **1** |
+  | markdown bytes re-parsed | 43 KB | **1.4 KB** |
+
+  Each item now carries a `uid` (its DOM key — stable across a streaming update, and across a tool row gaining its result) and a `rev` (its own change signature, stamped on every mutation). The webview reconciles against those, so a chunk redraws exactly one row and every other row keeps the node — and the parsed markdown — it already had. `uid` is issued from a process-wide counter, so a model rebuilt for the same session (reconnect, fork, switch) can never hand out an id the webview already holds a node for.
+- **Fixed: a delta that arrived after its turn closed opened a duplicate bubble.** The live assistant stream and the durable journal are not ordered against each other, so a chunk can land after `turn/end` — or after the authoritative `assistant/message` it duplicates. It found no streaming placeholder, rebuilt the buffer from empty, and appended a second assistant bubble under the finished answer. Deltas for an ended turn, or an already-finalised step, are now dropped.
+- **Fixed: one streaming flush projected the model once per frame.** `applyMuxFrame()` built the full snapshot inside the per-frame loop, and a flush carries a whole turn's worth of deltas. It now happens once per batch, matching the single publish that batch already produced.
+- **Fixed: the session `<select>` was rebuilt on every state push** — that is, on every streamed chunk — throwing away your selection mid-interaction to redraw an identical list. Now signature-guarded.
+
+Verification: the regression gate is now **268 assertions** (was 243), including two new groups: one pinning the streaming identity contract and the no-zombie-bubble rule at the model level, and one driving the real webview script to assert that a push with a new `renderVersion` but unchanged items builds **zero** DOM and re-parses **zero** markdown, and that a streamed chunk rebuilds exactly one row. Live integration stays **29/29**.
+
+See [CHANGELOG.md](./CHANGELOG.md) for the full diff.
 
 ## What's new in v0.1.6
 
@@ -185,7 +206,7 @@ For your safety, the following remain out of scope:
    Or install the VSIX from [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases):
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.1.6.vsix
+   code --install-extension harness-connector-deepseek-0.1.7.vsix
    ```
 
 3. Nothing to configure. The extension auto-connects: it reads the browser-session
@@ -312,7 +333,7 @@ that implements the `0.2.1-alpha.2` server half exactly — so no `dsh web` is
 needed:
 
 ```bash
-npm run protocol-test    # 243 assertions: the two-stream transport split
+npm run protocol-test    # 268 assertions: the two-stream transport split
                          # ($events allowlist vs session/follow), wire negotiation
                          # (dot/slash, cookie gating, event socket), auth and cookie
                          # derivation, {args} payloads (wrapped vs bare), the approval
@@ -326,8 +347,13 @@ npm run protocol-test    # 243 assertions: the two-stream transport split
                          # panel driven through a scriptable DOM stub, the
                          # reconnect button's exact posts, Host-discovery parsing
                          # (pinned ports, three listener-table dialects, the
-                         # fingerprint's three verdicts), and the webview
-                         # script's integrity
+                         # fingerprint's three verdicts), the publish budget of a
+                         # waterfall event, the streaming model contract (stable
+                         # uid, advancing rev, no bubble after turn/end), the
+                         # webview's incremental reconciliation (a no-op push
+                         # builds zero DOM and re-parses zero markdown; one chunk
+                         # rebuilds one row), the batch projection budget, and the
+                         # webview script's integrity
 ```
 
 To ask your **real** `dsh web` what it actually serves (endpoint style, event
@@ -354,8 +380,8 @@ npm install
 npm run build        # esbuild → dist/extension.js
 npm run watch        # rebuild on change
 npm run typecheck
-npm run package      # → harness-connector-deepseek-0.1.6.vsix
-npm run protocol-test      # 243 protocol assertions against a fake harness
+npm run package      # → harness-connector-deepseek-0.1.7.vsix
+npm run protocol-test      # 268 protocol assertions against a fake harness
 npm run protocol-probe     # report what your real dsh web exposes
 ```
 
@@ -404,8 +430,9 @@ Press `F5` in VS Code to launch an Extension Development Host with the extension
 - Unknown harness event types are ignored (the protocol is merge-extensible); they do not crash the client but also do not render.
 - Diff review revert uses `git checkout` — uncommitted changes to the target file will be lost on Reject.
 
-## Roadmap (v0.1.7+)
+## Roadmap (v0.1.8+)
 
+- Per-item state patches: a streaming push still ships the whole transcript (~52 KB per push on a 40-turn session). The renderer no longer rebuilds it, but the structured clone across `postMessage` is the remaining per-chunk cost.
 - Inspector: filter box / type highlight / export as JSONL
 - Search: scope to workspace, pagination, highlight rendering
 - Inline Completion

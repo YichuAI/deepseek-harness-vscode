@@ -139,15 +139,17 @@ type StubListener = (e: unknown) => void
  */
 function makeStubEl(id: string): StubEl {
   const el: StubEl = {
-    id, value: '', textContent: '', className: '', src: '',
-    disabled: false, checked: false, style: {}, children: [] as unknown[],
+    id, value: '', textContent: '', className: '', src: '', alt: '', title: '', type: '',
+    disabled: false, checked: false, selected: false,
+    style: {}, children: [] as unknown[], dataset: {} as Record<string, string>,
+    scrollTop: 0, scrollHeight: 0,
     listeners: {} as Record<string, StubListener[]>,
     classList: { add() {}, remove() {}, toggle() {}, contains() { return false } },
     addEventListener(type: string, fn: StubListener) {
       const map = el['listeners'] as Record<string, StubListener[]>
       ;(map[type] ??= []).push(fn)
     },
-    appendChild(c: unknown) { (el['children'] as unknown[]).push(c) },
+    appendChild(c: unknown) { (el['children'] as unknown[]).push(c); return c },
     focus() {}, setAttribute() {}, getAttribute() { return null },
   }
   let html = ''
@@ -245,24 +247,37 @@ function bootWebviewInteractive(
   script: string,
   skeleton: string,
   state: Record<string, unknown>,
-): { error: string; panel: StubEl; actions: Record<string, unknown>[]; bootActions: Record<string, unknown>[]; push: (patch: Record<string, unknown>) => void; el: (id: string) => StubEl } {
+): { error: string; panel: StubEl; actions: Record<string, unknown>[]; bootActions: Record<string, unknown>[]; push: (patch: Record<string, unknown>) => void; el: (id: string) => StubEl; stats: { nodes: number; markdownCalls: number } } {
   const ids = [...skeleton.matchAll(/id="([^"]+)"/g)].map((m) => m[1] as string)
   const els = new Map(ids.map((id) => [id, makeStubEl(id)]))
   let handler: ((e: unknown) => void) | undefined
   const actions: Record<string, unknown>[] = []
+  // Counts what a re-render actually costs: nodes constructed and markdown
+  // passes. A transcript rebuild shows up in both; an incremental update in
+  // neither but for the one row that changed.
+  const stats = { nodes: 0, markdownCalls: 0 }
   const g = globalThis as unknown as Record<string, unknown>
-  g.document = { getElementById: (id: string) => els.get(id) ?? null, createElement: (t: string) => { const e = makeStubEl(t); e['tag'] = t; return e } }
+  g.document = {
+    getElementById: (id: string) => els.get(id) ?? null,
+    createElement: (t: string) => { stats.nodes += 1; const e = makeStubEl(t); e['tag'] = t; return e },
+    createDocumentFragment: () => { stats.nodes += 1; return makeStubEl('#fragment') },
+  }
   g.window = { addEventListener: (type: string, fn: (e: unknown) => void) => { if (type === 'message') handler = fn } }
   g.acquireVsCodeApi = () => ({
     postMessage: (m: Record<string, unknown>) => { actions.push(m) },
     getState() { return undefined },
     setState() {},
   })
-  g.MarkdownIt = function () { return { renderer: { rules: {} as Record<string, unknown> }, render: (s: string) => String(s ?? '') } }
+  g.MarkdownIt = function () {
+    return {
+      renderer: { rules: {} as Record<string, unknown> },
+      render: (s: string) => { stats.markdownCalls += 1; return String(s ?? '') },
+    }
+  }
   try {
     new Function(script)()
   } catch (e) {
-    return { error: (e as Error).message, panel: makeStubEl('pending-panel'), actions, bootActions: [], push: () => {}, el: () => makeStubEl('x') }
+    return { error: (e as Error).message, panel: makeStubEl('pending-panel'), actions, bootActions: [], push: () => {}, el: () => makeStubEl('x'), stats }
   }
   const base = {
     connection: 'connected', sessions: [], sending: false, canStop: false,
@@ -288,6 +303,7 @@ function bootWebviewInteractive(
     bootActions,
     push: (patch: Record<string, unknown>) => { actions.length = 0; push(patch) },
     el: (id: string) => els.get(id) as StubEl,
+    stats,
   }
 }
 
@@ -2021,6 +2037,208 @@ async function main(): Promise<void> {
       (ui['eventLog'] as unknown[]).length >= 1, true)
     await wfCtrl.dispatch({ type: 'inspectorToggle', open: false } as never)
     eq('closing it stops shipping the buffer', (ui['eventLog'] as unknown[]).length, 0)
+
+    wfClient.dispose()
+    await wf.stop()
+  }
+
+  // ─── J. live deltas: one stable row, and no zombie bubble after the close ──
+  // The model stamps every item with a `uid` (stable DOM key) and a `rev`
+  // (change signature). The webview's incremental renderer keys off those, so
+  // the model has to keep the contract: uid survives a streaming update, rev
+  // moves on it, and a delta that outlived its turn never opens a new bubble.
+  {
+    const m = new ConversationModel('session-j')
+    m.applyStreamChunk(1, 1, { type: 'text-delta', index: 0, text: 'Hel' })
+    const first = (m.snapshot().items as unknown as Record<string, unknown>[])
+    const uid = first[0]?.['uid']
+    check('a streamed delta gets a render identity', typeof uid === 'number', String(uid))
+    m.applyStreamChunk(1, 1, { type: 'text-delta', index: 0, text: 'lo' })
+    const second = (m.snapshot().items as unknown as Record<string, unknown>[])
+    eq('...the identity survives the next delta, so the row is reused', second[0]?.['uid'], uid)
+    check('...while its change signature advances',
+      (second[0]?.['rev'] as number) > (first[0]?.['rev'] as number),
+      `${String(first[0]?.['rev'])} → ${String(second[0]?.['rev'])}`)
+    eq('...and the text is the accumulation', second[0]?.['text'], 'Hello')
+
+    // The durable message closes the step. A delta still in flight for it is a
+    // stale echo: it used to find no placeholder, rebuild the buffer from ''
+    // and append a SECOND assistant bubble under the finished answer.
+    m.applyEvent(ev('assistant/message', {
+      turn: 1, step: 1, message: { content: [{ type: 'text', text: 'Final answer.' }] },
+    }, 10) as never)
+    const closed = (m.snapshot().items as unknown as Record<string, unknown>[])
+    eq('the durable message replaces the streaming row', closed.length, 1)
+    eq('...and is no longer marked streaming', closed[0]?.['streaming'], false)
+    m.applyStreamChunk(1, 1, { type: 'text-delta', index: 0, text: 'TAIL' })
+    eq('a delta after the durable message starts no second bubble',
+      m.snapshot().items.length, 1)
+    check('...and its text never reaches the transcript',
+      !JSON.stringify(m.snapshot()).includes('TAIL'))
+
+    // `turn/end` closes the turn the same way — this is the path a straggler
+    // takes when the stream's own `end` frame and the durable turn/end race.
+    const m2 = new ConversationModel('session-j2')
+    m2.applyEvent(ev('turn/start', { turn: 4 }, 1) as never)
+    m2.applyStreamChunk(4, 1, { type: 'text-delta', index: 0, text: 'streamed' })
+    m2.applyEvent(ev('turn/end', { turn: 4, reason: { kind: 'stop' } }, 2) as never)
+    const ended = m2.snapshot().items.length
+    m2.applyStreamChunk(4, 1, { type: 'text-delta', index: 0, text: 'LATE' })
+    eq('a delta after turn/end does not reopen the bubble', m2.snapshot().items.length, ended)
+    check('...and its text never reaches the transcript',
+      !JSON.stringify(m2.snapshot()).includes('LATE'))
+    m2.applyStreamChunk(5, 1, { type: 'text-delta', index: 0, text: 'next turn' })
+    eq('the following turn still streams normally', m2.snapshot().items.length, ended + 1)
+
+    // A uid must never be handed out twice, even by a different model. The
+    // webview caches DOM nodes by it, and a session switch / reconnect builds a
+    // fresh model for what may be the same session — a per-instance counter
+    // would restart at 1 and match the previous transcript's cached rows.
+    const a = new ConversationModel('session-j3')
+    a.applyEvent(ev('user/message', { content: [{ type: 'text', text: 'one' }] }, 1) as never)
+    const b = new ConversationModel('session-j4')
+    b.applyEvent(ev('user/message', { content: [{ type: 'text', text: 'two' }] }, 1) as never)
+    const uidA = (a.snapshot().items as unknown as Record<string, unknown>[])[0]?.['uid']
+    const uidB = (b.snapshot().items as unknown as Record<string, unknown>[])[0]?.['uid']
+    check('uid is not reused when the model is rebuilt for another session',
+      uidA !== uidB, `${String(uidA)} vs ${String(uidB)}`)
+  }
+
+  // ─── K. the transcript is reconciled, not rebuilt ─────────────────────────
+  // renderVersion changes on every streamed chunk. Tearing `#messages` down on
+  // each of those made the per-chunk cost grow with the length of the
+  // conversation — measured at 40 turns, every 40 characters of new text cost
+  // ~42 markdown re-parses and ~290 fresh DOM nodes. These assertions pin the
+  // incremental contract, so that regression is a red test rather than a
+  // subjective "it feels laggy when the chat gets long".
+  {
+    const TURNS = 6
+    const past: Record<string, unknown>[] = []
+    for (let i = 0; i < TURNS; i++) {
+      past.push({ kind: 'user', seq: 2 * i + 1, text: `question ${String(i)}`, uid: 2 * i + 1, rev: 1 })
+      past.push({ kind: 'assistant', seq: 2 * i + 2, text: `answer ${String(i)}`, toolCallIds: [], streaming: false, uid: 2 * i + 2, rev: 1 })
+    }
+    const live: Record<string, unknown> = {
+      kind: 'assistant', seq: -7001, text: 'Hel', toolCallIds: [], streaming: true, uid: 900, rev: 1,
+    }
+    let items = [...past, live]
+    const state = (version: number): Record<string, unknown> => ({
+      activeSessionId: 'session-k',
+      snapshot: { sessionId: 'session-k', items, renderVersion: version, running: true, systemMessageCount: 0 },
+    })
+
+    const boot = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, state(1))
+    eq('the reconciling webview boots at all', boot.error, '')
+    const msgs = boot.el('messages')
+    const firstPaint = boot.stats.nodes
+    check('the first paint builds the whole transcript', firstPaint > past.length, String(firstPaint))
+    eq('...with one markdown pass per assistant message + the live one',
+      boot.stats.markdownCalls, TURNS + 1)
+
+    // A push whose only difference is renderVersion must cost nothing. This is
+    // the shape of a `session/follow` replay, or of a state push driven by a
+    // field the transcript does not show.
+    const nodes0 = boot.stats.nodes
+    const md0 = boot.stats.markdownCalls
+    boot.push(state(2))
+    eq('a push with a new renderVersion but unchanged items builds no DOM',
+      boot.stats.nodes - nodes0, 0)
+    eq('...and re-parses no markdown', boot.stats.markdownCalls - md0, 0)
+    eq('...leaving every row in place', (msgs['children'] as unknown[]).length, items.length)
+
+    // A streamed chunk changes exactly one item. Only that row may be rebuilt.
+    items = [...past, { ...live, text: 'Hello there', rev: 2 }]
+    boot.push(state(3))
+    const oneRow = boot.stats.nodes - nodes0
+    check('a streamed chunk rebuilds one row, not the whole transcript',
+      oneRow > 0 && oneRow < firstPaint / 2, `${String(oneRow)} node(s) vs ${String(firstPaint)} for the full paint`)
+    eq('...and re-parses exactly that one message', boot.stats.markdownCalls - md0, 1)
+    eq('...with the row count unchanged', (msgs['children'] as unknown[]).length, items.length)
+
+    // A row that disappears (an optimistic echo being replaced by the durable
+    // message) must still be repainted even though nothing new was drawn.
+    items = items.slice(0, -1)
+    boot.push(state(4))
+    eq('a dropped row is removed from the container',
+      (msgs['children'] as unknown[]).length, items.length)
+  }
+
+  // ─── L. one flush costs one projection of the model, not one per frame ────
+  // `applyMuxFrame` used to fold the transcript into UiState per frame, and a
+  // streaming flush carries a whole turn's worth of deltas — so a single batch
+  // built the full snapshot once per delta. The publish itself is once per
+  // batch either way; this pins the projection count to match it.
+  {
+    const wf = makeHarness('none', PRESENT_CONTROLS)
+    const wfPort = await wf.start()
+    const wfAuth = new BrowserSessionAuth({
+      host: '127.0.0.1', port: wfPort,
+      store: { load: async () => undefined, save: async () => {} }, log: () => {},
+      allowLocalMint: true,
+    })
+    await wfAuth.init()
+    await wfAuth.tryMintLocalSession()
+    const wfClient = new HarnessClient({ host: '127.0.0.1', port: wfPort, auth: wfAuth, log: () => {} })
+    await wfClient.connect()
+
+    const { AppController } = await loadControllerWithVscodeStub()
+    let ui: Record<string, unknown> = { showSystemMessages: false, eventLog: [] }
+    let pushes = 0
+    const wfCtrl = new AppController({
+      client: wfClient,
+      vscodeAPI: {
+        window: {}, commands: {},
+        workspace: { registerTextDocumentContentProvider: () => ({ dispose: () => undefined }) },
+      } as never,
+      getState: () => ui as never,
+      setState: (patch) => { ui = { ...ui, ...patch } },
+      bump: () => {},
+      pushState: () => { pushes += 1 },
+      notifyError: () => {},
+      notifyInfo: () => {},
+      autoDiscover: () => false,
+      openHarnessHome: () => {},
+      moveToSecondarySideBar: async () => {},
+      log: { info: () => {}, error: () => {} },
+    })
+    wfCtrl.start()
+    await wfCtrl.selectSession('session-1')
+    const settle = (ms = 150): Promise<void> => new Promise((r) => { setTimeout(r, ms) })
+    await settle(400)
+
+    // Count how many times the model is projected into UiState.
+    const proto = ConversationModel.prototype as unknown as { snapshot: (...a: unknown[]) => unknown }
+    const realSnapshot = proto.snapshot
+    let builds = 0
+    proto.snapshot = function (this: unknown, ...args: unknown[]): unknown {
+      builds += 1
+      return (realSnapshot as (...a: unknown[]) => unknown).apply(this, args)
+    }
+    try {
+      pushes = 0
+      builds = 0
+      const N = 24
+      wf.pushFollow({
+        type: 'assistant-stream',
+        frame: { type: 'start', attemptId: 'burst', revision: 1, turn: 9, step: 1 },
+      })
+      await settle(60)
+      for (let i = 0; i < N; i++) {
+        wf.pushFollow({
+          type: 'assistant-stream',
+          frame: { type: 'chunk', attemptId: 'burst', revision: 1, index: i, time: i, chunk: { type: 'text-delta', index: 0, text: 'word ' } },
+        })
+      }
+      await settle(250)
+      check(`a burst of ${String(N)} live deltas arrives in fewer batches than deltas`,
+        pushes >= 1 && pushes < N, `${String(pushes)} batch(es)`)
+      check('...and each publish costs at most one projection of the model',
+        builds <= pushes, `${String(builds)} snapshot(s) for ${String(pushes)} publish(es)`)
+      check('...with the whole burst folded into the transcript',
+        JSON.stringify(ui['snapshot']).includes('word word'), 'burst text is missing from the snapshot')
+    } finally {
+      proto.snapshot = realSnapshot
+    }
 
     wfClient.dispose()
     await wf.stop()

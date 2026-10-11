@@ -514,7 +514,12 @@ failure into the message area, so a broken panel is self-evident instead of sile
 
 ## Streaming performance
 
-`EventBuffer` coalesces high-frequency `assistant/chunk` frames and flushes at most every **30 ms**. `turn/end` and `assistant/message` force an immediate flush so the UI settles at once. The webview re-renders on `renderVersion` change only — never per token.
+`EventBuffer` coalesces high-frequency `assistant/chunk` frames and flushes at most every **30 ms**. `turn/end` and `assistant/message` force an immediate flush so the UI settles at once.
+
+The push budget below says a push must have something to publish. That was never
+enough on its own: a streaming push *does* have something to publish, and the
+webview still made that cost grow with the length of the conversation. The two
+sections are the two halves of the same problem.
 
 ### The push budget (v0.1.6)
 
@@ -548,6 +553,78 @@ answer round trip from 6 pushes / ~212 KB / 6 rebuilds to 3 / ~106 KB / 0. Group
 I of `scripts/protocol-test.ts` asserts the push count and the unchanged
 `renderVersion`, so a regression here fails the gate rather than merely feeling
 slow.
+
+### Incremental transcript rendering (v0.1.7)
+
+`renderVersion` moves on every streamed chunk — that is by design, it is how the
+webview learns there is something new. The mistake was on the *consumer* side:
+any change meant `msgs.innerHTML = ''` followed by `renderItem()` for every item,
+so one chunk re-ran markdown-it over every assistant message on screen and
+rebuilt every row. The cost of a chunk therefore scaled with the transcript, and
+the cost of a turn scaled with the square of it. Measured on a 40-turn
+transcript, per 40 characters of new text:
+
+| | before | after |
+|---|---|---|
+| DOM nodes built | 291 | 4 |
+| markdown passes | ~42 | 1 |
+| markdown bytes re-parsed | 43 KB | 1.4 KB |
+
+Two fields on `ConversationItem` (see `ItemIdentity`) are what make the fix
+possible, and both are stamped by `ConversationModel.stamp()`:
+
+- **`uid`** — the DOM key. Assigned once and kept, so it survives a streaming
+  text update and a tool row gaining its result. It changes only when the item is
+  *replaced* (the streaming placeholder becoming the durable `assistant/message`),
+  which is exactly when a fresh node is warranted. The counter is module-level,
+  not per-model: the webview caches a node per `uid`, and a model rebuilt for the
+  same session (reconnect, fork, switch) would otherwise restart at 1 and match
+  the previous transcript's cached rows.
+- **`rev`** — the change signature. Advanced on every mutation of the item, so
+  "did this row change?" is an integer comparison rather than a content diff.
+
+`renderTranscript()` reconciles `snap.items` against a `Map<uid, {el, sig}>`. An
+item whose `sig` is unchanged keeps the element it was given — and therefore its
+subtree and its parsed markdown. Reused elements are detached and re-attached in
+order rather than rebuilt, which costs pointer operations instead of a parse plus
+a DOM construction. A tool row's signature also folds in the review attached to
+it (`reviewSigFor`), because a review card is drawn *inside* a tool row and the
+review store can change without touching any item.
+
+The guard also has a second, larger effect: a push whose only difference is
+`renderVersion` — a `session/follow` replay, or state driven by a field the
+transcript does not show — now builds **zero** DOM and re-parses **zero**
+markdown. Group K of `scripts/protocol-test.ts` drives the real `CLIENT_SCRIPT`
+against a counting DOM stub and asserts exactly that, plus that one streamed
+chunk rebuilds one row.
+
+Two smaller contributors to the same class of bug went with it:
+
+- **`applyMuxFrame()` projected the model once per frame.** It built a full
+  `snapshot()` (a filter plus a spread over every item) inside the per-frame
+  loop, and a flush carries a whole turn's worth of deltas. The projection now
+  happens once per batch, and only when `model.version` actually moved — the
+  caller already published once per batch, so the two counts now agree.
+- **The session `<select>` was rebuilt on every push.** Recreating the options
+  discarded the user's selection mid-interaction. It is signature-guarded.
+
+#### Known remaining cost
+
+The transcript is still shipped whole on every streaming push: ~52 KB per push on
+a 40-turn session, cloned across `postMessage`. The renderer no longer rebuilds
+it, so the constant is small, but its size still tracks the conversation. Cutting
+it needs a per-item delta on the wire (`UiState.snapshotPatch` or similar), which
+is a protocol change and is not in 0.1.7.
+
+#### Measured and deliberately not changed
+
+`captureFrame()` calls `JSON.stringify` per frame to fill the inspector ring
+buffer, and 0.1.6 only stopped *publishing* it while the panel is closed.
+Measured: **~1.2 µs** for a typical `assistant/stream` delta and **~47 µs** for a
+20 KB `assistant/message` — tens of microseconds per second at a streaming
+cadence of ~33 frames/s. Computing the raw lazily would mean retaining up to 300
+live frame objects instead of 300 truncated 2 KB strings, trading bounded memory
+for a rounding error. Left alone.
 
 ## Reconnect
 
@@ -669,7 +746,7 @@ media/
 ├── origin.png                # source material (excluded from VSIX)
 └── markdown-it.umd.min.js    # bundled for VSIX (114 KB)
 scripts/
-├── protocol-test.ts          # fake-harness protocol test, 243 assertions (no dsh web)
+├── protocol-test.ts          # fake-harness protocol test, 268 assertions (no dsh web)
 ├── protocol-probe.ts         # asks a live `dsh web` what it actually serves
 ├── integration-test.ts       # closed-loop test against real dsh
 └── gen-icon.ts               # icon generation from origin.png

@@ -238,6 +238,17 @@ tag remains. Communicate the rollback in the release notes.
   (`npm run protocol-probe`) rather than reasoned about from upstream source:
   the source snapshot on disk has repeatedly been a different release than the
   one actually running.
+- **A number may be re-cut before it ships, but never after.** `0.1.8` was cut under that
+  number, re-cut as `0.2.0`, and shipped as `0.1.9` — one changeset, three names. The tag
+  `v0.1.8` points at `806ce47`, where `package.json` genuinely read `0.1.8`, and it has no
+  GitHub Release on purpose, because there is no artifact by that name. Retagging is only
+  safe while the number has neither a release nor a Marketplace publish behind it; once a
+  user can install it, the number is frozen and the fix becomes the next version.
+- Release notes live **inside** the VSIX: `README.md`/`CHANGELOG.md` ship through vsce as
+  `readme.md`/`changelog.md`, and the `*.zh-CN.md` twins ship verbatim. So the 312,853-byte
+  baseline belongs to the tree at `581ba27`; the 0.1.8 note added afterwards makes a fresh
+  build of the same sources slightly larger. Expected, not a regression — re-measure at the
+  next release rather than carrying the old figure forward.
 
 ## Appendix — SSH setup on this machine
 

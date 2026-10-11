@@ -68,6 +68,10 @@ Verification: the regression gate is now **295 assertions** (was 268). The new g
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full diff.
 
+> **On the number.** One changeset, three names: cut as **v0.1.8**, re-cut as **v0.2.0**,
+> and shipped as **v0.1.9** after the rollback. `v0.1.8` is tagged (`806ce47`) with no
+> release under it — there is no artifact by that name.
+
 ## What's new in v0.1.7
 
 **The longer the conversation, the cheaper each streamed chunk.**

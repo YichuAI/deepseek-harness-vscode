@@ -108,6 +108,20 @@ Tagline (ZH): **一张本回合改了什么的账本——以及一个撤销键�
   roadmap; and there is **no** `onDidSaveTextDocument` reflow, because DSH re-reads disk
   every step and therefore has nothing to be told about a file that changed underneath it.
 
+## [0.1.8] — 2026-10-11
+
+**Never published, and never had a changeset of its own.** The number was cut once, on the
+tree that is now `806ce47`; then re-cut as `0.2.0`; then re-cut again as `0.1.9` when the
+release was rolled back. All three names label one and the same body of work, which is the
+`[0.1.9]` entry above. Nothing was dropped in between, and no other feature ever carried
+this number.
+
+It is tagged — `v0.1.8` → `806ce47` — so the version sequence has no silent hole, and it
+deliberately has **no GitHub Release**: there is no artifact under this name, and a release
+page repeating the 0.1.9 notes would only be noise. What the tag marks is honest enough on
+its own: at `806ce47` the `package.json` reads `0.1.8`, and the file you are reading opened
+with a `## [0.1.8]` heading.
+
 ## [0.1.7] — 2026-10-11
 
 Tagline: **the longer the conversation, the cheaper each streamed chunk.**

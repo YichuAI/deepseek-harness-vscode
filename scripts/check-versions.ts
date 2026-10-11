@@ -109,6 +109,20 @@ console.log(`\nversion under test: ${VERSION}\n`)
 check('package.json version is semver', /^\d+\.\d+\.\d+$/.test(VERSION), VERSION)
 eq('publisher is the one the Marketplace listing uses', pkg.publisher, 'lucasliang')
 
+// ─── 1b. the lockfile, which also carries the version
+
+// `npm ci` does not validate the root version, so this drifted unnoticed from
+// 0.1.5 to 0.2.1 -- the lockfile still said 0.1.4 while everything else had
+// moved on. It is invisible to a user, but it is the same class of defect: a
+// number that names this release, written in a second place, with nothing
+// comparing it. `npm install --package-lock-only` fixes it in two lines.
+const lock = JSON.parse(read('package-lock.json')) as {
+  version?: string
+  packages?: Record<string, { version?: string }>
+}
+eq('package-lock.json carries the current version', lock.version, VERSION)
+eq('package-lock.json’s root entry carries the current version', lock.packages?.['']?.version, VERSION)
+
 // ─── 2. README: the heading must not carry a hand-typed version
 
 const readme = read('README.md')

@@ -679,9 +679,15 @@ builder never reaches into orchestration state.
 
 `package.json` is the single place a version is authored. `scripts/check-versions.ts`
 compares it against the README's "what's new" heading and install-command filenames, both
-CHANGELOGs' newest entry, `RELEASE.md`'s packaging baseline, the assertion counts the docs
-quote, and — with `--online` — the published GitHub Release and Marketplace listing. With
-`--release` it additionally requires the tag to exist and to point at HEAD.
+CHANGELOGs' newest entry, `package-lock.json`'s root entry, `RELEASE.md`'s packaging
+baseline, the assertion counts the docs quote, and — with `--online` — the published GitHub
+Release and Marketplace listing. With `--release` it additionally requires the tag to exist
+and to point at HEAD.
+
+The lockfile is in that list because it is a place the number gets written down. `npm ci`
+does not validate the root version, so `package-lock.json` sat on `0.1.4` for four releases
+without anything noticing — invisible to a user, which is the whole reason a human never
+catches it.
 
 Two rules make this a gate rather than an aspiration:
 

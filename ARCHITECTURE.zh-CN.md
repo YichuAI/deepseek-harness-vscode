@@ -504,9 +504,13 @@ GET 而不是 RPC 方法、hunk 列表能重建出两侧逐行对齐的比较、
 ## 版本纪律（v0.2.1）
 
 `package.json` 是唯一书写版本号的地方。`scripts/check-versions.ts` 拿它去比对 README 的
-「新特性」标题与安装命令里的文件名、两份 CHANGELOG 的第一条、`RELEASE.md` 的打包基线、文档里
-自称的断言条数，以及（加 `--online` 时）已发布的 GitHub Release 与 Marketplace 列表。加
-`--release` 时还会额外要求标签存在、且指向 HEAD。
+「新特性」标题与安装命令里的文件名、两份 CHANGELOG 的第一条、`package-lock.json` 的根条目、
+`RELEASE.md` 的打包基线、文档里自称的断言条数，以及（加 `--online` 时）已发布的 GitHub Release
+与 Marketplace 列表。加 `--release` 时还会额外要求标签存在、且指向 HEAD。
+
+lockfile 在这个列表里，因为它是版本号会被写下的地方之一。`npm ci` 不校验根包版本，所以
+`package-lock.json` 停在 `0.1.4` 上过了四个版本都没人发现——它对用户不可见，而这正是人永远
+抓不住它的原因。
 
 两条规则让这件事成为闸门而不是口号：
 

@@ -77,6 +77,10 @@ Manual checks:
 
 - [ ] `package.json` `version` matches the intended tag. `npm run check-versions`
       asserts this together with every other surface — do not eyeball it.
+- [ ] `package-lock.json` carries this version too. `npm ci` does **not** validate
+      the root version, so it drifts silently: v0.2.1 found it sitting on `0.1.4`,
+      four releases stale. Fix with `npm install --package-lock-only` (a two-line
+      diff, no churn). `check-versions` covers it since v0.2.1.
 - [ ] `CHANGELOG.md` has an entry for this version under `## [<version>] — <date>`.
 - [ ] Docs are **bilingual**: every edit to `README.md` / `CHANGELOG.md` /
       `ARCHITECTURE.md` / `RELEASE.md` has been mirrored into its `*.zh-CN.md`
@@ -115,7 +119,7 @@ Manual checks:
 unzip -l harness-connector-deepseek-<ver>.vsix
 ```
 
-Expected (v0.2.1 = 14 files, 312,745 bytes, ~305 KB):
+Expected (v0.2.1 = 14 files, 313,441 bytes, ~306 KB):
 
 ```
 [Content_Types].xml
@@ -294,11 +298,11 @@ artifact of record either way.
   `readme.md`/`changelog.md`, and the `*.zh-CN.md` twins ship verbatim. So every baseline
   below belongs to one particular tree, and editing a shipped doc afterwards invalidates it.
   Re-measure; do not carry the old figure forward.
-  (`v0.2.1` = 312,745 bytes; `v0.2.0` = 312,853 at `581ba27`; `v0.1.9` = 309,620;
-  `v0.1.7` = 288,750. v0.2.1 is 108 bytes *smaller* than its predecessor: the
-  READMEs lost the historical release notes and the CHANGELOG gained them, which
-  happened to net out slightly negative. A shrunken file is not itself a problem
-  — a baseline nobody re-measured is.)
+  (`v0.2.1` = 313,441 bytes; `v0.2.0` = 312,853 at `581ba27`; `v0.1.9` = 309,620;
+  `v0.1.7` = 288,750.) That v0.2.1 figure moved three times while the release was being
+  prepared — 312,063, then 312,745, then 313,441 — each time because a doc inside the VSIX was
+  edited after the last measurement. The intermediate reads were not wrong; they were readings
+  of a different tree. Re-measure, never carry a number forward, and never adjust one by eye.
 
 ## Appendix — SSH setup on this machine
 

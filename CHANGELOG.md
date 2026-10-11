@@ -74,6 +74,11 @@ Tagline (ZH): **版本号再也没法各自跑偏，撤销也再没机会吃掉�
   had since been edited produced twelve notifications and buried the three that carried
   information. It is now one report with a count, and it says plainly that the untouched
   files were reverted and the edited ones were left alone.
+- **The lockfile had been carrying a stale version since 0.1.5.** `package-lock.json` still said
+  `0.1.4` while every other surface had moved on. `npm ci` does not validate the root version, so
+  nothing noticed. It is invisible to a user, which is exactly why it is worth naming: it was the
+  fifth place this release's number was written down, and the only one that was neither checked
+  nor shipped. It is checked now.
 
 ### Notes
 

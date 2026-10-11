@@ -80,6 +80,9 @@ npm run package            # → harness-connector-deepseek-<版本>.vsix
 
 - [ ] `package.json` 的 `version` 与目标标签一致。`npm run check-versions` 会把这件事
       连同其他每一个展示面一起断言掉——不要用眼睛看。
+- [ ] `package-lock.json` 也带着这个版本号。`npm ci` **不校验**根包版本，所以它会静默漂移：
+      v0.2.1 发现它还停在 `0.1.4`，落后了四个版本。用 `npm install --package-lock-only`
+      修（只有两行 diff，不会连带改动）。自 v0.2.1 起 `check-versions` 会覆盖它。
 - [ ] `CHANGELOG.md` 有对应版本的条目（`## [<版本>] — <日期>`）。
 - [ ] 文档**保持双语**：对 `README.md` / `CHANGELOG.md` / `ARCHITECTURE.md` /
       `RELEASE.md` 的每一处修改，都已镜像到对应的 `*.zh-CN.md`。这是长期约定，
@@ -113,7 +116,7 @@ npm run package            # → harness-connector-deepseek-<版本>.vsix
 unzip -l harness-connector-deepseek-<版本>.vsix
 ```
 
-预期（v0.2.1 = 14 个文件，312,745 字节，约 305 KB）：
+预期（v0.2.1 = 14 个文件，313,441 字节，约 306 KB）：
 
 ```
 [Content_Types].xml
@@ -289,9 +292,10 @@ Marketplace 发布通过仓库 secret 选择性开启。没有 `VSCE_PAT` 时那
 - 发布说明本身就在 VSIX **里面**：`README.md`/`CHANGELOG.md` 经 vsce 以 `readme.md`/
   `changelog.md` 的形式随包，`*.zh-CN.md` 双胞胎原样随包。所以下面每一条基线都属于某一棵
   特定的树，事后再改一个随包文档，那个数字就作废了。重新量，不要把旧数字往下带。
-  （`v0.2.1` = 312,745 字节；`v0.2.0` = 312,853，树是 `581ba27`；`v0.1.9` = 309,620；
-  `v0.1.7` = 288,750。v0.2.1 比上一版反而小 108 字节：README 卸掉了历史版本说明，CHANGELOG
-  接管了这些内容，一增一减刚好略负。包变小本身不是问题——没人重新量的基线才是。）
+  （`v0.2.1` = 313,441 字节；`v0.2.0` = 312,853，树是 `581ba27`；`v0.1.9` = 309,620；
+  `v0.1.7` = 288,750。）v0.2.1 这个数字在准备这个版本的过程中动了三次——312,063、312,745、
+  313,441——每一次都是因为包内某个文档在上次测量之后又被改了。中间那几次读数不是错的，它们量的是
+  另一棵树。重新量，不要把数字往下带，更不要用眼睛估计。
 
 ## 附录 — 本机 SSH 配置
 

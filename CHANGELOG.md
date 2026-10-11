@@ -5,6 +5,71 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] — 2026-10-11
+
+Tagline: **Host 换了端口、或者被重启之后，不用再重载 VS Code。**
+Tagline (EN): **feat: reconnect on demand, and find the Host again when it moves ports.**
+
+### Added
+
+- **常驻的 Reconnect 按钮**（状态行里一个，视图标题里一个）。点它总是把旧连接拆干净、
+  重新协商一次。为什么必须"强制"：Host 重启之后客户端这边的状态**仍然是 `connected`**
+  ——流只是不响了——而普通的 `connect()` 会在这个状态上直接早退。这个空档正是过去
+  "只能重载窗口"的原因。
+  *EN:* One button, always visible, that always tears the old session down first.
+- **Host 自动发现**（`deepseekHarness.autoDiscover`，默认开）。配置的端口没人应答时，
+  先读 `$DSH_HOME/profiles/<name>/cordis.patch.yml` 里钉过的 `webserver.port`，再枚举本机
+  loopback 监听端口，用 Host **自己的匿名拒绝文本**当指纹逐个确认——`401` +
+  `dsh web authentication required; reopen the URL printed by dsh web.`。这句话来自
+  connection carrier 的栅栏而不是 web 前端，所以哪个入口启动的 Host 都会这么说。
+  为什么需要它：**桌面端用 `--port 0` 启动 Host**（`apps/desktop-host/src/index.ts`
+  里写死），端口由系统每次重新分配，只通过 Node IPC 报给 Electron，不落盘。
+  发现的端口只在本次会话内使用，**不写回设置**——那是一个每次启动都会变的端口，
+  写进去只会留下一个下次必然过期的钉子。真机实测：46 个 loopback 监听里命中 1 个，
+  并正确归因到 `desktop` profile 里钉的端口。
+  *EN:* Pinned ports from profile patch layers, then the OS listener table, confirmed
+  by the Host's own anonymous refusal. Discovered ports are session-local and never
+  written to settings.
+- `HarnessClient.target()`：取当前指向的 host/port。
+- 连接请求**串行化**：一次点击对应一次尝试，重叠的点击排队等待，而不是两个协商互相
+  拆掉对方的 socket。
+
+### Fixed
+
+- **强制重连之后，原来打开的那个会话会丢。** `disconnect()` 拆掉了 `session/follow`
+  订阅，而 `refreshSessions()` 在 `activeSessionId` 已设置时是**故意不动**它的——结果是
+  对话还留在屏幕上、订阅已经没了。现在重连后会重新选中同一个会话（重建 model、重新订阅、
+  重拉历史，也就是文档里写的"重建而不是游标续传"）。会话在这个 Host 上确实不存在时才
+  退回到最新的那个。
+- **每次切换会话都会泄漏一个 `session/follow` 订阅。** 它们被丢进 `disposables` 之后再
+  也没被释放；而重连现在每次都会重新选中会话，泄漏会加速。改为显式持有，切换前先释放。
+- **没有 cookie 的时候却报"签名密钥被轮换了"。** `authRequired()` 无条件调用
+  `noteRejected()`，于是"压根没拿到会话"（`autoSession` 被关掉，或者
+  `$DSH_HOME/.credentials.yaml` 还不存在）被描述成"运行中的 Host 拒绝了我们以为有效的
+  cookie —— 它的签名密钥几乎肯定被重新生成了"。用户会去查错误的东西。现在只有真的
+  发出过 cookie 才记录这次拒绝。
+- **`connect()` 在 `connecting` 状态上早退**：一次卡住的连接会让重试按钮变成空操作。
+  串行化 + 强制拆连之后，这条路径不再存在。
+
+### Changed
+
+- 面板打开时的自动连接改用新的**非破坏性** `ensureConnected`：光是把面板打开，不应该把
+  扩展宿主已经建立的会话拆掉再重建。按钮依然是强制的那条路。
+- 视图标题里的重连图标不再挂在 `deepseekHarness.offline` 条件上——那恰好让它在最需要
+  重连的时候消失。`deepseekHarness.offline` 这个上下文键从此没有使用者，连同
+  `syncOfflineContext()` 一起删掉了。
+
+### Verification
+
+- 回归门 **211 → 231 项**全绿。新增 G3 组：面板 boot 发的是 `ensureConnected` 而不是
+  破坏性的 `connect`、点按钮发的是 `{type:'connect'}`、已连接时按钮仍在且读作
+  `⟳ Reconnect`。新增 H 组：`webserver` 钉端口解析（只认 `webserver` 条目下的 `port`）、
+  三平台监听表解析（含 `/proc/net/tcp6` 里 `::1` 的**字序**——`01000000` 不是
+  `00000001`）、指纹的"是 Host / 是别的 HTTP / 静默"三条判定、发现的排序与负例。
+- 真机集成 **25 → 29 项**全绿，其中四条为新链路实测：真实 Host 能被匿名指纹认出来、
+  一个普通 HTTP 监听器**不会**被误认成 Host（指纹匹配一切就等于没有指纹）、强制重连后
+  连接仍在、那个会话仍然在 Host 上。
+
 ## [0.1.4] — 2026-10-10
 
 Tagline: **问题与审批现在真的能在 VS Code 里回答了 —— 而且点"允许"真的等于允许。**

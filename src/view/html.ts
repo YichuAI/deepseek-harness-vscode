@@ -18,7 +18,7 @@ export const HTML_SKELETON = /* html */ `
     <div class="status">
       <span id="dot" class="dot disconnected"></span>
       <span id="status-text">Disconnected</span>
-      <button id="connect" class="secondary icon" title="Connect to dsh web" style="display:none;">Connect</button>
+      <button id="connect" class="secondary icon" title="Reconnect to the harness Host (drops the current session and negotiates a fresh one)">Reconnect</button>
     </div>
     <div id="host-info" class="muted" style="margin-top:2px;"></div>
     <div id="mux-status" class="muted"></div>

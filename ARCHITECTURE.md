@@ -26,6 +26,7 @@ One page. Three stable boundaries: **wiring** (`extension.ts`), **orchestration*
 │ harness/ws.ts             — minimal RFC6455 client (Cookie-capable)│
 │ harness/auth.ts           — browser session cookie (token → cookie)│
 │ harness/http.ts           — node:http wrapper (exact Cookie/Set-Cookie)│
+│ harness/discovery.ts      — find the Host on loopback (401 fence)  │
 │ harness/protocol.ts       — wire types (mirror of 0.2.0-rc.2 Remote)│
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -512,28 +513,75 @@ behaviour wiped the visible conversation on every reconnect. And because
 `session/follow` re-publishes its snapshot, the model ends up folded from the
 host's journal rather than from whatever happened to be on screen.
 
-### Manual connect (why the panel has a Connect button)
+### Reconnect (why the button is always visible and always forces)
 
-Auto-connect is best-effort and can legitimately fail — locally, `auth.init()`
-plus `tryMintLocalSession()` has been observed to come back not-ready on a
-`dsh web` that is otherwise serving fine. Relying on a working auto-connect made
-the panel a dead end when it didn't: nothing to click, nothing to read. So
-`pushFromClient()` mirrors the connection state into a VS Code context key,
-`deepseekHarness.offline`, and
+`AppController.doConnect()` is a **forced** reconnect, and it is the only path
+that establishes a connection: activation, the `Reconnect` command, the button
+in the status row, and the icon in the panel header all call it.
 
-- the status row renders a button with three honest labels — `Connect` /
-  `Retry` (after a failed attempt) / `Connecting…` (disabled while in flight);
-- `package.json` contributes a `view/title` menu entry gated on
-  `view == deepseekHarness.sessionView && deepseekHarness.offline`, so a plug
-  icon appears in the panel header *only* while disconnected.
+Forced is the point. When a Host restarts, the client's own state stays
+`connected` — the stream simply stopped, and nothing has told us — and
+`HarnessClient.connect()` short-circuits on that state. That gap is what made
+"reload the VS Code window" the only recovery. `connect({force:true})` therefore
+tears the socket down *before* negotiating.
 
-Context keys re-evaluate only when the key actually changes, so
-`syncOfflineContext()` is edge-triggered — it is seeded to `true` during
-`start()` so the button is visible from the first paint, before any socket
-exists.
+Two structural rules keep that safe:
 
-The underlying "why did auth come back not-ready" is still an open question; the
-button is a floor, not a fix.
+- **Attempts are serialised.** `doConnect()` appends to a promise chain, so a
+  second click queues a fresh attempt instead of negotiating a second socket on
+  top of the first, where the loser's teardown would kill the winner's stream.
+- **The open session survives.** `disconnect()` drops the `session/follow`
+  subscription while `activeSessionId` stays set, so the transcript would remain
+  on screen with nothing feeding it. `runConnect()` captures the id up front and
+  re-selects it afterwards — rebuild the model, re-subscribe, refetch history,
+  which is the rebuild-not-cursor semantic above. It only falls back to the
+  newest session when the Host genuinely no longer has that one.
+
+The webview's boot request is deliberately **not** this path. Opening the panel
+posts `ensureConnected` (`doConnect({force:false})`), because merely showing the
+panel must not tear down a session the extension host already established; the
+button is what forces.
+
+`package.json` contributes `deepseekHarness.reconnect` to `view/title`
+unconditionally. It used to be gated on `deepseekHarness.offline`, which hid it
+exactly in the case it was needed — a panel that still reads *Connected* over a
+dead socket.
+
+### Host discovery (why the port can be wrong)
+
+`dsh web` defaults to `127.0.0.1:3080`, so a fixed port is right most of the
+time. The desktop app is the exception, and it is built in: it spawns its Host
+with `--port 0` (`apps/desktop-host/src/index.ts`), so the port is OS-assigned
+afresh on every launch and reported only to Electron over Node IPC. Nothing lands
+on disk, so "the panel is stuck until I reload VS Code" was really "the plugin is
+still aimed at last launch's port".
+
+When `connect()` fails for a reason **other than** an auth refusal (that means we
+found a Host and it said no; answering a credential problem with a port problem
+would be wrong), `AppController.attachToDiscovered()` runs
+`harness/discovery.ts`:
+
+1. **Pinned ports** — `webserver.port` in
+   `$DSH_HOME/profiles/<name>/cordis.patch.yml`, read by hand because the user
+   layer may carry `!!js` tags no generic YAML parser can evaluate.
+2. **The Host's own refusal** — the OS listener table (netstat / lsof /
+   `/proc/net/tcp`) is enumerated and each candidate gets one anonymous `GET /`.
+   A dsh Host answers `401` + `dsh web authentication required; reopen the URL
+   printed by dsh web.`; that text comes from the connection carrier's fence, not
+   the web frontend, so it is emitted whichever entry point booted the Host — and
+   no other local server says it. A `200` carrying `--dsh-boot-bg` is accepted as
+   a second-best, for a Host deployed with the browser fence disabled.
+
+Probing the listener table rather than sweeping a port range is deliberate: a few
+dozen listeners resolve in about a second, while sweeping 16k ephemeral ports
+would be both slow and rude. `deepseekHarness.autoDiscover` (default on) gates
+the whole thing.
+
+The adopted port is **session-local and never written to settings** — an
+OS-assigned port changes on every launch, so persisting it would only leave a
+stale pin for the user to debug later. Measured on this machine: 46 loopback
+listeners probed, one Host found, correctly attributed to the pinned `desktop`
+profile; a plain HTTP listener on the same scan is *not* adopted.
 
 ## Security boundary
 
@@ -560,6 +608,7 @@ src/
 ├── harness/
 │   ├── protocol.ts           # wire types (mirror of 0.2.0-rc.2 Remote)
 │   ├── client.ts             # HarnessClient — only network edge
+│   ├── discovery.ts          # find the Host: pinned ports + the 401 fence fingerprint
 │   └── events.ts             # RemoteMuxSocket (WS) + EventBuffer (30ms)
 └── view/
     ├── provider.ts           # webview composition (HTML + CSP + state bridge)
@@ -573,7 +622,7 @@ media/
 ├── origin.png                # source material (excluded from VSIX)
 └── markdown-it.umd.min.js    # bundled for VSIX (114 KB)
 scripts/
-├── protocol-test.ts          # fake-harness protocol test, 180 assertions (no dsh web)
+├── protocol-test.ts          # fake-harness protocol test, 231 assertions (no dsh web)
 ├── protocol-probe.ts         # asks a live `dsh web` what it actually serves
 ├── integration-test.ts       # closed-loop test against real dsh
 └── gen-icon.ts               # icon generation from origin.png

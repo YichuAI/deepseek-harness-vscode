@@ -1,9 +1,9 @@
-# DeepSeek Harness Connector for VS Code (v0.1.4)
+# DeepSeek Harness Connector for VS Code (v0.1.5)
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
 [![VS Code Marketplace](https://img.shields.io/badge/VS%20Code-Marketplace-blue.svg)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
-[![Version](https://img.shields.io/badge/version-0.1.4-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.4)
+[![Version](https://img.shields.io/badge/version-0.1.5-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.5)
 
 > DeepSeek Harness 的原生 VS Code 客户端。
 >
@@ -24,6 +24,36 @@ VS Code ─────┘
 ```
 
 VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**会话——所以浏览器刷新该会话时能看到 VS Code 发送的内容。
+
+## v0.1.5 新特性
+
+**Host 换了端口、或者被重启之后，不用再重载 VS Code 了。**
+
+- **Reconnect 按钮常驻**（状态行一个，面板标题一个）。点它总是把旧连接拆干净、重新协商
+  一次——这才是重点，因为最需要它的场景恰恰是**面板还显示着 Connected** 的那种：Host 被
+  重启了，我们握着的 socket 其实已经死了，而没有任何东西告诉过我们。普通的 `connect()`
+  会在那个过期的状态上直接早退，这正是过去"只能重载窗口"的原因。连接请求是串行化的，
+  连点两下是排队，不会两个协商互相拆台。
+- **Host 自动发现。** 配置的端口没人应答时，先读 `$DSH_HOME/profiles/<name>/cordis.patch.yml`
+  里钉过的 `webserver.port`，再枚举操作系统的 loopback 监听表，用 Host **自己的匿名拒绝
+  文本**逐个确认（`401` + `dsh web authentication required; reopen the URL printed by dsh web.`
+  ——这句话来自 connection carrier 而不是 web 前端，所以哪个入口启动的 Host 都会这么说）。
+  这正是**桌面端**需要的：它用 `--port 0` 启动 Host，端口由系统每次重新分配，只通过
+  Node IPC 报给 Electron。本机实测：46 个 loopback 监听，命中恰好一个，并正确归因到
+  `desktop` profile 里钉的端口。发现的端口只在本次会话内使用，**不写回设置**——它每次
+  启动都会变，写进去只会留下一个下次必然过期的钉子。
+- **修好了「强制重连之后，你正在看的那个会话会丢」。** `disconnect()` 拆掉了
+  `session/follow` 订阅，却把 `activeSessionId` 留着，于是对话还停在屏幕上、背后已经没有
+  任何东西在喂它。现在重连会重新选中同一个会话（重建 model、重新订阅、重拉历史，也就是
+  文档里写的**重建**而不是游标续传），只有当 Host 上确实没有这个会话时才退回最新的那个。
+- **修好了「每次切换会话泄漏一个 `session/follow` 订阅」。** 它们被丢进一个 disposable 袋
+  里再也没被释放；而重连现在每次都会重新选中会话，泄漏只会加速。
+- **修好了「明明没发 cookie，却报签名密钥被轮换」。** `authRequired()` 无条件记录了一次
+  拒绝，于是"压根没有会话"（`autoSession` 关了，或者 `$DSH_HOME/.credentials.yaml` 还不
+  存在）被描述成"运行中的 Host 拒绝了我们存储的 cookie——它的签名密钥几乎肯定被重新生成
+  了"。这会让人去查错误的东西。
+
+完整 diff 见 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
 
 ## v0.1.4 新特性
 
@@ -107,6 +137,8 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 - **自动连接失败时有 `Connect` 按钮可点了。** 自动连接是尽力而为，本机实测在宿主一切正常的情况下
   `auth` 也可能返回未就绪——那时面板"没得点、也没得读"。现在状态行会显示
   `Connect` / `Retry` / `Connecting…`，并且**只在未连接时**在面板标题栏显示一个插头图标。
+  （v0.1.5 把这个门禁换成了**常驻的 Reconnect 按钮**——连接已经死掉、面板却还写着
+  Connected 的那种情况，恰恰是旧门禁把它藏起来的时候。）
 - **移除 `DeepSeek Harness: Set Session Token from Launch URL`。** 从 `$DSH_HOME/.credentials.yaml`
   本地自签已经是实际唯一可用路径；一个每次 `dsh web` 重启都换的 token 只剩维护成本。
 - **修掉一处误诊。** "没有这个方法"（HTTP 404）和"这个 workspace 不存在"
@@ -197,7 +229,7 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
    或从 [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases) 安装 VSIX：
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.1.4.vsix
+   code --install-extension harness-connector-deepseek-0.1.5.vsix
    ```
 
 3. **不用配置任何东西。** 扩展会自动连接：它读取 `dsh web` 写在 `$DSH_HOME/.credentials.yaml` 里的浏览器会话签名密钥，自己签出同一个 `dsh-auth-…` cookie。**没有需要粘贴的 token。**
@@ -261,10 +293,11 @@ authority）。
 | `deepseekHarness.showSystemMessages` | `false` | 显示插件注入的系统消息（运行时上下文、审批通知）。默认隐藏；可通过 webview 头部的 `SYS` 按钮实时切换。 |
 | `deepseekHarness.autoSession` | `true` | 从 `$DSH_HOME/.credentials.yaml` 本地签发浏览器会话 cookie。关掉它扩展就没有鉴权了——这是安全开关，不是便利开关。 |
 | `deepseekHarness.autoApproveApprovals` | `false` | **v0.0.9+** 自动用 `allowed-once` 回应所有审批请求。默认关闭——开启意味着工具调用不再逐次确认。 |
+| `deepseekHarness.autoDiscover` | `true` | **v0.1.5+** 配置的端口没人应答时，在回环地址上另找 dsh Host（先看各 profile patch 里钉的 `webserver.port`，再枚举系统监听表，用 Host 自己的拒绝文本确认）。桌面端需要它——桌面端用系统分配的端口启动 Host。发现的端口只在本次会话内使用，绝不写回设置。 |
 
 ## 命令
 
-- `DeepSeek Harness: Connect` / `Disconnect`（连接 / 断开）
+- `DeepSeek Harness: Connect` / `Reconnect` / `Disconnect`（连接 / 重连 / 断开）——**Reconnect**（同时也是面板标题的 ⟳ 按钮、以及状态行里常驻的那个按钮）会先拆掉当前连接再重新协商一次
 - `DeepSeek Harness: Clear Session Token`（清除会话 token）——删除已存储的 cookie 并重连（会重新签一个；切换 `dsh web` 实例前用它）
 - `DeepSeek Harness: New Session`（在当前工作区新建会话）
 - `DeepSeek Harness: Refresh Sessions`（刷新会话列表）
@@ -312,7 +345,7 @@ path"`、`@dir/`，可带 `:L<n>` / `:L<n>-L<m>` 后缀；从 `@` 补全列表�
 一个独立的 Node 脚本用真实客户端代码驱动一个**假**的 harness（不预设具体版本——插件是协商的，这个假实现也是）—— 不需要 `dsh web`：
 
 ```bash
-npm run protocol-test    # 211 项断言：双流传输拆分（$events 白名单 vs
+npm run protocol-test    # 231 项断言：双流传输拆分（$events 白名单 vs
                          # session/follow）、线缆协商（点分/斜杠、cookie 门禁、
                          # 事件套接字）、认证、cookie 派生、{args} payload、
                          # 审批与提问两条瀑布（Allow/Deny 的确切信封、cancel 撤卡、
@@ -342,8 +375,8 @@ npm install
 npm run build        # esbuild → dist/extension.js
 npm run watch        # 变更时自动重建
 npm run typecheck
-npm run package      # → harness-connector-deepseek-0.1.4.vsix
-npm run protocol-test      # 针对假 harness 的 211 项协议断言
+npm run package      # → harness-connector-deepseek-0.1.5.vsix
+npm run protocol-test      # 针对假 harness 的 231 项协议断言
 npm run protocol-probe     # 报告真实 dsh web 暴露了什么
 ```
 
@@ -356,6 +389,11 @@ npm run protocol-probe     # 报告真实 dsh web 暴露了什么
   是否需要 cookie、事件套接字在 0.2.0-rc.2 上是 `/api/remote.mux`、旧版上是 `/api/events.mux`——都在连接时
   自动探测，同一个构建因此能跨 host 版本工作。跑 `npm run protocol-probe` 可以看到
   你的 host 到底提供了什么。
+- **不知道 Host 在哪也能把它找出来。** 对 dsh Host 发起匿名请求，会被 connection carrier
+  用一句固定的话拒绝（`dsh web authentication required; reopen the URL printed by dsh web.`），
+  本机没有第二个服务会这么说——所以它同时也是一个身份判据。`deepseekHarness.autoDiscover`
+  用的就是它，在这之前先读各 profile 用户 patch 层里钉过的 `webserver.port`。本机实测：
+  探测 46 个 loopback 监听，命中 1 个 Host，并归因到 `desktop` profile 里钉的端口。
 
 ## 限制
 
@@ -367,9 +405,8 @@ npm run protocol-probe     # 报告真实 dsh web 暴露了什么
 - 未知的 harness 事件类型会被忽略（协议是可合并扩展的）；它们不会导致客户端崩溃，但也不会渲染。
 - Diff 审查的 Reject 使用 `git checkout` 回退——目标文件上未提交的本地修改会在 Reject 时丢失。
 
-## 路线图（v0.1.5+）
+## 路线图（v0.1.6+）
 
-- 自动连接：查清为什么面对一个健康的本地 `dsh web`，`auth.init()` + `tryMintLocalSession()` 仍可能返回未就绪（如今手动 `Connect` 按钮是兜底，不是修复）
 - 检查器：过滤框 / 类型高亮 / 导出 JSONL
 - 搜索：限定工作区、分页、命中高亮
 - 内联补全（Inline Completion）

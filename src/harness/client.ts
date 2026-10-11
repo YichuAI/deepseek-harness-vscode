@@ -281,14 +281,27 @@ export class HarnessClient implements Disposable {
     this.opts.auth.retarget(host, port)
   }
 
+  /** The host:port this client is currently pointed at. */
+  target(): { host: string; port: number } {
+    return { host: this.opts.host, port: this.opts.port }
+  }
+
   // ─── connect / disconnect ───────────────────────────────────────────────────
   /**
    * Validate the host is loopback, negotiate the wire shape, open the Remote
    * stream socket (sends the `$events` open frame), wait for the `ready` frame to
    * learn the host identity, then mark the connection ready. Throws on a
    * security-boundary violation, missing credentials or an unreachable host.
+   *
+   * @param opts.force - tear down whatever is live *before* connecting, and do
+   *   not short-circuit on an existing `connected`/`connecting` state. That is
+   *   what makes the sidebar's Reconnect meaningful: after the Host is restarted
+   *   the state here is still `connected` (the mux just went quiet) and a plain
+   *   `connect()` would return without doing anything, which is why the only
+   *   reliable recovery used to be reloading the window.
    */
-  async connect(): Promise<void> {
+  async connect(opts: { force?: boolean } = {}): Promise<void> {
+    if (opts.force === true) this.disconnect()
     if (!LOOPBACK_HOSTS.has(this.opts.host)) {
       const msg = 'v0.0.x only supports local DeepSeek Harness instances.'
       this.setState({ kind: 'error', message: msg })
@@ -366,7 +379,14 @@ export class HarnessClient implements Disposable {
 
   /** The message shown when the harness refuses us: it names the exact fix. */
   private authRequired(): HarnessAuthRequiredError {
-    this.opts.auth.noteRejected()
+    // Only a cookie we actually SENT can have been rejected. Recording a
+    // rejection when we never presented one made `describeGap()` report "the
+    // running harness rejected the stored cookie — the signing secret was
+    // almost certainly regenerated", which sends the user after the wrong
+    // problem. With no cookie at all the real cause is either the `autoSession`
+    // switch or a missing `$DSH_HOME/.credentials.yaml`, and the message below
+    // already names both.
+    if (this.opts.auth.cookieHeader() !== undefined) this.opts.auth.noteRejected()
     const gap = this.opts.auth.describeGap()
     const mintGap = this.opts.auth.describeMintGap()
     return new HarnessAuthRequiredError(

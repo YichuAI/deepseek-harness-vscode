@@ -13,6 +13,8 @@
 
 import type * as vscode from 'vscode'
 import { HarnessRpcError, type HarnessClient } from '../harness/client.ts'
+import { HarnessAuthRequiredError } from '../harness/auth.ts'
+import { discoverHosts, type HostCandidate } from '../harness/discovery.ts'
 import type { MuxStatus } from '../harness/events.ts'
 import type { CallId, FileReferenceCandidate, ImageMediaType, QueueItemView, RpcId, SessionId, SessionSummary, SessionUsageProjection, WorkspaceView } from '../harness/protocol.ts'
 import { ConversationModel, sessionLabel } from '../conversation/model.ts'
@@ -47,6 +49,11 @@ export interface ControllerDeps {
   pushState: () => void
   notifyError: (msg: string) => void
   notifyInfo: (msg: string) => void
+  /**
+   * Whether to look for a dsh Host on another loopback port when the configured
+   * one answers nothing. Mirrors the `autoDiscover` setting.
+   */
+  autoDiscover: () => boolean
   openHarnessHome: () => void
   moveToSecondarySideBar: () => Promise<void>
   log: { info: (m: string) => void; error: (m: string) => void }
@@ -190,8 +197,6 @@ export class AppController {
    * and nothing was ever published; the popup could not open at all.
    */
   private refQueryLatest: string | undefined = undefined
-  /** Last value pushed to the `deepseekHarness.offline` context key. */
-  private offlineContext: boolean | undefined = undefined
   /**
    * Attachments held for the next prompt.
    *
@@ -202,15 +207,27 @@ export class AppController {
    * (a receipt would be stale if the user sat on the composer).
    */
   private pending: HeldAttachment[] = []
+  /**
+   * Serialises connect attempts. A second click while one is in flight must
+   * queue a fresh attempt rather than negotiate a second socket on top of the
+   * first — the two would fight over `client.state` and the loser's teardown
+   * would kill the winner's stream.
+   */
+  private connectChain: Promise<void> = Promise.resolve()
+  /**
+   * The live `session/follow` subscription for the active session.
+   *
+   * Held explicitly so switching sessions (and every forced reconnect, which
+   * re-selects the same session) can drop the previous one. Letting these pile
+   * up in `disposables` left one dead listener per switch alive forever.
+   */
+  private sessionSubscription: { dispose: () => void } | undefined
 
   constructor(private readonly d: ControllerDeps) {}
 
   start(): vscode.Disposable {
     // Wire client state → UiState
     this.disposables.add(this.d.client.onStateChange(() => this.pushFromClient()))
-    // Start life as "not connected" so the manual Connect affordances exist
-    // before the first auto-connect attempt resolves (or fails).
-    this.syncOfflineContext(true)
     let prevMuxKind: MuxStatus['kind'] | undefined
     this.disposables.add(this.d.client.onMuxStatusChange((s) => {
       const reopened = prevMuxKind !== undefined && prevMuxKind !== 'open' && s.kind === 'open'
@@ -248,6 +265,10 @@ export class AppController {
     this.d.log.info(`dispatch: action.type=${action.type}`)
     switch (action.type) {
       case 'connect': await this.doConnect(); break
+      // The webview asks for this once on boot. Unlike `connect` it does not
+      // tear down a working session, so opening the panel cannot interrupt a
+      // turn that the extension host already established.
+      case 'ensureConnected': await this.doConnect({ force: false }); break
       case 'disconnect': this.doDisconnect(); break
       case 'selectSession': await this.selectSession(action.sessionId); break
       case 'newSession': await this.newSession(); break
@@ -287,13 +308,42 @@ export class AppController {
     }
   }
 
-  async doConnect(): Promise<void> {
+  async doConnect(opts: { force?: boolean } = {}): Promise<void> {
+    const force = opts.force ?? true
+    const run = (): Promise<void> => this.runConnect(force)
+    this.connectChain = this.connectChain.then(run, run)
+    await this.connectChain
+  }
+
+  private async runConnect(force: boolean): Promise<void> {
+    // The session the user is looking at outlives a reconnect; losing it made a
+    // forced reconnect look like the panel had been reset to a fresh install.
+    const resume = this.activeSessionId
+    const alreadyConnected = this.d.client.getState().kind === 'connected'
     try {
-      await this.d.client.connect()
+      // `force` tears the old socket down before negotiating. It has to, because
+      // after a Host restart the client still believes it is `connected` — the
+      // stream simply stopped — and a plain connect() short-circuits on that
+      // state. That gap is exactly why "reload the window" used to be the only
+      // recovery.
+      try {
+        await this.d.client.connect({ force })
+      } catch (e) {
+        // Only a *reachability* failure is worth hunting for another port. An
+        // auth refusal means we found a Host and it said no; retrying elsewhere
+        // would answer a credential problem with a port problem.
+        if (e instanceof HarnessAuthRequiredError || !this.d.autoDiscover()) throw e
+        if (await this.attachToDiscovered() === undefined) throw e
+      }
+      // A non-forced connect against a live session has nothing left to do: the
+      // webview asks for one on every boot, and redoing the session handshake
+      // would restart the transcript for no reason.
+      if (!force && alreadyConnected) return
       await this.discoverFolder()
       // Model catalog is session-independent — fetch once per connect when the
       // host serves it, so the selector is ready before the first session opens.
       await this.fetchModelCatalog()
+      await this.restoreSession(resume)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       this.d.log.error('connect failed: ' + msg)
@@ -302,7 +352,75 @@ export class AppController {
     this.d.pushState()
   }
 
+  /**
+   * Look for a dsh Host on another loopback port and point the client at it.
+   *
+   * This exists because of the desktop app: it spawns its Host with `--port 0`
+   * (`apps/desktop-host/src/index.ts`), so the port is freshly assigned on every
+   * launch and reported only to Electron over Node IPC. Nothing lands on disk,
+   * so "the panel is stuck until I reload VS Code" was really "the plugin is
+   * still aimed at last launch's port". Discovery reads ports pinned in
+   * `$DSH_HOME/profiles/<name>/cordis.patch.yml` and probes the OS listener table
+   * for the Host's own anonymous refusal. See `harness/discovery.ts`.
+   *
+   * @returns the address adopted, or undefined when nothing else answered.
+   */
+  private async attachToDiscovered(): Promise<HostCandidate | undefined> {
+    const target = this.d.client.target()
+    this.d.log.info(`connect: nothing answering at ${target.host}:${String(target.port)} — scanning loopback for a dsh Host`)
+    let hosts: HostCandidate[]
+    try {
+      hosts = await discoverHosts({ host: target.host, port: target.port, log: (m) => this.d.log.info(m) })
+    } catch (e) {
+      this.d.log.info('discovery failed: ' + (e instanceof Error ? e.message : String(e)))
+      return undefined
+    }
+    const found = hosts.find((h) => h.port !== target.port)
+    if (found === undefined) {
+      this.d.log.info(`connect: no other dsh Host on loopback (${String(hosts.length)} answered at the configured port)`)
+      return undefined
+    }
+    // Retarget in memory only. A discovered port is usually OS-assigned and will
+    // be different again next launch, so persisting it would leave the user with
+    // a stale pin to debug — the opposite of the point.
+    this.d.client.retarget(target.host, found.port)
+    const via = found.source === 'pinned'
+      ? `pinned in the "${found.profile ?? '?'}" profile`
+      : 'found by probing loopback'
+    this.d.log.info(`connect: adopting ${target.host}:${String(found.port)} (${via})`)
+    await this.d.client.connect({ force: true })
+    this.d.notifyInfo(
+      `DeepSeek Harness: found the local Host on ${target.host}:${String(found.port)} (${via}). `
+      + 'Set deepseekHarness.port to pin that port and skip the scan next time.',
+    )
+    return found
+  }
+
+  /**
+   * Put the panel back on the session it was showing before a reconnect.
+   *
+   * `refreshSessions()` deliberately leaves an already-set `activeSessionId`
+   * alone, so after a forced reconnect the transcript is still on screen while
+   * its subscription is not — that died with the socket. Re-selecting rebuilds
+   * the model and re-opens the follow stream, which is the documented resume
+   * semantic here (rebuild from the host journal, not cursor-resume).
+   */
+  private async restoreSession(resume: SessionId | undefined): Promise<void> {
+    if (resume === undefined || this.binding?.harness === undefined) return
+    if (this.sessions.some((s) => s.sessionId === resume)) {
+      await this.selectSession(resume)
+      return
+    }
+    this.d.log.info(`connect: session ${resume} is not on this host — falling back to the newest`)
+    this.activeSessionId = undefined
+    this.model = undefined
+    this.d.setState({ activeSessionId: undefined, snapshot: undefined })
+    await this.refreshSessions()
+  }
+
   doDisconnect(): void {
+    this.sessionSubscription?.dispose()
+    this.sessionSubscription = undefined
     this.d.client.disconnect()
     if (this.activeSessionId) {
       this.reviewController?.store.clearSession(this.activeSessionId)
@@ -374,10 +492,11 @@ export class AppController {
     this.d.setState({ activeSessionId: sessionId, snapshot: this.model.snapshot() })
     try {
       await this.refetchHistory(sessionId)
-      this.disposables.add(this.d.client.subscribe(sessionId, (frames) => {
+      this.sessionSubscription?.dispose()
+      this.sessionSubscription = this.d.client.subscribe(sessionId, (frames) => {
         for (const f of frames) { this.captureFrame(f); this.applyMuxFrame(f) }
         this.d.pushState()
-      }))
+      })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       this.d.log.error('history/subscribe: ' + msg)
@@ -1230,21 +1349,7 @@ export class AppController {
       // What the host serves decides which controls the panel may offer.
       capabilities: { ...this.d.client.capabilities() },
     })
-    this.syncOfflineContext(conn.connection !== 'connected')
     this.d.pushState()
-  }
-
-  /**
-   * Mirror "not connected" into a context key.
-   *
-   * The view-title Connect button is gated on it (package.json > menus >
-   * view/title). VS Code evaluates when-clauses only when a context key
-   * actually changes, so this must be set rather than just rendered.
-   */
-  private syncOfflineContext(offline: boolean): void {
-    if (this.offlineContext === offline) return
-    this.offlineContext = offline
-    void this.d.vscodeAPI.commands.executeCommand('setContext', 'deepseekHarness.offline', offline)
   }
 }
 

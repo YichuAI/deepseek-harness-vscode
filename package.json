@@ -2,7 +2,7 @@
   "name": "harness-connector-deepseek",
   "displayName": "DeepSeek Harness Connector",
   "description": "Native VS Code client for DeepSeek Harness. Connect to your existing local Harness instance and continue the same workspaces and sessions directly inside VS Code.",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "lucasliang",
   "license": "MIT",
   "repository": {
@@ -52,6 +52,12 @@
         "title": "DeepSeek Harness: Connect",
         "category": "DeepSeek Harness",
         "icon": "$(plug)"
+      },
+      {
+        "command": "deepseekHarness.reconnect",
+        "title": "DeepSeek Harness: Reconnect",
+        "category": "DeepSeek Harness",
+        "icon": "$(refresh)"
       },
       {
         "command": "deepseekHarness.disconnect",
@@ -137,8 +143,8 @@
     "menus": {
       "view/title": [
         {
-          "command": "deepseekHarness.connect",
-          "when": "view == deepseekHarness.sessionView && deepseekHarness.offline",
+          "command": "deepseekHarness.reconnect",
+          "when": "view == deepseekHarness.sessionView",
           "group": "navigation@1"
         }
       ],
@@ -179,11 +185,16 @@
           "default": false,
           "markdownDescription": "Automatically answer tool-approval requests with `allow once` (only those answerable from VS Code). Equivalent of Copilot's `/autoApprove` — review the security trade-off before enabling."
         },
-        "deepseekHarness.autoSession": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Mint the browser-session cookie locally from `$DSH_HOME/.credentials.yaml`, which is how the extension authenticates today (there is no paste-a-launch-URL command any more). Turning this off leaves the extension unauthenticated — it is a security switch, not a convenience toggle. See the README's 'How the session is obtained'."
-        }
+    "deepseekHarness.autoSession": {
+      "type": "boolean",
+      "default": true,
+      "markdownDescription": "Mint the browser-session cookie locally from `$DSH_HOME/.credentials.yaml`, which is how the extension authenticates today (there is no paste-a-launch-URL command any more). Turning this off leaves the extension unauthenticated — it is a security switch, not a convenience toggle. See the README's 'How the session is obtained'."
+    },
+    "deepseekHarness.autoDiscover": {
+      "type": "boolean",
+      "default": true,
+      "markdownDescription": "When the configured port answers nothing, look for a dsh Host elsewhere on loopback: ports pinned in `$DSH_HOME/profiles/<name>/cordis.patch.yml` first, then whatever is listening that answers the Host's own refusal text. Needed by the **desktop app**, which starts its Host on an OS-assigned port (`--port 0`) that changes every launch. The discovered port is used for this session only and is never written to your settings."
+    }
       }
     }
   },

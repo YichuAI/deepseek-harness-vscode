@@ -113,6 +113,7 @@ export function activate(context: vscode.ExtensionContext): void {
     pushState,
     notifyError: (m) => vscode.window.showErrorMessage(`DeepSeek Harness: ${m}`),
     notifyInfo: (m) => vscode.window.showInformationMessage(m),
+    autoDiscover: () => cfg.autoDiscover,
     openHarnessHome: () => {
       void vscode.window.showInformationMessage(
         'Open the DeepSeek Harness web UI with the URL printed by `dsh web` — '
@@ -177,6 +178,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('deepseekHarness.connect', wireAction('connect')),
+    // Same path as Connect on purpose: `doConnect()` always tears the existing
+    // session down first, so "connect" and "reconnect" are one operation. The
+    // separate command exists so the panel header can keep a button visible
+    // while connected — the old entry was gated on `deepseekHarness.offline`,
+    // which hid it exactly when a reconnect was wanted.
+    vscode.commands.registerCommand('deepseekHarness.reconnect', wireAction('connect')),
     vscode.commands.registerCommand('deepseekHarness.disconnect', wireAction('disconnect')),
     vscode.commands.registerCommand('deepseekHarness.clearSessionToken', clearSessionToken),
     vscode.commands.registerCommand('deepseekHarness.openWebUI', () => {
@@ -264,6 +271,11 @@ export function activate(context: vscode.ExtensionContext): void {
       setState({ autoApprove: next.autoApproveApprovals })
       pushState()
     }
+    if (next.autoDiscover !== cfg.autoDiscover) {
+      cfg.autoDiscover = next.autoDiscover
+      // Turning it on cannot hurt an already-connected client; turning it off
+      // only stops future scans, so nothing to re-run here.
+    }
     if (next.autoSession !== cfg.autoSession) {
       cfg.autoSession = next.autoSession
       auth.setAllowLocalMint(next.autoSession)
@@ -287,12 +299,13 @@ export function deactivate(): void {
   // Disposables owned by context.subscriptions; nothing to do here.
 }
 
-function readConfig(): { host: string; port: number; showSystemMessages: boolean; autoSession: boolean; autoApproveApprovals: boolean } {
+function readConfig(): { host: string; port: number; showSystemMessages: boolean; autoSession: boolean; autoApproveApprovals: boolean; autoDiscover: boolean } {
   const cfg = vscode.workspace.getConfiguration(SECTION)
   const host = cfg.get<string>('host') ?? '127.0.0.1'
   const port = cfg.get<number>('port') ?? 3080
   const showSystemMessages = cfg.get<boolean>('showSystemMessages') ?? false
   const autoSession = cfg.get<boolean>('autoSession') ?? true
   const autoApproveApprovals = cfg.get<boolean>('autoApproveApprovals') ?? false
-  return { host, port, showSystemMessages, autoSession, autoApproveApprovals }
+  const autoDiscover = cfg.get<boolean>('autoDiscover') ?? true
+  return { host, port, showSystemMessages, autoSession, autoApproveApprovals, autoDiscover }
 }

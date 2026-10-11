@@ -149,13 +149,20 @@ export const CLIENT_SCRIPT = /* js */ `
     setDot(conn);
     const labels = { disconnected: 'Disconnected', connecting: 'Connecting…', connected: 'Connected', error: 'Connection error' };
     $('status-text').textContent = labels[conn] || conn;
-    // Manual connect. Auto-connect runs once at activation, so if dsh web was not
-    // listening yet (not started, or bound to another port) nothing ever retries
-    // and the panel used to just sit there with no way to ask again.
+    // Reconnect. Always visible, because the case that needs it most is the one
+    // where the panel still says "Connected": the Host was restarted (or the
+    // desktop app came up on a new port) and the socket we are holding is dead.
+    // Clicking it always tears the old session down and negotiates a fresh one,
+    // which is what "restart VS Code" used to be the only way to do.
     const connectBtn = $('connect');
-    connectBtn.style.display = conn === 'connected' ? 'none' : '';
+    connectBtn.style.display = '';
     connectBtn.disabled = conn === 'connecting';
-    connectBtn.textContent = conn === 'connecting' ? 'Connecting…' : (conn === 'error' ? 'Retry' : 'Connect');
+    connectBtn.textContent = conn === 'connecting'
+      ? 'Connecting…'
+      : (conn === 'error' ? 'Retry' : (conn === 'connected' ? '⟳ Reconnect' : 'Connect'));
+    connectBtn.title = conn === 'connected'
+      ? 'Reconnect: drop the current session and negotiate a fresh one'
+      : 'Connect to the local DeepSeek Harness Host';
     const hi = state.hostInfo;
     const bits = [];
     if (hi) {
@@ -233,7 +240,7 @@ export const CLIENT_SCRIPT = /* js */ `
       } else if (state.connection === 'error') {
         emptyMsg = state.errorMessage || 'Connection error';
       } else {
-        emptyMsg = 'Disconnected. Click Connect or restart the extension.';
+        emptyMsg = 'Disconnected. Click Connect above, or Reconnect in the panel header.';
       }
       var expected = '<div class="empty">' + escapeText(emptyMsg) + '</div>';
       if (msgs.innerHTML !== expected) msgs.innerHTML = expected;
@@ -1619,5 +1626,8 @@ export const CLIENT_SCRIPT = /* js */ `
     updateContextPreview();
   }
 
-  post({ type: 'connect' });
+  // Ask for a connection, but non-destructively: the extension host already
+  // auto-connects on activation, and the panel merely opening must not tear that
+  // session down and rebuild it. The Reconnect button is what forces.
+  post({ type: 'ensureConnected' });
 `

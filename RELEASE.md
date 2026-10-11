@@ -1,7 +1,7 @@
 # Release Process
 
 This document describes how to cut and publish a release of
-**DeepSeek Harness Connector for VS Code**. v0.1.4 ships as a GitHub Release +
+**DeepSeek Harness Connector for VS Code**. v0.1.5 ships as a GitHub Release +
 VSIX asset; Marketplace publishing is optional and documented in step 5.
 
 The repo lives at `git@github.com:YichuAI/deepseek-harness-vscode.git`. Pushing
@@ -39,12 +39,12 @@ npm run typecheck          # → tsc --noEmit, exit 0
 npm run build              # → dist/extension.js
 
 # 1.3 protocol test (fake harness — no dsh web needed)
-npm run protocol-test      # → all 211 assertions ✓
+npm run protocol-test      # → all 231 assertions ✓
 
 # 1.4 integration test (writes a session — needs dsh web running)
 #     start dsh web first in another terminal:
 #       cd ../deepseek-harness && npm run dsh -- web
-npm run integration-test   # → 25/25 checks ✓, closed loop OK
+npm run integration-test   # → 29/29 checks ✓, closed loop OK
 
 # 1.6 package the VSIX
 npm run package            # → harness-connector-deepseek-<ver>.vsix
@@ -59,7 +59,7 @@ Manual checks:
       twin. This is a standing rule, not a per-release judgement call.
 - [ ] `CHANGELOG.md` and `ARCHITECTURE.md` still quote the **current** assertion
       count from `npm run protocol-test` (it has grown 50 → 64 → 98 → 83 → 156 →
-      178 → 180 → 190 → 211 as the rc.2 rewrite replaced the rc.6 fake harness and
+      178 → 180 → 190 → 211 → 231 as the rc.2 rewrite replaced the rc.6 fake harness and
       the waterfall/pending-panel groups landed; stale counts are the most common
       doc drift here).
 - [ ] `LICENSE` present (MIT).
@@ -79,7 +79,7 @@ Manual checks:
 unzip -l harness-connector-deepseek-<ver>.vsix
 ```
 
-Expected (v0.1.4 = 14 files, ~253 KB):
+Expected (v0.1.5 = 14 files, ~265 KB):
 
 ```
 [Content_Types].xml

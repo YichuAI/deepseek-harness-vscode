@@ -1,9 +1,9 @@
-# DeepSeek Harness Connector for VS Code (v0.1.4)
+# DeepSeek Harness Connector for VS Code (v0.1.5)
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
 [![VS Code Marketplace](https://img.shields.io/badge/VS%20Code-Marketplace-blue.svg)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
-[![Version](https://img.shields.io/badge/version-0.1.4-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.4)
+[![Version](https://img.shields.io/badge/version-0.1.5-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.5)
 
 > Native VS Code client for DeepSeek Harness.
 >
@@ -24,6 +24,18 @@ VS Code ─────┘
 ```
 
 VS Code reads the workspaces and sessions the browser already has, and continues the **same** session — so a browser refresh of that session sees exactly what VS Code sent.
+
+## What's new in v0.1.5
+
+**A Reconnect button that actually reconnects — and a plugin that can find the Host after it moves.**
+
+- **Reconnect, without reloading VS Code.** The button is always on offer (status row and panel header). It always tears the old session down and negotiates a fresh one — which is the whole point, because the case that needs it most is the one where the panel still says *Connected*: the Host was restarted, the socket we hold is dead, and nothing has told us. A plain connect would short-circuit on that stale state, which is exactly why "reload the window" used to be the only recovery. Attempts are serialised, so a second click queues rather than fighting the first.
+- **Host auto-discovery.** When the configured port answers nothing, the plugin reads `webserver.port` pinned in `$DSH_HOME/profiles/<name>/cordis.patch.yml`, then enumerates the OS loopback listener table and confirms each candidate with the Host's own anonymous refusal (`401` + `dsh web authentication required; reopen the URL printed by dsh web.` — that sentence comes from the connection carrier, not the web frontend, so any entry point produces it). This is what the **desktop app** needs: it spawns its Host with `--port 0`, so the port is OS-assigned afresh on every launch and reported only to Electron over Node IPC. Measured here: 46 loopback listeners, exactly one answer, correctly attributed to the pinned `desktop` profile. The discovered port is session-local and **never written to your settings** — it changes on every launch, so persisting it would only leave a stale pin behind.
+- **Fixed: a forced reconnect lost the session you were looking at.** `disconnect()` drops the `session/follow` subscription while leaving `activeSessionId` set, so the transcript stayed on screen with nothing feeding it. Reconnect now re-selects the same session (rebuild model, re-subscribe, refetch history — the documented *rebuild*, not cursor-resume), and only falls back to the newest session when the Host genuinely no longer has it.
+- **Fixed: one leaked `session/follow` subscription per session switch.** They were parked in a disposable bag and never released; reconnect now re-selects on every attempt, so the leak would have accelerated.
+- **Fixed: "the signing secret was rotated" reported when we never sent a cookie.** `authRequired()` recorded a rejection unconditionally, so "no session at all" (the `autoSession` switch off, or no `$DSH_HOME/.credentials.yaml` yet) was described as "the running harness rejected the stored cookie". That sends you after the wrong problem.
+
+See [CHANGELOG.md](./CHANGELOG.md) for the full diff.
 
 ## What's new in v0.1.4
 
@@ -55,7 +67,7 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full diff.
 - **Non-image files now actually reach the agent.** The old build pushed bytes at `session/attachment`, which is not the upload route — it is *read an attachment by id*. Real uploads go over `POST /api/session/uploadFileBinary` (raw bytes) and the prompt references the returned receipt. One caveat the UI states plainly: a receipt is bound to the session *and* the `dsh web` process, so it does not survive a host restart.
 - **`@` references no longer paste file bodies.** It used to be `@file:path` plus `readFileSync` inlining — a plugin invention. Now: `@path`, `@"path with spaces"`, `@dir/`, optionally with a `:L<n>` or `:L<n>-L<m>` line-range suffix, completed from the host's own `fileReferences/list`. Picking a candidate attaches nothing; the agent reads the file itself. (Besides aligning with the host, inlining was poisoning the KV cache: it changed the prompt prefix on every send.)
 - **Fixed: history was permanently empty — and worse, reconnects erased your conversation.** `session/page` was called with a hard-coded `throughSeq: 0`, which is a *journal cursor*, not a count. The cursor is only published in the opening frame of `session/follow`; the client now learns it from there. The empty page was then folded as fact, so every socket reconnect blanked the transcript. An empty page no longer clears the screen.
-- **Fixed: a `Connect` button exists when auto-connect fails.** Auto-connect is best-effort and has been observed to fail locally (`auth` comes back not-ready) on a host that is otherwise healthy — which left the panel with nothing to click. The status row now shows `Connect` / `Retry` / `Connecting…`, and a plug icon appears in the panel header only while disconnected.
+- **Fixed: a `Connect` button exists when auto-connect fails.** Auto-connect is best-effort and has been observed to fail locally (`auth` comes back not-ready) on a host that is otherwise healthy — which left the panel with nothing to click. The status row now shows `Connect` / `Retry` / `Connecting…`, and a plug icon appears in the panel header only while disconnected. (v0.1.5 replaced that gate with an always-visible **Reconnect** button — the stale-connection case, where the panel still reads *Connected*, is exactly when the old gate hid it.)
 - **Removed `DeepSeek Harness: Set Session Token from Launch URL`.** Minting locally from `$DSH_HOME/.credentials.yaml` is the only path anyone actually uses; a token that rotates with every `dsh web` process was pure maintenance cost.
 - **Fixed a misdiagnosis.** "No such method" (HTTP 404) and "that workspace does not exist" (200 + `workspace/not-found`) were collapsed into one bucket, so an ordinary business error advised you to *upgrade the host*.
 - **Fixed an argument-shape retry that made every call slower.** The remembered-correct endpoint shape was being tried *last*, so each call burned two failing round-trips first and the wire shape could drift depending on host leniency. Remembered shapes are now tried first.
@@ -161,7 +173,7 @@ For your safety, the following remain out of scope:
    Or install the VSIX from [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases):
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.1.4.vsix
+   code --install-extension harness-connector-deepseek-0.1.5.vsix
    ```
 
 3. Nothing to configure. The extension auto-connects: it reads the browser-session
@@ -231,10 +243,11 @@ authority that minted it).
 | `deepseekHarness.showSystemMessages` | `false` | Show plugin-injected system messages (runtime context, approval notices). Hidden by default; toggle live with the `SYS` button in the webview header. |
 | `deepseekHarness.autoSession` | `true` | Mint the browser-session cookie locally from `$DSH_HOME/.credentials.yaml`. Turning it off leaves the extension unauthenticated — it is a security switch, not a convenience toggle. |
 | `deepseekHarness.autoApproveApprovals` | `false` | **v0.0.9+** Automatically answer incoming approval requests with `allowed-once`. Off by default — enabling it means tools run without per-call confirmation. |
+| `deepseekHarness.autoDiscover` | `true` | **v0.1.5+** When the configured port answers nothing, look for a dsh Host elsewhere on loopback (pinned `webserver.port` first, then the OS listener table, confirmed by the Host's own refusal text). Needed by the desktop app, which starts its Host on an OS-assigned port. The discovered port is session-local and never written to your settings. |
 
 ## Commands
 
-- `DeepSeek Harness: Connect` / `Disconnect`
+- `DeepSeek Harness: Connect` / `Reconnect` / `Disconnect` — **Reconnect** (also the ⟳ button in the panel header, and the always-visible button in the status row) drops whatever is live and negotiates a fresh session
 - `DeepSeek Harness: Clear Session Token` — drop the stored cookie and reconnect (a fresh one is minted; use it before switching `dsh web` instances)
 - `DeepSeek Harness: New Session` (in the active workspace)
 - `DeepSeek Harness: Refresh Sessions`
@@ -287,7 +300,7 @@ that implements the `0.2.1-alpha.2` server half exactly — so no `dsh web` is
 needed:
 
 ```bash
-npm run protocol-test    # 211 assertions: the two-stream transport split
+npm run protocol-test    # 231 assertions: the two-stream transport split
                          # ($events allowlist vs session/follow), wire negotiation
                          # (dot/slash, cookie gating, event socket), auth and cookie
                          # derivation, {args} payloads (wrapped vs bare), the approval
@@ -298,8 +311,11 @@ npm run protocol-test    # 211 assertions: the two-stream transport split
                          # removed-endpoint 404 handling, control-surface capability
                          # probing, the whole-value control fold, the @-completion
                          # state contract through the real controller, the pending
-                         # panel driven through a scriptable DOM stub, and the
-                         # webview script's integrity
+                         # panel driven through a scriptable DOM stub, the
+                         # reconnect button's exact posts, Host-discovery parsing
+                         # (pinned ports, three listener-table dialects, the
+                         # fingerprint's three verdicts), and the webview
+                         # script's integrity
 ```
 
 To ask your **real** `dsh web` what it actually serves (endpoint style, event
@@ -326,8 +342,8 @@ npm install
 npm run build        # esbuild → dist/extension.js
 npm run watch        # rebuild on change
 npm run typecheck
-npm run package      # → harness-connector-deepseek-0.1.4.vsix
-npm run protocol-test      # 211 protocol assertions against a fake harness
+npm run package      # → harness-connector-deepseek-0.1.5.vsix
+npm run protocol-test      # 231 protocol assertions against a fake harness
 npm run protocol-probe     # report what your real dsh web exposes
 ```
 
@@ -349,6 +365,13 @@ Press `F5` in VS Code to launch an Extension Development Host with the extension
   `$events`" stream is what made an earlier build connect and then go silent.
   Both streams are opened separately; the shapes are pinned in
   `scripts/protocol-test.ts`.
+- **The Host can be found without being told where it is.** An anonymous request
+  to a dsh Host is refused by the connection carrier with a fixed sentence
+  (`dsh web authentication required; reopen the URL printed by dsh web.`), which
+  no other local server emits — so it doubles as an identity check. That is what
+  `deepseekHarness.autoDiscover` uses, after first reading any `webserver.port`
+  pinned in a profile's user patch layer. Measured on this machine: 46 loopback
+  listeners probed, one Host found, attributed to the pinned `desktop` profile.
 
 ## Limitations
 
@@ -360,9 +383,8 @@ Press `F5` in VS Code to launch an Extension Development Host with the extension
 - Unknown harness event types are ignored (the protocol is merge-extensible); they do not crash the client but also do not render.
 - Diff review revert uses `git checkout` — uncommitted changes to the target file will be lost on Reject.
 
-## Roadmap (v0.1.5+)
+## Roadmap (v0.1.6+)
 
-- Auto-connect: find out why `auth.init()` + `tryMintLocalSession()` can come back not-ready against a healthy local `dsh web` (today the manual `Connect` button is the workaround, not a fix)
 - Inspector: filter box / type highlight / export as JSONL
 - Search: scope to workspace, pagination, highlight rendering
 - Inline Completion

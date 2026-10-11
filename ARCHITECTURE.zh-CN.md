@@ -364,23 +364,58 @@ findHarnessWorkspace()          — 只读：匹配文件夹 ↔ harness workspa
 眼前正在看的对话擦掉**；而 `session/follow` 会重发快照，所以模型最终是从宿主的日志折出来的，
 不是从屏幕上的残留拼出来的。
 
-### 手动 Connect（为什么状态行有个 Connect 按钮）
+### Reconnect（为什么按钮常驻、而且总是强制）
 
-自动连接是尽力而为，也确实会失败——本机实测，在 `dsh web` 一切正常的机器上，
-`auth.init()` 加 `tryMintLocalSession()` 仍可能返回未就绪。把面板的可用性押在一次成功的自动
-连接上，失败时用户面对的就是"没得点、也没得读"。所以 `pushFromClient()` 把连接状态镜像到
-VS Code 上下文键 `deepseekHarness.offline`：
+`AppController.doConnect()` 就是一次**强制重连**，也是唯一建立连接的路径：激活、`Reconnect`
+命令、状态行里的按钮、面板标题里的图标，走的都是它。
 
-- 状态行渲染一个按钮，文案三态如实反映：`Connect` / `Retry`（上次失败后）/ `Connecting…`
-  （进行中且禁用）；
-- `package.json` 贡献一条 `view/title` 菜单项，`when` 为
-  `view == deepseekHarness.sessionView && deepseekHarness.offline`，于是一个插头图标
-  **只在未连接时**出现在面板标题栏。
+强制才是重点。Host 重启之后，客户端自己的状态会**停在 `connected`**——流只是不响了，没有
+任何东西告诉过我们——而 `HarnessClient.connect()` 会在这个状态上直接早退。这个空档正是过去
+"只能重载 VS Code 窗口"的原因。所以 `connect({force:true})` **先拆再谈**。
 
-上下文键只在**真正变化**时才重估，所以 `syncOfflineContext()` 是边沿触发的——并且在
-`start()` 里就先置成 `true`，让按钮从第一帧起就可见（那时 socket 还不存在）。
+两条结构性约束保证这么做是安全的：
 
-至于"auth 为什么会返回未就绪"，目前仍是未解问题；按钮是地板，不是修复。
+- **尝试是串行化的。** `doConnect()` 往一条 promise 链上追加，所以连点两下是排队等一次新的
+  尝试，而不是在第一个 socket 之上再谈一个——那种情况下后者的拆除会顺手杀掉前者的流。
+- **打开着的会话要活下来。** `disconnect()` 拆掉 `session/follow` 订阅，却把 `activeSessionId`
+  留着，于是对话会停在屏幕上而背后没有任何东西在喂它。`runConnect()` 会先把 id 抓在手里，
+  连接后重新选中它——重建模型、重新订阅、重拉历史，也就是上文那个"重建而非游标续传"。
+  只有当 Host 上确实没有这个会话时才退回到最新的那个。
+
+webview 的启动请求**故意不走**这条路：面板打开时发的是 `ensureConnected`
+（`doConnect({force:false})`），因为光是把面板显示出来，不应该拆掉扩展宿主已经建立的会话；
+强制的是按钮。
+
+`package.json` 把 `deepseekHarness.reconnect` 无条件贡献到 `view/title`。它原先挂在
+`deepseekHarness.offline` 条件上，而那种写法恰好把它在最需要的时候藏了起来——面板还写着
+Connected、socket 其实已经死了。
+
+### Host 发现（为什么端口可能是错的）
+
+`dsh web` 默认落在 `127.0.0.1:3080`，所以固定端口在大多数时候是对的。**桌面端是例外，而且是
+它的设计使然**：它用 `--port 0` 启动 Host（`apps/desktop-host/src/index.ts`），端口由系统每次
+重新分配，只通过 Node IPC 报给 Electron，**不落盘**。所以"面板一直卡到我重载 VS Code"实际上
+是"插件还指着上一次启动的那个端口"。
+
+当 `connect()` 的失败原因**不是**鉴权拒绝时（鉴权拒绝意味着我们找到了 Host、是它说了不；
+拿端口问题去回答凭证问题就答错了），`AppController.attachToDiscovered()` 会跑
+`harness/discovery.ts`：
+
+1. **钉住的端口** —— `$DSH_HOME/profiles/<name>/cordis.patch.yml` 里的 `webserver.port`。
+   手工解析，因为用户层可能带 `!!js` 标签，通用 YAML 解析器根本读不了。
+2. **Host 自己的拒绝** —— 枚举操作系统的监听表（netstat / lsof / `/proc/net/tcp`），对每个
+   候选发一次匿名 `GET /`。dsh Host 会答 `401` +
+   `dsh web authentication required; reopen the URL printed by dsh web.`；这句话来自
+   connection carrier 的栅栏而不是 web 前端，所以哪个入口启动的 Host 都会这么说——而且本机
+   没有第二个服务会这么说。带 `--dsh-boot-bg` 的 `200` 作为次优选接受，那是给关掉了浏览器
+   栅栏的部署留的口子。
+
+探测监听表而不是扫端口区间是刻意的：几十个监听大约一秒就能问完，而扫 16000 个临时端口既慢
+又没礼貌。`deepseekHarness.autoDiscover`（默认开）控制这一切。
+
+采用的端口**只在本次会话内有效，绝不写入设置**——系统分配的端口每次启动都会变，写进去只会
+给用户留下一个下次必然过期的钉子。本机实测：探测 46 个 loopback 监听，命中 1 个 Host，并
+正确归因到 `desktop` profile 里钉的端口；同一次扫描里的普通 HTTP 监听器**不会**被采纳。
 
 ## 安全边界
 
@@ -411,6 +446,7 @@ src/
 │   ├── client.ts             # HarnessClient — 唯一网络边界
 │   ├── auth.ts               # 浏览器会话 cookie 生命周期 + 本地自签
 │   ├── local-credentials.ts  # 读取 $DSH_HOME/.credentials.yaml（autoSession）
+│   ├── discovery.ts          # 找 Host：profile 里钉的端口 + 401 栅栏指纹
 │   ├── events.ts             # RemoteMuxSocket (WS) + EventBuffer (30ms)
 │   ├── http.ts               # 最小 http 客户端（无 fetch 时的回退）
 │   └── ws.ts                 # RFC6455 客户端（无运行时依赖）
@@ -426,7 +462,7 @@ media/
 ├── origin.png                # 源材料（VSIX 排除）
 └── markdown-it.umd.min.js    # VSIX 打包用（114 KB）
 scripts/
-├── protocol-test.ts          # 假 harness 协议测试，180 项断言（无需 dsh web）
+├── protocol-test.ts          # 假 harness 协议测试，231 项断言（无需 dsh web）
 ├── protocol-probe.ts         # 向真实 `dsh web` 询问它实际提供什么
 ├── integration-test.ts       # 针对真实 dsh 的闭环测试
 └── gen-icon.ts               # 从 origin.png 生成图标

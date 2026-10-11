@@ -40,7 +40,7 @@
 import http from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createHash, createHmac, randomBytes } from 'node:crypto'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Duplex } from 'node:stream'
@@ -55,6 +55,10 @@ import { ControlSurface } from '../src/conversation/control.ts'
 import { ConversationModel } from '../src/conversation/model.ts'
 import { cookieNameForAuthority } from '../src/harness/auth.ts'
 import { isMissingMethodError, isShapeRejection, negotiateWire, wireEndpoint } from '../src/harness/wire.ts'
+import {
+  DSH_FENCE_FINGERPRINT, discoverHosts, parseLsofListeners, parseNetstatListeners,
+  parseProcNetListeners, parseWebserverPort, probeHost,
+} from '../src/harness/discovery.ts'
 import { findHarnessWorkspace } from '../src/workspace/binding.ts'
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
@@ -241,7 +245,7 @@ function bootWebviewInteractive(
   script: string,
   skeleton: string,
   state: Record<string, unknown>,
-): { error: string; panel: StubEl; actions: Record<string, unknown>[]; push: (patch: Record<string, unknown>) => void; el: (id: string) => StubEl } {
+): { error: string; panel: StubEl; actions: Record<string, unknown>[]; bootActions: Record<string, unknown>[]; push: (patch: Record<string, unknown>) => void; el: (id: string) => StubEl } {
   const ids = [...skeleton.matchAll(/id="([^"]+)"/g)].map((m) => m[1] as string)
   const els = new Map(ids.map((id) => [id, makeStubEl(id)]))
   let handler: ((e: unknown) => void) | undefined
@@ -258,7 +262,7 @@ function bootWebviewInteractive(
   try {
     new Function(script)()
   } catch (e) {
-    return { error: (e as Error).message, panel: makeStubEl('pending-panel'), actions, push: () => {}, el: () => makeStubEl('x') }
+    return { error: (e as Error).message, panel: makeStubEl('pending-panel'), actions, bootActions: [], push: () => {}, el: () => makeStubEl('x') }
   }
   const base = {
     connection: 'connected', sessions: [], sending: false, canStop: false,
@@ -272,13 +276,16 @@ function bootWebviewInteractive(
     handler?.({ data: { kind: 'state', state: { ...base, ...patch, renderVersion: version } } })
   }
   push(state)
-  // The script auto-connects on boot; that is not what these assertions are
-  // about, and leaving it in would offset every count.
+  // The script asks for a connection on boot; that is not what these assertions
+  // are about, and leaving it in would offset every count. It is kept separately
+  // so the *shape* of that request can still be asserted.
+  const bootActions = [...actions]
   actions.length = 0
   return {
     error: '',
     panel: els.get('pending-panel') as StubEl,
     actions,
+    bootActions,
     push: (patch: Record<string, unknown>) => { actions.length = 0; push(patch) },
     el: (id: string) => els.get(id) as StubEl,
   }
@@ -1331,6 +1338,7 @@ async function main(): Promise<void> {
       pushState: () => {},
       notifyError: () => {},
       notifyInfo: () => {},
+      autoDiscover: () => false,
       openHarnessHome: () => {},
       moveToSecondarySideBar: async () => {},
       log: { info: () => {}, error: () => {} },
@@ -1621,9 +1629,13 @@ async function main(): Promise<void> {
     check('the webview boots and attaches a state listener', boot.handlerRegistered, boot.error)
     eq('a connected state renders the Connected label', boot.statusText, 'Connected')
 
-    // Manual connect: auto-connect fires once at activation, so if dsh web was
-    // not up yet there is nothing left to retry with unless the panel offers it.
-    check('a connected panel hides the manual connect button', !boot.connectVisible)
+    // Reconnect. The case that needs it most is the panel that still reads
+    // "Connected" after the Host was restarted — the socket we are holding is
+    // dead but nothing has told us. Hiding the button then was the bug: the only
+    // recovery was reloading the window.
+    check('a connected panel keeps the reconnect affordance', boot.connectVisible)
+    eq('...labelled Reconnect', boot.connectLabel, '⟳ Reconnect')
+    check('...and it can be pressed', !boot.connectDisabled)
 
     const offline = bootWebview(CLIENT_SCRIPT, HTML_SKELETON, undefined, 'disconnected')
     check('a disconnected panel offers a connect button', offline.connectVisible)
@@ -1773,6 +1785,134 @@ async function main(): Promise<void> {
     })
     eq('a resolved request leaves the panel empty',
       (resolved.panel['style'] as Record<string, string>)['display'], 'none')
+  }
+
+  // ─── G3. reconnect: the panel must be able to force a fresh connection ────
+  // The Host can restart, and the desktop app comes up on a new OS-assigned port
+  // every launch. Before this the panel held a dead socket and said "Connected";
+  // the only recovery was reloading the VS Code window.
+  {
+    const live = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, {})
+
+    // Opening the panel must not tear down a session the extension host already
+    // established — the boot request is the non-destructive one.
+    eq('the panel asks for a connection on boot', live.bootActions.at(-1), { type: 'ensureConnected' })
+    check('...and that request is not the destructive one',
+      live.bootActions.every((a) => a['type'] !== 'connect'))
+
+    // The button, however, must force.
+    fire(live.el('connect'), 'click')
+    eq('clicking Reconnect posts a forced connect', live.actions.at(-1), { type: 'connect' })
+
+    // ...and it stays on offer while connected, which is the whole point.
+    eq('the button is visible while connected',
+      (live.el('connect')['style'] as Record<string, string>)['display'], '')
+    eq('...and reads as a reconnect', live.el('connect')['textContent'], '⟳ Reconnect')
+  }
+
+  // ─── H. Host discovery ─────────────────────────────────────────────────────
+  // The desktop app starts its Host with `--port 0`, so the port is OS-assigned
+  // on every launch and the configured one goes stale. Finding it again is what
+  // makes Reconnect useful instead of just faster to fail.
+  {
+    // H1. Reading a pinned port out of a profile's user patch layer. The entry has
+    //     to be matched by id, or a `port:` belonging to some other service
+    //     becomes the answer.
+    eq('a webserver entry contributes its port',
+      parseWebserverPort('- id: webserver\n  config:\n    host: 127.0.0.1\n    port: 3081\n'), 3081)
+    eq('a port outside a webserver entry is not claimed',
+      parseWebserverPort('- id: ui-layout\n  config:\n    port: 9012\n'), undefined)
+    eq('the webserver port is found among other entries',
+      parseWebserverPort('- id: ui-layout\n  config:\n    port: 9012\n- id: webserver\n  config:\n    port: 19387\n'), 19387)
+    eq('a webserver entry with no port is not claimed',
+      parseWebserverPort('- id: webserver\n  name: "@deepseek-ai/dsh-host-webserver"\n'), undefined)
+
+    // H2. Listener tables, one shape per platform.
+    eq('netstat: loopback and wildcard LISTEN rows only',
+      parseNetstatListeners([
+        '  TCP    127.0.0.1:3081         0.0.0.0:0              LISTENING       10660',
+        '  TCP    [::1]:3080             [::]:0                 LISTENING       1234',
+        '  TCP    0.0.0.0:445            0.0.0.0:0              LISTENING       4',
+        '  TCP    192.168.1.20:139       0.0.0.0:0              LISTENING       4',
+        '  TCP    127.0.0.1:53000        0.0.0.0:0              ESTABLISHED     999',
+      ].join('\r\n')), [445, 3080, 3081])
+    eq('lsof: LISTEN rows only',
+      parseLsofListeners([
+        'node    1234 me   21u  IPv4 0x1      0t0  TCP 127.0.0.1:3080 (LISTEN)',
+        'node    1234 me   22u  IPv6 0x2      0t0  TCP [::1]:3081 (LISTEN)',
+        'node    1234 me   23u  IPv4 0x3      0t0  TCP 127.0.0.1:53000->127.0.0.1:1 (ESTABLISHED)',
+      ].join('\n')), [3080, 3081])
+    eq('procfs v4: state 0A with a loopback address',
+      parseProcNetListeners([
+        '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid',
+        '   0: 0100007F:0C08 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000',
+        '   1: 00000000:01BD 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0',
+        '   2: 0100007F:1F90 00000000:0000 01 00000000:00000000 00:00000000 00000000  1000',
+      ].join('\n'), 4), [445, 3080])
+    eq('procfs v6: ::1 in the kernel\'s word order',
+      parseProcNetListeners([
+        '  sl  local_address                         rem_address   st',
+        '   0: 00000000000000000000000001000000:0C08 00000000000000000000000000000000:0000 0A',
+      ].join('\n'), 6), [3080])
+
+    // H3. The fingerprint itself. An anonymous request to a dsh Host is refused
+    //     by the connection carrier — not the web frontend — so this sentence is
+    //     emitted whichever entry point booted it.
+    const fence = http.createServer((_req, res) => {
+      res.writeHead(401, { 'content-type': 'text/plain' })
+      res.end(`${DSH_FENCE_FINGERPRINT}; reopen the URL printed by dsh web.\n`)
+    })
+    const fencePort = await new Promise<number>((r) => {
+      fence.listen(0, '127.0.0.1', () => { r((fence.address() as { port: number }).port) })
+    })
+    const plain = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' })
+      res.end('<!doctype html><html><body>hello</body></html>')
+    })
+    const plainPort = await new Promise<number>((r) => {
+      plain.listen(0, '127.0.0.1', () => { r((plain.address() as { port: number }).port) })
+    })
+
+    eq('the Host is recognised by its refusal', await probeHost('127.0.0.1', fencePort), 'dsh-host')
+    eq('a plain HTTP server is not mistaken for one', await probeHost('127.0.0.1', plainPort), 'foreign')
+    const deadPort = await (async () => {
+      const probe = http.createServer()
+      const p = await new Promise<number>((r) => { probe.listen(0, '127.0.0.1', () => { r((probe.address() as { port: number }).port) }) })
+      await new Promise<void>((r) => { probe.close(() => { r() }) })
+      return p
+    })()
+    eq('a closed port is silent, not foreign', await probeHost('127.0.0.1', deadPort, 400), 'silent')
+
+    // H4. Discovery end to end: a pinned port outranks an incidental listener,
+    //     and the configured port is tried first.
+    const home = mkdtempSync(join(tmpdir(), 'dsh-discovery-'))
+    mkdirSync(join(home, 'profiles', 'desktop'), { recursive: true })
+    writeFileSync(join(home, 'profiles', 'desktop', 'cordis.patch.yml'),
+      `- id: webserver\n  name: '@deepseek-ai/dsh-host-webserver'\n  config:\n    host: 127.0.0.1\n    port: ${String(fencePort)}\n`)
+    const ranked = await discoverHosts({
+      host: '127.0.0.1',
+      port: deadPort,
+      env: { DSH_HOME: home },
+      listeners: async () => [plainPort, fencePort],
+      probeTimeoutMs: 800,
+    })
+    eq('discovery returns only Hosts, pinned ones first',
+      ranked.map((h) => ({ port: h.port, source: h.source, profile: h.profile })),
+      [{ port: fencePort, source: 'pinned', profile: 'desktop' }])
+    const incidental = await discoverHosts({
+      host: '127.0.0.1',
+      port: deadPort,
+      env: { DSH_HOME: join(home, 'nope') },
+      listeners: async () => [plainPort, fencePort],
+      probeTimeoutMs: 800,
+    })
+    eq('with no pin, a listener is the answer',
+      incidental.map((h) => ({ port: h.port, source: h.source })),
+      [{ port: fencePort, source: 'listening' }])
+    rmSync(home, { recursive: true, force: true })
+
+    await new Promise<void>((r) => { fence.close(() => { r() }) })
+    await new Promise<void>((r) => { plain.close(() => { r() }) })
   }
 
   console.log(`\n${failures === 0 ? 'all checks passed' : `${String(failures)} CHECK(S) FAILED`} (${String(step)} total)\n`)

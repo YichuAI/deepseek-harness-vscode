@@ -68,6 +68,12 @@ export interface UiState {
 /** Actions the webview posts back to the extension. */
 export type WebviewAction =
   | { type: 'connect' }
+  /**
+   * Boot-time nudge from the panel: connect if we are not already. Distinct
+   * from `connect` because that one is a *forced* reconnect and must not run
+   * just because a webview was created.
+   */
+  | { type: 'ensureConnected' }
   | { type: 'disconnect' }
   | { type: 'selectSession'; sessionId: string }
   | { type: 'newSession' }

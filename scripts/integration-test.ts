@@ -18,8 +18,13 @@
  * tool-result tiles).
  */
 
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { HarnessClient } from '../src/harness/client.ts'
 import { BrowserSessionAuth } from '../src/harness/auth.ts'
+import { discoverHosts, probeHost } from '../src/harness/discovery.ts'
 import { ConversationModel } from '../src/conversation/model.ts'
 import type { ConversationItem } from '../src/conversation/types.ts'
 
@@ -381,7 +386,60 @@ async function main(): Promise<void> {
   }
   wfSub.dispose()
 
-  // 09. Cancel (no-op if already ended) to validate the wire.
+  // 09. Discovery + forced reconnect, measured against the real Host.
+  //
+  //     The desktop app starts its Host with `--port 0`, so the port is freshly
+  //     assigned on every launch and the configured one goes stale a moment
+  //     later. Recovering that without reloading VS Code rests on two facts that
+  //     only a live Host can confirm: it is identifiable from an anonymous
+  //     request, and a forced connect really does rebuild the session.
+  {
+    const target = client.target()
+    const hosts = await discoverHosts({ host: target.host, port: target.port, probeTimeoutMs: 1500 })
+    const self = hosts.find((h) => h.port === target.port)
+    check('discovery identifies the running Host from its anonymous refusal', self !== undefined,
+      self === undefined
+        ? `nothing answered at ${target.host}:${String(target.port)}`
+        : `via ${self.source}${self.profile === undefined ? '' : ` (${self.profile})`}`)
+
+    // Negative control. A fingerprint that matches everything is not a
+    // fingerprint, and the failure mode is severe: the plugin would adopt a
+    // stranger's HTTP port and mint a cookie at it. The pin layer is pointed at
+    // a directory that does not exist and the listener table at the decoy alone,
+    // so the decoy is the only thing discovery can possibly return.
+    const decoy = createServer((_q, s) => {
+      s.writeHead(200, { 'content-type': 'text/html' })
+      s.end('<!doctype html><html><body>not a harness</body></html>')
+    })
+    const decoyPort = await new Promise<number>((r) => {
+      decoy.listen(0, '127.0.0.1', () => { r((decoy.address() as AddressInfo).port) })
+    })
+    const decoyProbe = await probeHost('127.0.0.1', decoyPort, 1000)
+    const decoyHosts = await discoverHosts({
+      host: '127.0.0.1',
+      port: decoyPort,
+      env: { DSH_HOME: join(tmpdir(), 'dsh-no-such-home') },
+      listeners: async () => [decoyPort],
+      probeTimeoutMs: 1000,
+    })
+    check('a plain HTTP listener is not mistaken for a Host',
+      decoyProbe === 'foreign' && decoyHosts.length === 0,
+      `probe=${decoyProbe} candidates=${String(decoyHosts.length)}`)
+    await new Promise<void>((r) => { decoy.close(() => { r() }) })
+
+    // The forced path. The client still believes it is connected, so a plain
+    // connect() would return without touching the socket — that gap is what made
+    // "reload the window" the only recovery.
+    await client.connect({ force: true })
+    const state = client.getState()
+    check('a forced reconnect re-establishes the connection', state.kind === 'connected', `state=${state.kind}`)
+
+    const survivors = (await client.listSessions()).items.filter((s) => s.sessionId === sessionId)
+    check('...and the session that was open is still on the Host', survivors.length === 1,
+      survivors.length === 1 ? 'same sessionId' : `${String(survivors.length)} match(es)`)
+  }
+
+  // 10. Cancel (no-op if already ended) to validate the wire.
   await client.cancel(sessionId)
   check('cancel', true, 'accepted')
 

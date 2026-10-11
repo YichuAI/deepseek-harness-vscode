@@ -268,14 +268,57 @@ Three workflows live in `.github/workflows/`:
 | --- | --- | --- |
 | `ci.yml` | every branch push, every PR | typecheck · `check-versions` · `protocol-test` · build · package · assert the VSIX holds exactly the 14 expected files and no sources |
 | `e2e.yml` | push to `main`, PR | the same gate on `ubuntu-latest`, `windows-latest`, `macos-latest` — the protocol test parses three OS listener-table dialects, so the matrix earns its cost on its own — plus `npm run e2e-test` |
-| `release.yml` | a `v*` tag | `check-versions --release` (the tag must exist *and* point at HEAD) · tests · build · package · read the version back **out of** the VSIX · create the GitHub Release with the matching CHANGELOG section · publish to the Marketplace if `VSCE_PAT` is set |
+| `release.yml` | a `v*` tag, or a manual dispatch naming an existing tag | `check-versions --release` (the tag must exist *and* point at HEAD) · tests · build · package · read the version back **out of** the VSIX · sha256 it · create the GitHub Release with the matching CHANGELOG section · publish to the Marketplace |
 
 `ci.yml` needs `fetch-depth: 0`: `check-versions` compares against the newest reachable
 tag, and a shallow clone has none.
 
-Marketplace publishing is opt-in through a repository secret. Without `VSCE_PAT` that
-step reports a notice and the release still completes — the GitHub Release is the
-artifact of record either way.
+### Publishing to the Marketplace without a stored secret
+
+The publisher page is the only thing involved. No Azure subscription, no managed identity,
+no Entra app registration, no personal access token.
+
+1. Sign in at `https://marketplace.visualstudio.com/manage/publishers/lucasliang`.
+2. Open the publisher's **Trusted publishers** / trusted-publishing settings.
+3. Add a policy that allows this repository and this workflow:
+   - repository: `YichuAI/deepseek-harness-vscode`
+   - workflow: `release.yml`
+   - environment: leave blank unless the page asks
+4. Save.
+
+After that, a tag push mints a short-lived GitHub OIDC token for the
+`marketplace.visualstudio.com` audience; `vsce` exchanges it at
+`POST /_apis/gallery/token?api-version=7.2-preview.1` (`Authorization: FederatedToken …`)
+for a session credential valid for about 15 minutes, and that credential is used in place of
+a PAT. Nothing long-lived is stored anywhere, so there is no secret to rotate or leak.
+
+`vsce` does **not** fall back to a PAT when that exchange fails, and neither does this
+workflow — a publishing mode that cannot publish fails the job. On 2026-10-11 the step
+printed `VSCE_PAT is not set — skipping`, exited 0, and GitHub reported `success`, so a
+skipped publish and a completed one looked identical from the outside.
+
+`MARKETPLACE_PUBLISH` is a repository **variable** (Settings → Secrets and variables →
+Actions → Variables), not a secret:
+
+| Value | Effect |
+| --- | --- |
+| unset, or `oidc` | trusted publishing |
+| `pat` | publish with the `VSCE_PAT` secret and emit a warning — Azure DevOps global PATs are retired on **2026-12-01** |
+| `off` | skip, visibly and on purpose |
+
+Why the CI installs vsce 4 rather than the pinned devDependency: `--oidc` landed in
+`@vscode/vsce@4.0.0` (#1291) and is deliberately absent from `--help` (#1297), while the local
+pin stays at `3.9.2` so that this change cannot rewrite the shipped `package.json` of a
+release that already has a GitHub Release behind it. The two versions produce
+entry-for-entry identical VSIXs — same file list, same per-entry CRC and length — so the
+skew is inert. Fold the bump into the next version that edits a shipped file anyway.
+
+### Backfilling a version that predates the policy
+
+Actions → **Release** → *Run workflow* → `tag: v0.2.1`. It checks out that tag, rebuilds,
+re-verifies every surface, and publishes to the Marketplace without moving the tag or
+creating a second Release. `--packagePath` is used for the upload, so the bytes on the
+Marketplace, the bytes in the Release asset and the sha256 printed in the log are one file.
 
 ---
 

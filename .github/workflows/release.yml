@@ -1,6 +1,6 @@
 name: Release
 
-# Tag push → verified artifact → GitHub Release → (optionally) Marketplace.
+# Tag push → verified artifact → GitHub Release → Marketplace.
 #
 # The point of doing this in CI rather than by hand is not convenience. It is
 # that the four surfaces which disagreed on 2026-10-11 — package.json, the README,
@@ -10,16 +10,36 @@ name: Release
 #
 #   git tag v0.2.2 && git push origin v0.2.2
 #
-# Marketplace publishing happens only if a `VSCE_PAT` repository secret exists.
-# Without it the step reports a notice and the release still completes — the
-# GitHub Release is the artifact of record either way.
+# Marketplace authentication is OIDC **trusted publishing**: GitHub mints a
+# short-lived token for this repository and workflow, the Marketplace exchanges it
+# for a session credential valid for ~15 minutes, and nothing long-lived is stored
+# anywhere. It needs a one-time trust policy on the publisher page — the exact
+# click-path is in RELEASE.md §8. Azure DevOps global PATs are retired on
+# 2026-12-01, so the PAT path is a fallback with an expiry date, not the plan.
+#
+# `MARKETPLACE_PUBLISH` (a repository *variable*, not a secret) selects the mode:
+#   unset, or `oidc` → trusted publishing
+#   `pat`            → publish with the `VSCE_PAT` secret
+#   `off`            → skip, deliberately and visibly
+# The default is to publish. A mode that cannot publish fails the job rather than
+# reporting success, because "the step was skipped" and "the extension shipped"
+# looked identical from the outside on 2026-10-11 and that is the bug this file
+# exists to prevent.
 
 on:
   push:
     tags: ['v*']
+  # Backfill or retry: publish an existing tag without moving it. Used to get a
+  # version onto the Marketplace after the trust policy was configured.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to verify and publish (e.g. v0.2.1)'
+        required: true
 
 permissions:
   contents: write   # create the Release and upload the VSIX
+  id-token: write   # mint the OIDC token the Marketplace exchange consumes
 
 jobs:
   release:
@@ -29,11 +49,34 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # On a tag push this is the tag; on a dispatch it is the tag named by
+          # the input, so the artifact is always built from the tagged commit and
+          # never from the branch the dispatch was launched from.
+          ref: ${{ inputs.tag || github.ref }}
 
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
+
+      - name: Resolve the tag under test
+        id: tag
+        env:
+          # Via `env:` and not `${{ }}` inline: a dispatch input is untrusted text
+          # and interpolating it straight into a shell script is an injection
+          # vector. Every later step reads the resolved values the same way.
+          REQUESTED: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${REQUESTED:-$GITHUB_REF_NAME}"
+          case "$tag" in
+            v*) ;;
+            *) echo "::error::expected a vX.Y.Z tag, got '${tag}'"; exit 1 ;;
+          esac
+          git rev-parse --verify "refs/tags/${tag}" >/dev/null \
+            || { echo "::error::tag ${tag} does not exist"; exit 1; }
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "ver=${tag#v}" >> "$GITHUB_OUTPUT"
 
       - run: npm ci
 
@@ -60,53 +103,94 @@ jobs:
         run: npm run package
 
       - name: Verify the packaged artifact
+        env:
+          VER: ${{ steps.tag.outputs.ver }}
         run: |
           set -euo pipefail
-          ver="${GITHUB_REF_NAME#v}"
-          vsix="harness-connector-deepseek-${ver}.vsix"
-          test -f "$vsix" || { echo "::error::expected $vsix"; exit 1; }
+          vsix="harness-connector-deepseek-${VER}.vsix"
+          test -f "$vsix" || { echo "::error::expected ${vsix}"; exit 1; }
           ls -l "$vsix"
           # The version inside the package is the one a user's editor will show,
           # so it is read back out rather than assumed from the filename.
           inner=$(unzip -p "$vsix" extension/package.json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).version))')
-          echo "package.json inside the VSIX: $inner"
-          test "$inner" = "$ver" || { echo "::error::VSIX says $inner, tag says $ver"; exit 1; }
+          echo "package.json inside the VSIX: ${inner}"
+          test "$inner" = "$VER" || { echo "::error::VSIX says ${inner}, tag says ${VER}"; exit 1; }
+          # Same file, same digest: the Release asset and the Marketplace upload
+          # are one artifact, which is the only way "it was verified" means
+          # anything about what a user downloads.
+          sha256sum "$vsix" | tee sha256.txt
 
       - name: Extract this version's changelog section
+        env:
+          VER: ${{ steps.tag.outputs.ver }}
         run: |
           set -euo pipefail
-          ver="${GITHUB_REF_NAME#v}"
           # Not `--notes-file CHANGELOG.md`, which pastes the entire history.
-          awk -v v="$ver" '
+          awk -v v="$VER" '
             index($0, "## [" v "]") == 1 { found = 1 }
             found && /^## \[/ && index($0, "## [" v "]") != 1 { exit }
             found { print }
           ' CHANGELOG.md > notes.md
-          test -s notes.md || { echo "::error::no CHANGELOG section for $ver"; exit 1; }
+          test -s notes.md || { echo "::error::no CHANGELOG section for ${VER}"; exit 1; }
           echo "--- release notes ---"; cat notes.md
 
       - name: Create the GitHub Release
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ steps.tag.outputs.ver }}
         run: |
           set -euo pipefail
-          ver="${GITHUB_REF_NAME#v}"
-          gh release create "v${ver}" \
-            "harness-connector-deepseek-${ver}.vsix" \
-            --title "v${ver}" \
+          gh release create "v${VER}" \
+            "harness-connector-deepseek-${VER}.vsix" \
+            --title "v${VER}" \
             --notes-file notes.md \
             --verify-tag
 
       - name: Publish to the Marketplace
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          MODE: ${{ vars.MARKETPLACE_PUBLISH }}
+          VER: ${{ steps.tag.outputs.ver }}
         run: |
           set -euo pipefail
-          if [ -z "${VSCE_PAT:-}" ]; then
-            echo "::notice::VSCE_PAT is not set — skipping the Marketplace publish."
-            echo "The GitHub Release above is the artifact of record."
-            exit 0
-          fi
-          # No --packagePath: vsce rebuilds and re-checks, so the published
-          # package is produced by the same code path as the one just verified.
-          npx vsce publish --no-dependencies -p "$VSCE_PAT"
+          vsix="harness-connector-deepseek-${VER}.vsix"
+
+          case "${MODE:-oidc}" in
+            off)
+              echo "::notice::MARKETPLACE_PUBLISH=off — the Marketplace publish was skipped on purpose."
+              echo "Marketplace: **skipped** (MARKETPLACE_PUBLISH=off)" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+              ;;
+            oidc)
+              # vsce is invoked at a pinned version rather than through the local
+              # devDependency on purpose. `--oidc` landed in 4.0.0 (#1291) and is
+              # hidden from `--help` by design (#1297); the local pin stays at 3.9.2
+              # so that this change cannot rewrite the shipped `package.json` of a
+              # release that already has a GitHub Release behind it. The two
+              # versions produce entry-for-entry identical VSIXs — same file list,
+              # same per-entry CRC and length — so the skew is inert.
+              publish=(npx --yes @vscode/vsce@4.0.0 publish --no-dependencies --oidc)
+              how='OIDC trusted publishing'
+              ;;
+            pat)
+              if [ -z "${VSCE_PAT:-}" ]; then
+                echo "::error::MARKETPLACE_PUBLISH=pat but the VSCE_PAT secret is not set."
+                exit 1
+              fi
+              echo "::warning::Publishing with a PAT. Azure DevOps global PATs are retired on 2026-12-01 — switch MARKETPLACE_PUBLISH to 'oidc' before then."
+              publish=(npx vsce publish --no-dependencies -p "$VSCE_PAT")
+              how='a Personal Access Token'
+              ;;
+            *)
+              echo "::error::MARKETPLACE_PUBLISH must be 'oidc', 'pat' or 'off' — got '${MODE}'."
+              exit 1
+              ;;
+          esac
+
+          # --packagePath publishes the bytes this job already verified and hashed,
+          # instead of building a third variant of the same version.
+          "${publish[@]}" --packagePath "$vsix"
+
+          echo "Marketplace: **published ${VER}** via ${how}" >> "$GITHUB_STEP_SUMMARY"
+          echo "sha256: $(cat sha256.txt)" >> "$GITHUB_STEP_SUMMARY"

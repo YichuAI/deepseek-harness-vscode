@@ -268,13 +268,52 @@ gh release edit v<版本> --draft
 | --- | --- | --- |
 | `ci.yml` | 每个分支的 push、每个 PR | 类型检查 · `check-versions` · `protocol-test` · 构建 · 打包 · 断言 VSIX 里恰好是那 14 个文件且不含源码 |
 | `e2e.yml` | push 到 `main`、PR | 同样的门禁跑在 `ubuntu-latest`、`windows-latest`、`macos-latest` 上——协议测试要解析三种操作系统的监听表写法，光这一点就值回矩阵的成本——外加 `npm run e2e-test` |
-| `release.yml` | 一个 `v*` 标签 | `check-versions --release`（标签必须存在**且**指向 HEAD）· 测试 · 构建 · 打包 · 把版本号**从打出来的 VSIX 里读回来** · 以对应的 CHANGELOG 段落建 GitHub Release · 存在 `VSCE_PAT` 时发布到 Marketplace |
+| `release.yml` | 一个 `v*` 标签，或手动触发并指定一个已存在的标签 | `check-versions --release`（标签必须存在**且**指向 HEAD）· 测试 · 构建 · 打包 · 把版本号**从打出来的 VSIX 里读回来** · 算 sha256 · 以对应的 CHANGELOG 段落建 GitHub Release · 发布到 Marketplace |
 
 `ci.yml` 需要 `fetch-depth: 0`：`check-versions` 要拿最新的可达标签做比对，而浅克隆里一个
 标签都没有。
 
-Marketplace 发布通过仓库 secret 选择性开启。没有 `VSCE_PAT` 时那一步会报一条 notice，发布
-照常完成——无论哪种情况，GitHub Release 都是那个存档事实。
+### 不用存任何密钥，把扩展发到 Marketplace
+
+整个过程只碰发布者页面。不需要 Azure 订阅、不需要托管标识、不需要 Entra 应用注册、不需要 PAT。
+
+1. 登录 `https://marketplace.visualstudio.com/manage/publishers/lucasliang`。
+2. 打开该发布者的 **Trusted publishers**（受信任发布者 / 受信任发布）设置。
+3. 添加一条策略，允许这个仓库和这个工作流：
+   - 仓库：`YichuAI/deepseek-harness-vscode`
+   - 工作流：`release.yml`
+   - 环境（environment）：页面没强制要求就留空
+4. 保存。
+
+之后每次推标签，GitHub 会为 `marketplace.visualstudio.com` 这个受众签一个短期 OIDC 令牌；
+`vsce` 拿它去 `POST /_apis/gallery/token?api-version=7.2-preview.1`
+（`Authorization: FederatedToken …`）换一个约 15 分钟有效的会话凭证，用它代替 PAT。全程不落盘
+任何长期凭据，也就没有可轮换、可泄漏的 secret。
+
+交换失败时 `vsce` **不会**回退到 PAT，这个工作流也不会——选定的发布方式发不出去就让 job 失败。
+2026-10-11 那次，这一步打印的是 `VSCE_PAT is not set — skipping`、退出码 0、GitHub 报 `success`，
+所以「跳过了」和「发完了」从外面看长得一模一样。
+
+`MARKETPLACE_PUBLISH` 是一个仓库**变量**（Settings → Secrets and variables → Actions →
+Variables），不是 secret：
+
+| 取值 | 行为 |
+| --- | --- |
+| 不设，或 `oidc` | 走受信任发布 |
+| `pat` | 用 `VSCE_PAT` 发布，并打一条警告——Azure DevOps 全局 PAT 于 **2026-12-01** 退役 |
+| `off` | 明确跳过，且看得见 |
+
+为什么 CI 用 vsce 4 而不是仓库里钉住的开发依赖：`--oidc` 是 `@vscode/vsce@4.0.0` 才有的
+（#1291），而且被刻意从 `--help` 里藏掉了（#1297）；本地那个 pin 留在 `3.9.2`，是为了让这次
+改动不去改写一个**已经有 GitHub Release 在背后**的版本的随包 `package.json`。两个版本打出来的
+VSIX 逐条目一致——文件清单、每个条目的 CRC 和长度都相同——所以这点版本偏差是惰性的。下次因为
+别的原因要动随包文件时，顺手把它一起升掉。
+
+### 给「策略配好之前就已发布」的版本补发
+
+Actions → **Release** → *Run workflow* → 填 `tag: v0.2.1`。它会检出那个标签、重新构建、重新
+校验每一个展示面，然后发布到 Marketplace，既不移动标签，也不会多建一个 Release。上传走的是
+`--packagePath`，所以 Marketplace 上的字节、Release 附件里的字节和日志里印的 sha256 是同一个文件。
 
 ---
 

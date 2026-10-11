@@ -1,7 +1,7 @@
 # 发布流程
 
 本文档描述如何裁剪并发布 **DeepSeek Harness Connector for VS Code** 的一个版本。
-v0.1.8 以 GitHub Release + VSIX 资产的形式发布；Marketplace 发布是可选的，见第 5 节。
+v0.2.0 以 GitHub Release + VSIX 资产的形式发布；Marketplace 发布是可选的，见第 5 节。
 
 仓库地址 `git@github.com:YichuAI/deepseek-harness-vscode.git`。此处 HTTPS 推送会失败
 （没有凭据助手），因此 remote 走 SSH。曾经需要 repo-local 的 `core.sshCommand` 来绕过
@@ -44,12 +44,15 @@ npm run protocol-test      # → 全部 295 项断言 ✓
 #     控制面方法。凡是升级过 host 版本，就该跑一次：它是 UI 能提供什么的最终依据。
 npm run protocol-probe     # 接受 [host] [port] 参数，默认 127.0.0.1:3080
 
-# 1.5 集成测试（会写入会话——需要 dsh web 运行）
-#     先在另一个终端启动 dsh web：
-#       cd ../deepseek-harness && npm run dsh -- web
+# 1.5 集成测试（会写入会话——需要有 host 在跑）
+#     先在另一个终端启动一个：
+#       cd ../deepseek-harness && npm run dsh -- web          （固定端口 3080）
+#     桌面端也可以，但它用 `--port 0` 起 host，端口每次启动都重新分配——
+#     从监听表里读出实际端口再传进去：
+#       DSH_PORT=3081 npm run integration-test
 #     默认走本地自签（也就是扩展实际用的那条路），无需再复制 token；
 #     需要时可用 DSH_LAUNCH_URL='http://127.0.0.1:3080/?token=<token>' 覆盖
-npm run integration-test   # → 29/29 项 ✓，闭环通过
+npm run integration-test   # → 39/39 项 ✓，闭环通过
 
 # 1.6 打包 VSIX
 npm run package            # → harness-connector-deepseek-<版本>.vsix
@@ -81,7 +84,7 @@ npm run package            # → harness-connector-deepseek-<版本>.vsix
 unzip -l harness-connector-deepseek-<版本>.vsix
 ```
 
-预期（v0.1.8 = 14 个文件，308,122 字节，约 301 KB）：
+预期（v0.2.0 = 14 个文件，308,764 字节，约 301 KB）：
 
 ```
 [Content_Types].xml

@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.8] — 2026-10-11
+## [0.2.0] — 2026-10-11
 
 Tagline: **a ledger of what the turn changed — and an undo, not a permission slip.**
 Tagline (ZH): **一张本回合改了什么的账本——以及一个撤销键，而不是一张许可单。**
@@ -62,6 +62,12 @@ Tagline (ZH): **一张本回合改了什么的账本——以及一个撤销键�
   semantics: one card per turn, a repeat announcement replacing the coordinate instead of
   stacking a second card, and a summary the Host no longer serves resolving to no card
   rather than to an error.
+- Live integration is **39/39** (was 29). The ten new assertions put a real turn through
+  the real model, because the part that can silently break is the handoff — the
+  announcement names a *turn*, the summary route is addressed by an *event seq*, and only
+  the model converts one into the other. Two of them could not have been proven by a
+  fixture: the hunk prefix format is what `hunksToSides()` splits on, and 404-means-no-card
+  is the difference between a dropped summary and a broken panel.
 - Deliberately not done, and why: `POST /api/changes.open` (the Host's own native-open
   route) is skipped because VS Code's own editor is a strictly better target than the
   desktop window; partial (hunk-level) revert is not implemented — it is recorded on the

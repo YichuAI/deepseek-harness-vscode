@@ -19,6 +19,7 @@
  */
 
 import { createServer } from 'node:http'
+import { rmSync } from 'node:fs'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -385,6 +386,115 @@ async function main(): Promise<void> {
       granted ? 'the escalated command ran' : 'no tool result showed the command running within 30s')
   }
   wfSub.dispose()
+
+  // 08d. The turn's changed-files record, driven through the real model.
+  //
+  //      `workspace/changes` is the Host's own account of what a turn touched.
+  //      It is built at the turn boundary from a git-backed snapshot, which is
+  //      why it can list a file no file tool ever reported (a `sed -i` inside a
+  //      shell command is the case that matters — the plugin's own
+  //      `tool/result.meta.diffs` cannot see one).
+  //
+  //      The addressable part is the subtle one. The event's data carries only
+  //      the TURN, while the summary route is addressed by the EVENT'S OWN `seq`
+  //      — reading it by turn number would 404 every time. Converting one
+  //      coordinate into the other is the model's job, so the real model is
+  //      driven here rather than the route being called directly: the handoff
+  //      from announcement to route is the part that can silently break.
+  const announced: { turn: number; seq: number }[] = []
+  model.setChangesRequestHandler((turn, seq) => { announced.push({ turn, seq }) })
+
+  const probeName = `integration-changes-probe-${String(Date.now())}.txt`
+  await client.prompt(sessionId,
+    `Create a new file named ${probeName} in the workspace root with exactly the three lines `
+    + 'alpha, beta, gamma. Then stop and reply done.', 'UTC')
+
+  const changesDeadline = Date.now() + 120_000
+  while (announced.length === 0 && Date.now() < changesDeadline) {
+    await new Promise((r) => setTimeout(r, 500))
+  }
+  const firstAnnouncement = announced[0]
+  if (firstAnnouncement === undefined) {
+    // Whether a turn writes anything is the model's decision, not the wire's.
+    // Say so rather than reporting a pass nobody measured.
+    console.log('  ~ skipped: no workspace/changes announcement within 120s')
+  } else {
+    const { turn, seq } = firstAnnouncement
+    check('a turn that wrote announces its changed files', true, `turn=${turn} seq=${seq}`)
+
+    const summary = await client.changesSummary(sessionId, seq)
+    check('the announcement seq addresses the summary route', summary !== undefined,
+      summary === undefined
+        ? `the route served nothing for seq=${String(seq)}`
+        : `${String(summary.total)} file(s), +${String(summary.added)}/-${String(summary.deleted)}`)
+
+    if (summary !== undefined) {
+      check('the summary names the turn the model announced', summary.turn === turn,
+        `event turn=${String(turn)} summary turn=${String(summary.turn)}`)
+      check('total agrees with the files actually listed', summary.total === summary.files.length,
+        `total=${String(summary.total)} listed=${String(summary.files.length)}`)
+
+      const probe = summary.files.find(
+        (f) => f.path.endsWith(probeName) || f.display.endsWith(probeName))
+      check('the file the turn was asked to write is in the record', probe !== undefined,
+        probe === undefined
+          ? `none of [${summary.files.map((f) => f.display).join(', ')}] ends with ${probeName}`
+          : `${probe.display} +${String(probe.added)}/-${String(probe.deleted)}`)
+
+      // A listed file must be addressable by its own index, and its hunks must
+      // agree with the counts the summary published. That agreement is the only
+      // thing proving the hunk format was read correctly — and the whole native
+      // diff is rebuilt from those hunks, so a misread is a blank or a
+      // mislabelled comparison rather than a visible failure.
+      const index = probe === undefined ? 0 : summary.files.indexOf(probe)
+      const diff = await client.changesDiff(sessionId, seq, index)
+      check('a listed file is addressable by its index', diff !== undefined,
+        `index=${String(index)} kind=${diff?.kind ?? 'none'}`)
+
+      if (diff !== undefined && diff.kind === 'text') {
+        const lines = diff.hunks.flatMap((h) => h.lines)
+        const added = lines.filter((l) => l.startsWith('+')).length
+        const deleted = lines.filter((l) => l.startsWith('-')).length
+        // Prefixes are load-bearing: hunksToSides() splits on the first column,
+        // so an unprefixed line would land on both sides as unchanged context.
+        check('every hunk line carries a diff prefix',
+          lines.length > 0
+          && lines.every((l) => l.startsWith('+') || l.startsWith('-') || l.startsWith(' ')),
+          JSON.stringify(lines.slice(0, 3)))
+        check('the hunks add up to the counts the summary published',
+          probe !== undefined && added === probe.added && deleted === probe.deleted,
+          `hunks +${String(added)}/-${String(deleted)} vs summary `
+          + `+${String(probe?.added ?? -1)}/-${String(probe?.deleted ?? -1)}`)
+        // Each hunk header must agree with its own body. The renderer rebuilds
+        // both sides from the body alone, so a header that disagrees is a
+        // comparison whose gutter numbers lie about where the change is.
+        const headerMismatch = diff.hunks.filter((h) =>
+          h.lines.filter((l) => !l.startsWith('+')).length !== h.oldLines
+          || h.lines.filter((l) => !l.startsWith('-')).length !== h.newLines)
+        check('every hunk header agrees with its own body',
+          headerMismatch.length === 0,
+          `${String(diff.hunks.length)} hunk(s), ${String(headerMismatch.length)} inconsistent`)
+      } else if (diff !== undefined) {
+        // Binary and oversized are legitimate answers; they just cannot carry
+        // hunks. Report which one so the assertion is never a silent pass.
+        console.log(`     note: ${probeName} came back as kind=${diff.kind}`)
+      }
+
+      // The route is valid only while the Session lives. An unknown seq must
+      // read as "no card", not as an exception — a Host restart drops every
+      // summary, and a throw there would surface as a broken panel.
+      const gone = await client.changesSummary(sessionId, seq + 100_000)
+      check('a seq the Host never served resolves to absent, not an error',
+        gone === undefined, `seq=${String(seq + 100_000)} → ${gone === undefined ? 'absent' : 'a summary'}`)
+    }
+  }
+
+  if (firstAnnouncement !== undefined) {
+    // The probe is a file the test asked for; leaving it behind would litter the
+    // very workspace this test measures. Removing it is not a turn, so it
+    // announces nothing and cannot disturb the next run.
+    try { rmSync(join(TEST_CWD, probeName), { force: true }) } catch { /* not there */ }
+  }
 
   // 09. Discovery + forced reconnect, measured against the real Host.
   //

@@ -1,4 +1,4 @@
-# Architecture — DeepSeek Harness VS Code v0.1.8
+# Architecture — DeepSeek Harness VS Code v0.2.0
 
 One page. Three stable boundaries: **wiring** (`extension.ts`), **orchestration** (`AppController`), **semantics** (`ConversationModel`). Future feature PRs extend outward from these boundaries, not inward.
 
@@ -50,7 +50,7 @@ type ConversationItem =
   | SystemItem           // kind: 'system' (own type, not UserItem + flag)
   | ToolItem             // kind: 'tool' (call + result MERGED by callId, + reviewId)
   | StatusItem           // kind: 'status' (turn start/end)
-  | ChangesItem          // kind: 'changes' (v0.1.8: one card per turn's changed files)
+  | ChangesItem          // kind: 'changes' (v0.2.0: one card per turn's changed files)
 ```
 
 Key changes:
@@ -70,7 +70,7 @@ Key changes:
 | `tool/call` | → create `ToolItem` (state: `running`) |
 | `tool/result` | → **update** existing `ToolItem` by `callId` (state: `completed`/`error`) |
 | `turn/start` / `turn/end` | → `status` line; sets `running` |
-| `workspace/changes` | → `changes` card (v0.1.8); one per turn, repeat replaces the coordinate |
+| `workspace/changes` | → `changes` card (v0.2.0); one per turn, repeat replaces the coordinate |
 | `session/title` | updates the snapshot title |
 | **any other type** | **ignored** (the harness protocol is merge-extensible) |
 
@@ -481,7 +481,7 @@ An empty result here is never benign: `findHarnessWorkspace()` would find
 nothing, the binding would never resolve, and the UI would sit at
 "Disconnected" while the handshake looked perfectly healthy.
 
-## Change reporting and undo (v0.1.8)
+## Change reporting and undo (v0.2.0)
 
 There are two independent records of "what changed", and they are not
 interchangeable:
@@ -573,7 +573,7 @@ dsh-review://<reviewId>/<encoded-path>/before|after
 dsh-changes://<id>/before|after
 ```
 
-Reading it off `path` was the bug fixed in v0.1.8: `Uri.parse('dsh-review://review-1/foo/before').path`
+Reading it off `path` was the bug fixed in v0.2.0: `Uri.parse('dsh-review://review-1/foo/before').path`
 is `/foo/before` — a hierarchical URI keeps the leading slash — so
 `path.split('/')[0]` is the empty string and the store lookup never matched. Every diff
 opened through the provider rendered blank.
@@ -602,6 +602,23 @@ so rather than pretending to act.
 Hunk-level revert exists in `ReviewMaterializer` (`rejectHunk`, with the same drift
 guard) but no UI reaches it any more — a revert is all-or-nothing per file. Restoring it
 is the "partial revert" item on the roadmap.
+
+### How this is verified
+
+Two layers, and they are not redundant. The protocol test's **group M** pins the shapes
+against a fake harness: that the two routes are plain authenticated GETs rather than RPC
+methods, that a hunk list rebuilds into two line-aligned sides, that the id comes off
+`uri.authority`, and that the card semantics hold (one card per turn, a repeat announcement
+replacing the coordinate, a gone summary resolving to no card).
+
+The live integration test then measures the two things a fixture cannot. A real turn is
+driven through the real model, because the part that can silently break is the **handoff**:
+the announcement names a *turn*, the summary route is addressed by an *event seq*, and only
+the model converts one into the other. And the hunk **prefix format** — the `+`/`-`/space
+column that `hunksToSides()` splits on — is observed rather than assumed, together with
+each hunk header agreeing with its own body. A `404` is likewise measured to resolve to
+"no card" rather than to a throw, which is the difference between a dropped summary and a
+broken panel.
 
 ## Markdown rendering
 

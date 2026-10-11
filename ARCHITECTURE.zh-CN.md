@@ -1,4 +1,4 @@
-# 架构说明 — DeepSeek Harness VS Code v0.1.8
+# 架构说明 — DeepSeek Harness VS Code v0.2.0
 
 一页纸。三个稳定边界：**接线**（`extension.ts`）、**编排**（`AppController`）、**语义**（`ConversationModel`）。后续 feature PR 从这些边界向外扩展，而非向内侵入。
 
@@ -48,7 +48,7 @@ type ConversationItem =
   | SystemItem           // kind: 'system'（独立类型，不是 UserItem + 标记）
   | ToolItem             // kind: 'tool'（call + result 按 callId 合并，另带 reviewId）
   | StatusItem           // kind: 'status'（turn start/end）
-  | ChangesItem          // kind: 'changes'（v0.1.8：每回合一张改动卡片）
+  | ChangesItem          // kind: 'changes'（v0.2.0：每回合一张改动卡片）
 ```
 
 关键变化：
@@ -68,7 +68,7 @@ type ConversationItem =
 | `tool/call` | → 创建 `ToolItem`（state: `running`） |
 | `tool/result` | → **更新**已有 `ToolItem`（按 `callId`，state: `completed`/`error`） |
 | `turn/start` / `turn/end` | → `status` 行；设置 `running` |
-| `workspace/changes` | → `changes` 卡片（v0.1.8）；每回合一张，重复播报是替换坐标 |
+| `workspace/changes` | → `changes` 卡片（v0.2.0）；每回合一张，重复播报是替换坐标 |
 | `session/title` | 更新快照标题 |
 | **任何其他类型** | **忽略**（harness 协议是可合并扩展的） |
 
@@ -346,7 +346,7 @@ findHarnessWorkspace()          — 只读：匹配文件夹 ↔ harness workspa
 
 无确认弹窗。workspace 是**发送时按需确保的资源**，不是连接时的资源。
 
-## 改动记录与撤销（v0.1.8）
+## 改动记录与撤销（v0.2.0）
 
 "改了什么"有两份彼此独立的记录，它们不能互相替代：
 
@@ -423,7 +423,7 @@ dsh-review://<reviewId>/<encoded-path>/before|after
 dsh-changes://<id>/before|after
 ```
 
-从 `path` 读就是 v0.1.8 修掉的那个 bug：
+从 `path` 读就是 v0.2.0 修掉的那个 bug：
 `Uri.parse('dsh-review://review-1/foo/before').path` 是 `/foo/before`——层级 URI 会保留开头
 的斜杠——于是 `path.split('/')[0]` 是空字符串，store 查找永远不命中，经该 provider 打开的
 每一个 diff 都是空白。
@@ -446,6 +446,18 @@ review 建立时抓到的 `after`，如果此后动过就拒绝（把该文件�
 
 hunk 级回退在 `ReviewMaterializer` 里是存在的（`rejectHunk`，同样的漂移闸），但已经没有 UI
 能触达它——今天的回退是每文件全有或全无。恢复它就是路线图上的「部分回退」一项。
+
+### 这些是怎么被验证的
+
+两层，而且不是重复的。协议测试的 **M 组** 对着假 harness 钉住形状：两条路由是普通的带鉴权
+GET 而不是 RPC 方法、hunk 列表能重建出两侧逐行对齐的比较、id 是从 `uri.authority` 读的、
+卡片语义成立（每回合一张、重复播报替换坐标、摘要消失解析为「没有卡片」）。
+
+真机集成测试则去量两件夹具量不了的事。它让一个真实回合跑过真实模型，因为最容易悄悄坏掉的
+正是那次**交接**：播报给出的是*回合号*，摘要路由按*事件 seq* 寻址，把前者换算成后者的只有
+模型。以及 hunk 的**前缀格式**——`hunksToSides()` 用来切分的那个 `+`/`-`/空格列——是被观测
+出来的而不是假定的，同时验证每个 hunk 头与它自己的正文一致。`404` 同样被实测为解析成
+「没有卡片」而不是抛错——那是「摘要被丢掉」和「面板坏了」之间的差别。
 
 ## Markdown 渲染
 

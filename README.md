@@ -1,9 +1,9 @@
-# DeepSeek Harness Connector for VS Code (v0.1.8)
+# DeepSeek Harness Connector for VS Code (v0.2.0)
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
 [![VS Code Marketplace](https://img.shields.io/badge/VS%20Code-Marketplace-blue.svg)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
-[![Version](https://img.shields.io/badge/version-0.1.8-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.1.8)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](https://github.com/YichuAI/deepseek-harness-vscode/releases/tag/v0.2.0)
 
 > Native VS Code client for DeepSeek Harness.
 >
@@ -41,7 +41,7 @@ Three consequences, all deliberate:
 
 What is ruled out is as much a part of the design as what is included. Registering DSH as a **Copilot language model provider** would put a dropdown entry in the picker and put *something else's* agent loop behind it — no tool calling, no approvals, no context management, none of the orchestration that is the actual product. Trading the harness for a model entry is a bad trade. Driving DSH over **ACP** instead of the web transport is the same shape of mistake in miniature: the `acp` profile is a stdio JSON-RPC server that describes itself as automation-only, and it carries neither elicitation nor the DSH display cards — so it would lose the approval/question waterfall and the changed-files record that the HTTP+WS transport already delivers.
 
-## What's new in v0.1.8
+## What's new in v0.2.0
 
 **A ledger of what the turn changed — and an undo, not a permission slip.**
 
@@ -53,7 +53,7 @@ What is ruled out is as much a part of the design as what is included. Registeri
 - **Changed: the review card stopped asking for permission.** Both accepts are removed, the two rejection buttons are now one `Revert all`, and the per-file `✕`/`✓` pair is one `Revert this file`. See [the design section](#design-dsh-owns-the-write-the-plugin-observes-and-tells) for why.
 - **Fixed: every diff opened through the native review provider rendered blank.** `Uri.parse('dsh-review://review-1/foo/before').path` is `/foo/before` — a hierarchical URI keeps the leading slash — so the id was read from `path.split('/')[0]`, which is the empty string, and the store lookup never matched.
 
-Verification: the regression gate is now **295 assertions** (was 268). The new group pins the two routes, the hunk-to-sides alignment, the URI authority contract, and the card semantics — one card per turn, a repeat announcement replacing the coordinate rather than stacking a second card, and a summary the Host no longer serves resolving to no card rather than to an error. Live integration stays **29/29**.
+Verification: the regression gate is now **295 assertions** (was 268). The new group pins the two routes, the hunk-to-sides alignment, the URI authority contract, and the card semantics — one card per turn, a repeat announcement replacing the coordinate rather than stacking a second card, and a summary the Host no longer serves resolving to no card rather than to an error. Live integration is **39/39** (was 29): the ten new assertions drive a real turn through the real model, so the announcement-to-route handoff, addressing a file by its index, the hunk prefixes, and the agreement between each hunk header and its own body are measured against a live Host rather than against a fixture.
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full diff.
 
@@ -238,7 +238,7 @@ For your safety, the following remain out of scope:
    Or install the VSIX from [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases):
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.1.8.vsix
+   code --install-extension harness-connector-deepseek-0.2.0.vsix
    ```
 
 3. Nothing to configure. The extension auto-connects: it reads the browser-session
@@ -415,7 +415,7 @@ npm install
 npm run build        # esbuild → dist/extension.js
 npm run watch        # rebuild on change
 npm run typecheck
-npm run package      # → harness-connector-deepseek-0.1.8.vsix
+npm run package      # → harness-connector-deepseek-0.2.0.vsix
 npm run protocol-test      # 295 protocol assertions against a fake harness
 npm run protocol-probe     # report what your real dsh web exposes
 ```
@@ -467,7 +467,7 @@ Press `F5` in VS Code to launch an Extension Development Host with the extension
 - **A turn's changed-files card lists what the turn changed, but only a file tool's own change can be undone from it.** The undo is scoped to the reviews that turn produced, because a Host summary carries paths and line counts, not the text needed to restore anything. A turn that changed files only through shell commands will say so.
 - A changed-files summary lives for the Session's lifetime on the Host, so a card can resolve to "no changes to show" after a host restart. That renders as no card, matching the Web UI.
 
-## Roadmap (v0.1.9+)
+## Roadmap (v0.2.1+)
 
 - **Partial revert — hunk level.** The materializer already knows how to revert a single hunk (and refuses when the file has drifted), but no UI reaches it any more: a revert is all-or-nothing per file today. Restoring it means offering per-hunk undo in the changes card and in the native diff, driven by the hunk list the Host already serves rather than by whole-file text it does not keep.
 - Per-item state patches: a streaming push still ships the whole transcript (~52 KB per push on a 40-turn session). The renderer no longer rebuilds it, but the structured clone across `postMessage` is the remaining per-chunk cost.

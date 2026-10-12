@@ -2,8 +2,8 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-[![VS Code Marketplace](https://img.shields.io/vs-marketplace/v/lucasliang.harness-connector-deepseek)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
-[![安装量](https://img.shields.io/vs-marketplace/i/lucasliang.harness-connector-deepseek)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
+[![VS Code Marketplace](https://badgen.net/vs-marketplace/v/lucasliang.harness-connector-deepseek)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
+[![安装量](https://badgen.net/vs-marketplace/i/lucasliang.harness-connector-deepseek)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
 [![最新版本](https://img.shields.io/github/v/release/YichuAI/deepseek-harness-vscode)](https://github.com/YichuAI/deepseek-harness-vscode/releases)
 [![许可证](https://img.shields.io/github/license/YichuAI/deepseek-harness-vscode)](./LICENSE)
 
@@ -12,6 +12,22 @@
 > 连接你已在本地运行的 Harness 实例，直接在 VS Code 中继续相同的工作区和会话。
 
 **同一个 Harness。同一个工作区。同一个会话。VS Code 客户端。**
+
+![浏览器 Web UI 与 VS Code 面板显示同一个会话的同一个回合](https://raw.githubusercontent.com/YichuAI/deepseek-harness-vscode/main/docs/screenshots/01-shared-session.png)
+
+*同一个会话，两个窗口。左边浏览器，右边 VS Code——没有导入，没有镜像，没有分叉。*
+
+## 它能做什么
+
+- **接着你已经有的会话用。** 工作区与会话都从运行中的 Host 读来。在浏览器里刷新同一个会话，看到的就是 VS Code 刚发出去的内容。
+- **在 VS Code 里就能答审批与提问。** 两条瀑布都由插件结算，你不必为了解开一次运行而一直开着浏览器标签。
+- **报告每个回合改了什么，并且能撤销。** 数据来自 Host 自己的回合记录——所以 shell 命令改掉的文件也包含在内，不只是文件工具报告过的那些。撤销前会先比对文件当前内容，对不上就拒绝，而不是覆盖你的改动。
+- **凡是代码相关的，都交给 VS Code 自己的编辑器。** diff 就是真正的 diff 编辑器，路径点击就打开文件。不在 webview 里重新实现一套查看器。
+- **自己找到 Host**，包括桌面端那种每次启动都换一个系统分配端口的 Host。
+- **三条取会话的路，由你挑。** 从 harness 自己的凭据库里签发（零配置，但意味着要读一个同时装着你的 API key 的文件）、由扩展自己启动 `dsh web` 并读走它打印的启动 URL、或者你自己粘一个启动 URL。见[会话是怎么拿到的](#会话是怎么拿到的)。
+- **你不要求，它就不启动任何进程。** 默认行为仍然是附着到你已经在跑的那个 Host。
+
+## 它怎么连
 
 这**不是** Cursor 的替代品，不是 Claude Code 的替代品，也不是完整的编码 Agent。它将 VS Code 连接到你已在运行的本地 `dsh web` 实例：
 
@@ -27,111 +43,50 @@ VS Code ─────┘
 
 VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**会话——所以浏览器刷新该会话时能看到 VS Code 发送的内容。
 
-## 它能做什么
+## 截图
 
-- **接着你已经有的会话用。** 工作区与会话都是从运行中的 Host 读来的，不导入、不镜像、不分叉。
-- **对话就在侧边栏里**，工具行、审批、提问、附件、改动卡片都画在产生它的那一段对话流里。
-- **在 VS Code 里就能答审批与提问。** 两条瀑布都由插件结算，你不必为了解开一次运行而一直开着浏览器标签。
-- **报告每个回合改了什么，并且能撤销。** 数据来自 Host 自己的回合记录——所以 shell 命令改掉的文件也包含在内，不只是文件工具报告过的那些。
-- **凡是代码相关的，都交给 VS Code 自己的编辑器。** diff 就是真正的 diff 编辑器，路径点击就打开文件。不在 webview 里重新实现一套查看器。
-- **自己找到 Host**，包括桌面端那种每次启动都换一个系统分配端口的 Host。
-- **不替你启动任何进程。** 扩展不 spawn `dsh web`，只附着到你已经在跑的那个。
+| | |
+| --- | --- |
+| ![VS Code 侧边栏里的对话](https://raw.githubusercontent.com/YichuAI/deepseek-harness-vscode/main/docs/screenshots/03-editor-sidebar.png) | ![agent 改动过的文件在 VS Code 原生 diff 里](https://raw.githubusercontent.com/YichuAI/deepseek-harness-vscode/main/docs/screenshots/04-native-diff.png) |
 
-## 设计：写盘归 DSH，插件只观察与告知
+*左：对话就在侧边栏里，工具行和改动卡片都在。右：「Diff」打开的是 VS Code 自己的 diff 编辑器，不是 webview 仿的。*
 
-DSH 的两个事实，几乎决定了这里其余一切的取舍。
+![Harness 浏览器界面本身](https://raw.githubusercontent.com/YichuAI/deepseek-harness-vscode/main/docs/screenshots/02-browser-web-ui.png)
 
-**DSH 先把改动写进磁盘，下一步再把它读回来。** 这个先后顺序不是可以绕开的实现细节——每一步
-都建立在它上面。文件工具报告自己的改动，紧接着的那一步打开的就是此刻磁盘上的那个文件。所以
-那个看起来很诱人的做法——拦截写入、缓冲它、代理它、把它变成交给 VS Code 执行的
-`WorkspaceEdit`——代价是打破步与步之间的一致性，换来一个表面更好看的审阅流程。而且它坏得很
-晚、很偏：错误结果出现在好几步之后，中间看不出跟那次拦截有什么联系。本插件不拦截写入。
-**DSH 是唯一的写盘者。**
+## v0.2.2 新特性
 
-**插件是观察者，不是守门人。** 等你看见一个改动时，它已经落盘了。这让「接受」变成了一个除了
-暗示「此前一直在等它批准」之外什么也没做的按钮，所以它被删掉了。剩下的是报告：改了什么、
-diff 在这儿、撤销在这儿。这跟两个人在同一个仓库里的关系是一样的——你保存文件不需要谁批准，
-你看的是另一个人做了什么。
+**你不必再让它读一个装满你 API key 的文件，而 `autoSession: false` 也终于有了实际含义。**
 
-三个后果，全是有意为之：
+- **托管启动——显式开启，由扩展自己把 Host 起起来。** 在此之前唯一的鉴权方式是读 `$DSH_HOME/.credentials.yaml`，而那个文件里同时装着你的模型 API key。这是不装这个扩展最站得住的一条理由。把 `deepseekHarness.sessionMode` 设成 `"managed"`，扩展会运行 `dsh web`，并从它自己拥有的那个控制台里读走启动 URL——既不需要凭据文件，也不需要粘贴。它刻意默认关闭：「不替你启动任何进程」仍然是默认承诺。
+- **`sessionMode` 取代了 `autoSession` 这个布尔值。** 旧开关只能把鉴权**关掉**——「false」的意思是「不鉴权」，因为另一条路对应的命令早先被移除了。现在是三选一：`credentials`（从凭据库签发，也就是旧行为，仍是默认）、`managed`（扩展启动 Host）、`paste`（你自己启，然后把 URL 交给它，通过恢复的 **Use Launch URL** 命令）。不主动改的话，升级前后行为完全一致。
+- **连不上时，现在会告诉你该做什么。** 如果没有 Host 在跑，面板上会出现一个安装按钮——Windows/macOS 打开下载页，Linux 给复制构建命令——而且只在失败状态下出现。如果桌面端已经在机器上，它会叫你去打开那个，而不是装一个新的。不会出现「叫你装一个你已经装好的东西」这种按钮。
+- **README 有图了。** 之前只有徽章、一张截图都没有，这对一个视觉产品来说挺奇怪的。
+- **不必先手动起 `dsh web` 再开 VS Code 了。** 这是上面那条的副产品，不算独立特性：托管模式下第一次连接就会把它起起来。
 
-- **在文件这一层，人和 AI 是对等的。** DSH 会写，你也会写，谁也不向谁请求确认。让你们不撞车
-  的不是锁，而是两边都能看见 diff、两边都能撤销。插件要做的是把这份记录摆在对话流里、摆在
-  产生它的那次调用旁边，而不是站在你们两个人中间。
-- **没有回流机制，也不需要。** DSH 每一步都重新读盘，所以它手上永远不会是一份过期的副本——
-  即使那个文件在你这边刚被改过。你想让 AI 知道你的改动，就在对话里说，或者让它读 git 记录。
-  没有什么需要「推」给它的。
-- **浏览器能展示的，VS Code 用原生方式展示。** 插件有东西要呈现时——一个 diff、一个 AI 指出
-  的文件——它打开 VS Code 自己的编辑器，而不是在 webview 里重新实现一个查看器。webview 负责
-  对话，编辑器负责代码。
+门禁：**381 项断言**（原 342）——新增的那些钉住了模式词表及其不变量、各平台的安装路线、失败分类器的新输入，以及启动器两个「保证形」的函数（在子进程输出里任意位置找到启动 URL；绝不让 token 活着进日志）。启动器的进程处理部分**没有**放在断言里，因为它需要一台真机器：`scripts/launch-probe.ts` 真跑一遍，并报告 token 能否兑换两次、Host 会不会活得比我们 spawn 的子进程更久、以及停止之后端口是否真的安静。
 
-被排除掉的东西，跟被包含的东西一样是设计的一部分。把 DSH 注册成 **Copilot 语言模型**，等于在
-选择器里多一个条目，背后却换成别人的 agent 循环——没有工具调用、没有审批、没有上下文管理，
-一个真正的产品该有的编排全没了。拿 harness 去换一个模型条目，是一笔亏本买卖。改走 **ACP**
-而不用 web 传输，是同一种错的缩小版：`acp` profile 是一个自称 automation-only 的 stdio
-JSON-RPC 服务，既不带 elicitation，也不带 DSH 的展示卡片——那会丢掉审批/提问瀑布和改动记录，
-而这两样 HTTP+WS 传输本来就已经给到了。
-
-## 凭据：这个扩展能读到什么
-
-**装之前请先读这一节。** 「零配置连接」是有代价的，代价是一项真实的权限；它应该是被写明的
-限制，而不是一个藏在连接说明底下的副作用。
-
-`dsh web` 会把一个持久化签名密钥放在 `$DSH_HOME/.credentials.yaml`
-（`client-connection/browser-session`）。浏览器会话 cookie 是对
-`{version, authority, issuedAt, expiresAt}` 的 HMAC，密钥就是这个。cookie 本身不包含
-launch token 的任何痕迹，而这个密钥只生成一次、之后每个 `dsh web` 进程复用。所以任何能读到
-该文件的东西都能签出**字节级相同**的 cookie。扩展就是自己读它、自己签，这就是为什么没有需要
-粘贴的东西。
-
-**而那个文件里同时存着你的模型 API key。** 由此可以推出：
-
-- 能读它，就**等价于**能完全控制这个 harness home。这不是提权，也没有绕过一道「防你自己」的
-  边界——但它确实意味着扩展进程能看到与这个 VS Code 客户端毫无关系的密钥。
-- 它确实绕过了那个每进程 launch token 闸门。那个闸门防的是**远程调用者**（DNS rebinding、
-  CSRF），不是防已经以你的身份运行在本机上的代码。
-- **任何凭据内容都不会进日志、不会发给 webview、不会出现在诊断报告里。** 日志只记录「发生过
-  一次签发」，从不记录材料本身。cookie 存在 VS Code 的 secret storage（系统钥匙串）里，
-  **不会**写进 `settings.json`。`DeepSeek Harness: Diagnostics` 导出的是一份脱敏报告，你可以
-  先完整读一遍再决定发不发出去。
-- 把 `deepseekHarness.autoSession` 设为 `false` 就完全拒绝自签。那是安全开关，不是便利开关：
-  关掉之后扩展就是没有鉴权状态。
-
-**这是一个权宜之计，我们更希望它没必要存在。** 官方路径是拿每个进程一次性生成的 launch token
-去换——但那个 token **不落盘**，所以官方文档要求你手动从终端复制，而且每次 `dsh web` 重启都会
-换一个。一个正式的本地客户端授权流程才是正解：一个 socket，或者一个 `0600` 权限、只对单个
-客户端有效的一次性 token 文件，就能让编辑器连上来而完全不必把原始签名密钥交给它。在 Harness
-提供这些之前，读那个文件是唯一能保住「零配置」的路径；而**被写明的限制，好过沉默的特权**。
-
-## v0.2.1 新特性
-
-**版本号再也没法各自跑偏，撤销也再没机会吃掉你的改动。**
-
-- **每一个版本展示面现在是被检查的，而不是靠记性。** 同一个扩展曾经在四个地方显示四个不同的版本——Marketplace 列表、`package.json`、最新的 Release，以及 README 里一条还活着的旧 `v0.0.3` 标题。这些都不是代码缺陷，它们是各自手写的字符串，彼此从没被比对过。现在 `npm run check-versions` 会把所有这些面统一对着 `package.json` 比对，任何不一致直接让构建失败——包括文档里自称的断言条数，也包括 `package-lock.json`（它从 0.1.5 起就一直停在 `0.1.4`，因为没人看过它）。README 的徽章换成了 shields 的实时端点而不是写死的数字，发布历史也从 README 搬进了 CHANGELOG——它本来就该在那儿。
-- **凭据这件事搬到了 README 最前面。** 见上一节：扩展会读一个同时存着你 API key 的文件，这一点现在是明说的，而不是埋在连接步骤里的第 3 条。
-- **回退会拒绝，而不是覆盖。** 撤销此前已经会检查盘上文件是否还等于 review 那一刻抓到的内容；它没做好的是**拒绝时有没有把话说清楚**。现在部分回退会报告它实际还原了几个文件，而那之后又被动过的文件会在卡片上被标为冲突并给出查看 diff 的入口，而不是弹一个转身就消失的提示。
-- **新增 Diagnostics 命令。** 运行时版本、扩展版本、连接状态、协商出来的能力、最近一次错误，全在一份可以脱敏导出的文档里。
-
-门禁：**342 项断言**（原 312）——新增的那些钉住了失败分类器、脱敏规则，以及「被拒绝的回退会留下原因」这件事。此外还有第一条真正跑起来的端到端链路：**15 项断言**驱动 `ReviewMaterializer` 对着一个真实的临时目录跑，其中就包含这个版本要处理的那种情况——文件在回合之后被改过，所以回退必须拒绝，而改动必须活下来。
-
-完整差异见 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)，更早的每一个版本也都在那里。
+完整 diff 和更早版本的说明见 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
 
 ## 环境要求
 
 - VS Code ≥ 1.85
-- 正在运行的本地 `dsh web`（默认端口 `3080`）。本扩展**不会**为你启动它。
+- 本地有一个 `dsh web`（默认端口 `3080`），要么已经在跑，要么由 `sessionMode: "managed"` 替你启动。
 
 ## 快速开始
 
-1. 在本地启动 Harness：
+1. 在本地启动 Harness——除非你更愿意让扩展来做这件事：
 
    ```bash
    dsh web
    # → http://127.0.0.1:3080/?token=<43 位 token>
    ```
 
-   较新的 Harness 会打印一个**带一次性 token 的启动 URL**。VS Code 不需要它——
-   想同时开着网页端对照时，用它打开浏览器即可。
+   较新的 Harness 会打印一个**带进程级 token 的启动 URL**。默认配置下你不需要它——
+   想同时开着网页端对照时，用它打开浏览器即可。（那个 token 是每次请求都比对的进程级密钥，
+   不是一次性凭证，所以反复打开这个 URL 依然有效。）
+
+   跳过这一步也是受支持的：把 `deepseekHarness.sessionMode` 设成 `"managed"`，扩展会自己
+   启动 Host 并从它的控制台读走那个 URL。见[会话是怎么拿到的](#会话是怎么拿到的)。
 
    更老的版本则完全不对 `/api/*` 做鉴权、不需要任何 token —— 插件会自行探测所连的是哪一种，
    所以如果没有出现启动 URL，这一步可以直接跳过。
@@ -145,12 +100,12 @@ launch token 的任何痕迹，而这个密钥只生成一次、之后每个 `ds
    或从 [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases) 安装 VSIX：
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.2.1.vsix
+   code --install-extension harness-connector-deepseek-0.2.2.vsix
    ```
 
-3. **不用配置任何东西。** 扩展会自动连接：它读取 `dsh web` 写在 `$DSH_HOME/.credentials.yaml` 里的浏览器会话签名密钥，自己签出同一个 `dsh-auth-…` cookie。**没有需要粘贴的 token。**
+3. **不用配置任何东西。** 在默认的 `sessionMode: "credentials"` 下，扩展会自动连接：它读取 `dsh web` 写在 `$DSH_HOME/.credentials.yaml` 里的浏览器会话签名密钥，自己签出同一个 `dsh-auth-…` cookie。**没有需要粘贴的 token。**
 
-   读一下上面的[《凭据》](#凭据这个扩展能读到什么)一节，就知道这意味着什么。
+   读一下[《会话是怎么拿到的》](#会话是怎么拿到的)一节，就知道这意味着什么，以及另外两种压根不打开那个文件的模式。
 
 4. 在 VS Code 中打开一个你想绑定到 Harness 工作区的文件夹。
 
@@ -162,21 +117,57 @@ launch token 的任何痕迹，而这个密钥只生成一次、之后每个 `ds
 
 8. 在浏览器中打开 `http://127.0.0.1:3080/` 的同一会话——两端看到的是同一轮对话。
 
-> 没有"设置会话 token"这条命令。cookie 每次连接都从
-> `$DSH_HOME/.credentials.yaml` 本地签发，没有任何需要粘贴的东西。粘贴启动 URL
-> 的命令已经删掉，因为一个每次重启都变的 token，在本地自签可用之后只剩下维护成本。
+### 会话是怎么拿到的
 
-### 本地签发跑不起来的时候
+Harness 用浏览器会话 cookie 给 `/api/*` 做鉴权，而这里有且只有三条拿到它的路，由
+`deepseekHarness.sessionMode` 决定走哪条。
 
-连接失败时扩展会直接在报错里点名它找过的文件，没有手动兜底——请把根因解决掉。
+**`credentials`（默认）——本地签发。** `dsh web` 会在 `$DSH_HOME/.credentials.yaml`
+的 `client-connection/browser-session` 下留一个持久签名密钥。cookie 是用它给
+`{version, authority, issuedAt, expiresAt}` 算的 HMAC；cookie 里不含启动 token 的任何痕迹；
+而这个密钥只生成一次、之后每个 `dsh web` 进程复用——所以任何能读到该文件的东西，都能签出
+一个逐字节相同的 cookie。扩展读它并自己签发。这就是「没有需要粘贴的东西」的来源。
+
+**`managed`——让扩展启动 Host。** 它运行 `deepseekHarness.launchCommand`（默认
+`dsh web --port 0`），从它自己拥有的进程的控制台里读走启动 URL，再用那个 token 去兑换。
+不碰凭据文件，不需要粘贴。它启动的 Host 会在这扇窗口关闭时被停掉。
+
+**`paste`——你自己启，然后把 URL 交过来。** 跑 `dsh web`，复制那行
+`dsh web: http://…`，执行 **DeepSeek Harness: Use Launch URL**。不读磁盘，也不启动任何进程。
+
+关于 `credentials`，因为它是默认值，而且是一份真实的权限：
+
+- **那个文件里同时装着你的模型 API key。** 读它，在权限上**等价于**对这个 harness home
+  拥有完整权力。它不是提权，也没有绕过一个「防你自己」的边界——但扩展进程因此能看到一批
+  跟 VS Code 客户端毫无关系的密钥。
+- 它会跳过进程级的 launch-token 闸门。那道闸门防的是*远端*调用方（DNS rebinding、CSRF），
+  不是防已经以你的身份在本机运行的代码。
+- **`managed` 就是对上面两条的回答。** 如果这笔交换你不愿做，换个模式即可——除了多一个由
+  扩展启动的进程之外，你什么也没损失。
+- **没有任何凭据材料会进日志、进 webview 或进诊断报告。** 日志只记录「发生了一次签发」，
+  从不记录材料本身。启动 URL 只在内存里为它唯一用途而存在，且所有提到它的日志行都会被脱敏。
+  cookie 存在 VS Code 的 secret storage（系统钥匙串）里，**不会**写进 `settings.json`。
+  `DeepSeek Harness: Diagnostics` 导出的是你可以先完整读一遍再决定要不要发出去的脱敏报告。
+
+**这是一个权宜之计，我们更希望它没必要存在。** 官方路径是兑换进程级的 launch token，而
+`managed`/`paste` 做的正是这件事——但没有任何东西会把 token 写到盘上，所以一个不是自己启动
+Host 的客户端根本无从取得它；这正是当年「读签名密钥」成为唯一零配置路径的原因。一个一等的
+本地客户端授权流程才能把这件事做对：一个 socket，或者一个 `0600`、只对单个客户端生效的一次性
+token 文件。在 Harness 提供它之前，上面三种模式就是诚实的全部菜单。
+
+### 某条路跑不起来的时候
+
+连接失败时扩展会在报错里点出原因、以及它找过的文件或命令。没有静默兜底。
 
 | 情况 | 怎么办 |
 | --- | --- |
 | `$DSH_HOME` 指向别处，且没设环境变量 | 给 VS Code 进程设置 `DSH_HOME`，或用默认 home 启动 `dsh web` |
-| 这个 harness home 里从没跑过 `dsh web` | 跑一次——`client-connection/browser-session` 记录是那时才建立的 |
-| 你把 `deepseekHarness.autoSession` 设成了 `false` | 改回 `true`：这个开关现在的含义是"拒绝自签"，而不是"弹个框让我手输 token" |
+| 这个 harness home 里从没跑过 `dsh web` | 跑一次——`client-connection/browser-session` 记录是那时才建立的；或者改用 `sessionMode: "managed"` |
+| `managed` 模式下 `PATH` 里没有 `dsh` | 面板会给出对应平台的安装路线；Windows 和 macOS 上装桌面端也会顺带把 `dsh` 注册好 |
+| `managed` 跑了但 `dsh` 立刻退出 | 通常是对端端口已被占用——日志里有子进程自己打出的最后几行 |
+| 你在 `paste` 模式下还没粘贴过 | 执行 **DeepSeek Harness: Use Launch URL** |
 
-签出来的 cookie 之后有自己的生命周期：扩展把它存进 VS Code 的 secret storage
+以任何方式拿到的 cookie，之后都有自己的生命周期：扩展把它存进 VS Code 的 secret storage
 （系统钥匙串，**不会**写入 `settings.json`），`dsh web` 重启不会失效，只有在过期或你改了
 `host`/`port` 时才重新签发（cookie 名是 `dsh-auth-<sha256(host:port)>`，绑定签发它的
 authority）。
@@ -188,7 +179,8 @@ authority）。
 | `deepseekHarness.host` | `127.0.0.1` | 仅允许 `127.0.0.1` 或 `localhost`。其他值会被拒绝。 |
 | `deepseekHarness.port` | `3080` | 默认 `dsh web` 端口。如果你用 `dsh web --port <n>` 启动则需修改。 |
 | `deepseekHarness.showSystemMessages` | `false` | 显示插件注入的系统消息（运行时上下文、审批通知）。默认隐藏；可通过 webview 头部的 `SYS` 按钮实时切换。 |
-| `deepseekHarness.autoSession` | `true` | 从 `$DSH_HOME/.credentials.yaml` 本地签发浏览器会话 cookie。关掉它扩展就没有鉴权了——这是安全开关，不是便利开关。 |
+| `deepseekHarness.sessionMode` | `credentials` | 会话从哪来。`credentials` 从 `$DSH_HOME/.credentials.yaml` 本地签发 cookie；`managed` 启动 `dsh web` 并读走它的启动 URL；`paste` 等你把 URL 交过来。见[会话是怎么拿到的](#会话是怎么拿到的)。 |
+| `deepseekHarness.launchCommand` | `dsh web --port 0` | `sessionMode: "managed"` 运行的命令。默认让系统分配端口，因为托管启动本来就是从启动 URL 里读真实端口，钉死端口只是多一种失败方式。命令走 shell，所以包装脚本和 `npx` 都能用。只在启动 Host 时读一次；改它不会打扰正在跑的那个 Host。 |
 | `deepseekHarness.autoApproveApprovals` | `false` | 自动用 `allowed-once` 回应所有审批请求。默认关闭——开启意味着工具调用不再逐次确认。 |
 | `deepseekHarness.autoDiscover` | `true` | 配置的端口没人应答时，在回环地址上另找 dsh Host（先看各 profile patch 里钉的 `webserver.port`，再枚举系统监听表，用 Host 自己的拒绝文本确认）。桌面端需要它——桌面端用系统分配的端口启动 Host。发现的端口只在本次会话内使用，绝不写回设置。 |
 
@@ -196,7 +188,8 @@ authority）。
 
 - `DeepSeek Harness: Connect` / `Reconnect` / `Disconnect`（连接 / 重连 / 断开）——**Reconnect**（同时也是面板标题的 ⟳ 按钮、以及状态行里常驻的那个按钮）会先拆掉当前连接再重新协商一次
 - `DeepSeek Harness: Diagnostics`（诊断）——一份文档：运行时版本、本扩展的版本、连接状态、这台 Host 实际提供哪些能力、以及最近一次错误。带一个**复制脱敏报告**动作；其中不含任何凭据内容
-- `DeepSeek Harness: Clear Session Token`（清除会话 token）——删除已存储的 cookie 并重连（会重新签一个；切换 `dsh web` 实例前用它）
+- `DeepSeek Harness: Clear Session Token`（清除会话 token）——删除已存储的 cookie 并重连（`credentials` 下会重新签一个，`managed` 下会重新起一个 Host；切换 `dsh web` 实例前用它）
+- `DeepSeek Harness: Use Launch URL`（使用启动 URL）——粘贴 Host 打印的那行 `dsh web: http://…` 并采用它的会话。这就是 `paste` 那条路，任何模式下都能用
 - `DeepSeek Harness: New Session`（在当前工作区新建会话）
 - `DeepSeek Harness: Refresh Sessions`（刷新会话列表）
 - `DeepSeek Harness: Move to Right Side Bar`（移至右侧边栏）——将视图停靠在辅助侧边栏（像聊天面板一样），不再与文件浏览器争抢左侧空间。也可通过 webview 头部的 ⇲ 按钮触发。
@@ -207,7 +200,7 @@ authority）。
 - `DeepSeek Harness: Rename Session`（重命名会话）——固定标题（之后不再自动生成）
 - `DeepSeek Harness: Archive Session`（归档会话）——从当前工作区列表归档
 - `DeepSeek Harness: Attach File to Session`（附加文件到会话）——为下一条提示暂存本地图片/文件（图片走 `session/prompt` 内联部件；其它文件上传到 `POST /api/session/uploadFileBinary` 并按回执引用）。也可通过 📎 按钮、或直接往输入框粘贴/拖拽触发
-- `DeepSeek Harness: Open Web UI`（打开 Web UI）
+- `DeepSeek Harness: Open Web UI`（打开 Web UI）——在浏览器里打开那个带 token 的启动 URL。`sessionMode: "managed"` 下 Host 是扩展自己起的，它手里就有这个 URL，所以这条命令真的能打开；其他模式下它会告诉你那行 URL 在哪
 - `DeepSeek Harness: Show Logs`（显示日志，即 `DeepSeek Harness` 输出通道）
 
 这六个控制项同时也在侧边栏的 **Controls（控制）** 面板里，面板还会显示 host
@@ -243,7 +236,7 @@ path"`、`@dir/`，可带 `:L<n>` / `:L<n>-L<m>` 后缀；从 `@` 补全列表�
 一个独立的 Node 脚本用真实客户端代码驱动一个**假**的 harness（假实现照 `0.2.1-alpha.2` 的服务端那一半写死）—— 不需要 `dsh web`：
 
 ```bash
-npm run protocol-test    # 342 项断言：双流传输拆分（$events 白名单 vs
+npm run protocol-test    # 381 项断言：双流传输拆分（$events 白名单 vs
                          # session/follow）、线缆协商（点分/斜杠、cookie 门禁、
                          # 事件套接字）、认证、cookie 派生、{args} payload、
                          # 审批与提问两条瀑布（Allow/Deny 的确切信封、cancel 撤卡、
@@ -312,9 +305,9 @@ npm run build            # esbuild → dist/extension.js
 npm run watch            # 变更时自动重建
 npm run typecheck
 npm run check-versions   # 每一个版本展示面都必须和 package.json 一致
-npm run protocol-test    # 针对假 harness 的 342 项协议断言
+npm run protocol-test    # 针对假 harness 的 381 项协议断言
 npm run protocol-probe   # 报告真实 dsh web 暴露了什么
-npm run package          # → harness-connector-deepseek-0.2.1.vsix
+npm run package          # → harness-connector-deepseek-0.2.2.vsix
 ```
 
 在 VS Code 中按 `F5` 启动带有该扩展的扩展开发宿主。
@@ -325,6 +318,24 @@ npm run package          # → harness-connector-deepseek-0.2.1.vsix
   VSIX 文件名、CHANGELOG 的第一条、发布基线、文档里自称的断言条数——都由 `npm run check-versions`
   对着它比对。新增一个会提到版本的展示面，就顺手加一条检查；不要新增一个数字然后指望它别忘。
 - **发布历史写进 CHANGELOG。** README 描述的是产品的当前状态，只保留一个版本的说明。
+
+## 设计：写盘归 DSH，插件只观察与告知
+
+关于 DSH 如何工作的两个事实，决定了这里几乎所有其他决定。
+
+**DSH 写盘，并在下一步读回来。** 这个顺序不是可以绕开的实现细节——每一步都建立在它之上。文件工具报告它的改动，接着下一步就把文件按现在的样子打开。所以那个诱人的做法——拦截写入：缓冲它、代理它、把它变成 `WorkspaceEdit` 交给 VS Code 去应用——换来的是一个看起来更整洁的 review 流程，代价是破坏步骤之间的一致性。而且它会很晚、很斜地爆：好几十步之后一个错误的结果，没有任何可见的线索指回那次拦截。所以本插件不拦截写入。**DSH 是唯一的写盘者。**
+
+**插件是观察者，不是守门人。** 等你看到一处改动时，它已经在盘上了。这让「Accept」变成一个除了暗示「这处改动还在等许可」之外什么也没做的按钮，所以它被删了。剩下的是一份记录：改了什么、diff 在哪、怎么撤销。这跟两个人在同一个仓库上协作是同一种关系——你保存文件不需要问谁许可，你去看另一个人做了什么。
+
+三个后果，都是刻意为之：
+
+- **在文件层面，人和 AI 是对等的。** DSH 写，你也写，谁也不被要求为对方确认。让你们不撞车的不是一把锁——而是两个人都能看到 diff、两个人都能撤销。插件的职责是把这份记录显示在对话流里、紧挨着产生它的那次调用，而不是站在你们俩中间。
+- **没有回流机制，也不需要。** DSH 每一步都重新读盘，所以它永远不会拿着一份你已经在下面改过的旧副本干活。想让 AI 知道你的改动，就在对话里说，或者让它去读 git 历史。没有任何东西需要被推给它。
+- **浏览器能显示的，VS Code 用原生方式显示。** 凡插件有东西要呈现——一个 diff、AI 指到的一个文件——它打开 VS Code 自己的编辑器，而不是在 webview 里重新实现一个查看器。webview 负责对话，编辑器负责代码。
+
+被排除掉的东西和包含进来的东西一样，都是设计的一部分。把 DSH 注册成 **Copilot 语言模型提供方**，会在选择器里多一个下拉项，而背后接的是*别人*的 agent 循环——没有工具调用、没有审批、没有上下文管理，没有作为真正产品的那些编排。用 harness 去换一个模型条目是笔坏交易。改用 **ACP** 而不是 web 传输去驱动 DSH，是同一个错误的小号版本：`acp` profile 是一个自称 automation-only 的 stdio JSON-RPC 服务，既不带 elicitation 也不带 DSH 的展示卡——那样就会丢掉 HTTP+WS 传输已经送来的审批/提问瀑布和改动记录。
+
+**「不启动任何进程」仍然是默认值。** 这套设计唯一被松口的地方就是托管启动，而松口的方式精神一致：它要显式开启，扩展只启动被要求启动的那个 Host，并且在退出时把它停掉。默认行为依然是附着到你已有的东西上。
 
 ## 已验证版本
 
@@ -337,6 +348,13 @@ npm run package          # → harness-connector-deepseek-0.2.1.vsix
   逻辑流：`$events`（一份固定的转发白名单——会话状态、审批、插件清单）与 `session/follow`
   （一条会话的记录与实时 assistant 增量）。按「所有东西都从 `$events` 来」写，正是早期某版连上之后
   就彻底沉默的原因。两条流分开打开，形状钉在 `scripts/protocol-test.ts` 里。
+- **启动 URL 是进程级密钥，不是一次性凭证。** 上游的 `authorizeIndex` 对 `/` 的*每一次*请求
+  都用 `timingSafeEqual` 把 `token` 查询参数跟进程密钥比对，所以同一个 URL 可以兑换多次，重连也
+  不需要新的 Host。这是量出来的、不是推出来的：`scripts/launch-probe.ts` 把同一个 URL 兑换两次，
+  两次都期望 `303`。
+- **`dsh web` 不会自我后台化。** 这个扩展 spawn 出来的进程就是持有端口的那个——连续采样若干秒，
+  子进程活着时 Host 一直答 `401`，停掉之后端口立刻拒绝连接。这正是 `stop()` 所依赖的不变量：如果
+  `dsh` 把自己重新孵化到后台去，杀掉我们的子进程就会留下一个用户无法解释的 Host 还在跑。
 - **不知道 Host 在哪也能把它找出来。** 对 dsh Host 发起匿名请求，会被 connection carrier
   用一句固定的话拒绝（`dsh web authentication required; reopen the URL printed by dsh web.`），
   本机没有第二个服务会这么说——所以它同时也是一个身份判据。`deepseekHarness.autoDiscover`
@@ -352,7 +370,10 @@ npm run package          # → harness-connector-deepseek-0.2.1.vsix
 ## 限制
 
 - 仅限回环——不支持远程 / 局域网 / WSL 桥接的主机。
-- **扩展能读到一个存着你 API key 的文件。** 要签会话 cookie 就必须读它。见[《凭据》](#凭据这个扩展能读到什么)。
+- **在 `sessionMode: "credentials"` 下，扩展能读到一个存着你 API key 的文件。** 要签会话 cookie 就必须读它——这也正是它不再是唯一模式的原因。见[《会话是怎么拿到的》](#会话是怎么拿到的)。
+- **托管启动只覆盖「没有任何 Host 在跑」这一情况。** 别人启动的 Host——终端里的、桌面端的——永远不会把它的启动 URL 给我们看，所以那种情况最终仍然走 `paste`。两者各覆盖一半，谁也替代不了谁。
+- **`managed` 启动的 Host 会在这扇窗口关闭时被停掉。** 这是刻意的（一个脱离控制、占着端口的 Host，正是这个扩展要避免制造的东西），但这也意味着你退出 VS Code 时，之前开着的那个 Web UI 标签页会失效。
+- **托管启动需要一个真能跑起来的 `dsh`。** 一个过期的全局 `dsh` 可能读不懂桌面端写下的那份凭据文件，于是启动即退出——这种时候面板给的建议是去看日志，因为原因永远在子进程自己打出的最后几行里。升级它就好了。
 - **图片能不能用取决于模型。** 模型是否吃图并不在 `session/modelCatalog` 里发布，插件只能把宿主的裁决透传：不吃图的模型会让 prompt 失败并返回 `MODEL_DOES_NOT_SUPPORT_IMAGES`，面板会提示你去 Controls 换模型。已暂存的附件会**保留**，方便重试。
 - **暂存文件绑定进程。** 上传回执同时绑定会话**和**正在运行的 `dsh web` 进程，宿主重启后必须重新选文件。
 - 历史记录加载最近约 50 条消息；"加载更早"是未来版本的计划。
@@ -362,7 +383,7 @@ npm run package          # → harness-connector-deepseek-0.2.1.vsix
 - **回合的改动卡片列出的是这个回合改了哪些文件，但其中只有文件工具自己的改动能从中撤销。** 撤销范围限定在该回合产出的 review 内，因为 Host 的摘要只带路径与行数，不带还原所需的文本。某个回合若只通过 shell 命令改了文件，它会直说。
 - 改动摘要在宿主上只活到 Session 结束，所以宿主重启后卡片可能解析为「没有改动可显示」。这会渲染成没有卡片，与 Web UI 一致。
 
-## 路线图（v0.2.2+）
+## 路线图（v0.3.0+）
 
 - **上面那五条端到端链路，做实。** 真实的扩展宿主、一个能在回合进行中被杀掉再重启的假 Host，以及
   Windows / macOS / Linux 三平台矩阵。第 5 条尤其如此——agent 改完、**你**又改、然后撤销——需要

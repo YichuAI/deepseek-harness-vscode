@@ -28,7 +28,9 @@ import {
 import type { UiState, InspectorFrame, PendingChip, SearchState } from './state.ts'
 import { connectionToUi, sessionsToUi, workspaceToUi } from './state.ts'
 import { classifyConnectFailure } from './diagnosis.ts'
-import type { ConnectionHint } from './diagnosis.ts'
+import type { ConnectionHint, InstallGuidance, ManagedLaunchOutcome } from './diagnosis.ts'
+import type { SessionMode } from './session-mode.ts'
+import { DEFAULT_LAUNCH_COMMAND, LaunchError, type ManagedLauncher } from '../harness/launcher.ts'
 import type { PendingAttachmentPayload, WebviewAction } from '../view/provider.ts'
 import type { HarnessWebviewViewProvider } from '../view/provider.ts'
 import { CompositeDisposable } from '../disposable.ts'
@@ -59,6 +61,33 @@ export interface ControllerDeps {
    * one answers nothing. Mirrors the `autoDiscover` setting.
    */
   autoDiscover: () => boolean
+  /** The active `deepseekHarness.sessionMode`. */
+  sessionMode: () => SessionMode
+  /**
+   * The launcher, but only while managed launch is the active mode.
+   *
+   * A function rather than the instance so that a settings change takes effect
+   * on the next connect without rebuilding the controller — and so that
+   * `undefined` is the honest answer for the two modes that do not start
+   * anything, rather than a boolean the caller has to remember to check.
+   */
+  launcher?: () => ManagedLauncher | undefined
+  /** The command managed launch runs. Mirrors `deepseekHarness.launchCommand`. */
+  launchCommand?: () => string
+  /**
+   * Trade a launch URL for a session and retarget the client at the Host that
+   * issued it. Only ever called with a URL this extension obtained itself.
+   */
+  adoptLaunchUrl?: (url: string) => Promise<{ host: string; port: number }>
+  /** Where a desktop install was found, if there is one. Probed once at activation. */
+  desktopInstall?: () => string | undefined
+  /** `process.platform` / `process.arch`, for install guidance. */
+  platform?: string
+  arch?: string
+  /** Reveal a URL to the user (the desktop download page). */
+  openExternal?: (url: string) => Promise<void>
+  /** Put text on the clipboard (the Linux/macOS install commands). */
+  copyToClipboard?: (text: string) => Promise<void>
   openHarnessHome: () => void
   moveToSecondarySideBar: () => Promise<void>
   log: { info: (m: string) => void; error: (m: string) => void }
@@ -213,6 +242,15 @@ export class AppController {
   private lastConnectError: string | undefined
   /** Port the last discovery landed on, so a failed retry can name it. */
   private lastDiscoveredPort: number | undefined
+  /**
+   * How the managed-launch attempt for *this* connect ended.
+   *
+   * Cleared at the start of every attempt, because "it timed out last time"
+   * says nothing about now — and because a stale value here would put the word
+   * "timeout" in front of a user whose actual problem is that nothing is
+   * installed.
+   */
+  private lastLaunchOutcome: ManagedLaunchOutcome | undefined
   private reviewController: ReviewController | undefined
   /** Native diffs for a turn's changed files (`/api/changes.diff`), keyed by id. */
   private readonly changesDiffs = new ChangesDiffStore()
@@ -392,6 +430,34 @@ export class AppController {
         this.d.setState({ eventLog: this.inspectorOpen ? this.eventLog : [] })
         this.d.pushState()
         break
+      // The panel shows one install affordance, and only while the connection is
+      // in the failed state, so this action can only arrive with guidance already
+      // in hand. It is read from `connectionHint` rather than taken from the
+      // message: the webview is untrusted input, and a button that opens an
+      // arbitrary URL on command is exactly the kind of thing that matters.
+      case 'install': await this.runInstall(); break
+    }
+  }
+
+  /**
+   * Do what the current install guidance says.
+   *
+   * Two shapes, because upstream ships two shapes. Windows and macOS have a
+   * desktop installer to open; Linux has no package at all, so the only honest
+   * button is one that copies the build commands for the user to run. Either way
+   * this never installs anything itself — it hands over a link or a command.
+   */
+  private async runInstall(): Promise<void> {
+    const g: InstallGuidance | undefined = this.connectionHint?.install
+    if (g === undefined) return
+    if (g.command !== undefined) {
+      await this.d.copyToClipboard?.(g.command)
+      this.d.notifyInfo(`${g.label.replace(/^Copy /, 'Copied ')} — paste it into a terminal, then reconnect.`)
+      return
+    }
+    if (g.url !== undefined) {
+      await this.d.openExternal?.(g.url)
+      return
     }
   }
 
@@ -409,6 +475,7 @@ export class AppController {
     const alreadyConnected = this.d.client.getState().kind === 'connected'
     // Scoped to this attempt: a port found last time says nothing about now.
     this.lastDiscoveredPort = undefined
+    this.lastLaunchOutcome = undefined
     try {
       // `force` tears the old socket down before negotiating. It has to, because
       // after a Host restart the client still believes it is `connected` — the
@@ -422,7 +489,13 @@ export class AppController {
         // auth refusal means we found a Host and it said no; retrying elsewhere
         // would answer a credential problem with a port problem.
         if (e instanceof HarnessAuthRequiredError || !this.d.autoDiscover()) throw e
-        if (await this.attachToDiscovered() === undefined) throw e
+        // Discovery before launch, always. If a Host is already running — the
+        // desktop app's, most likely — adopting it is free, while starting a
+        // second one costs a process and leaves two Hosts racing for the same
+        // sessions.
+        if (await this.attachToDiscovered() === undefined) {
+          if (!await this.launchManagedHost()) throw e
+        }
       }
       // A non-forced connect against a live session has nothing left to do: the
       // webview asks for one on every boot, and redoing the session handshake
@@ -441,11 +514,71 @@ export class AppController {
       // listening, the Host refused the cookie, or a proxy held the port. The
       // classification is what turns one shrug into one specific next action.
       this.connectionHint = classifyConnectFailure(msg, {
-        ...this.d.client.target(), discoveredPort: this.lastDiscoveredPort,
+        ...this.d.client.target(),
+        discoveredPort: this.lastDiscoveredPort,
+        managedAttempted: this.lastLaunchOutcome,
+        sessionMode: this.d.sessionMode(),
+        platform: this.d.platform,
+        arch: this.d.arch,
+        desktopInstalled: this.d.desktopInstall?.(),
+        // Only meaningful in the mode that mints: in the other two, the absence
+        // of a mint gap is not evidence that a credential exists.
+        credentialsUnavailable:
+          this.d.sessionMode() === 'credentials' && this.d.client.mintGap() !== undefined,
       })
       this.d.notifyError(this.connectionHint.title + ' — ' + this.connectionHint.fix)
     }
     this.d.pushState()
+  }
+
+  /**
+   * Start a `dsh web` of our own and adopt it.
+   *
+   * Only reached when the configured port answered nothing *and* discovery found
+   * no other Host, and only in `sessionMode: "managed"` — see `harness/launcher.ts`
+   * for the reasoning. Briefly: the `dsh web` launch URL is the sanctioned way to
+   * get a session, and it is printed to the console of a process nobody controls.
+   * Own the process and the console is ours, so a session costs neither a paste
+   * nor a read of `$DSH_HOME/.credentials.yaml`.
+   *
+   * @returns whether a Host was started and its session adopted. `false` means
+   *   the caller should rethrow the original error, which is what feeds the
+   *   classifier — so every failure here also records `lastLaunchOutcome`.
+   */
+  private async launchManagedHost(): Promise<boolean> {
+    const launcher = this.d.launcher?.()
+    const adopt = this.d.adoptLaunchUrl
+    if (launcher === undefined || adopt === undefined) return false
+
+    const command = this.d.launchCommand?.() ?? DEFAULT_LAUNCH_COMMAND
+    this.d.log.info(`connect: nothing on loopback and managed launch is enabled — starting \`${command}\``)
+    try {
+      const attempt = await launcher.start({
+        command,
+        log: (m) => { this.d.log.info(m) },
+      })
+      const { host, port } = await adopt(attempt.url)
+      this.d.client.retarget(host, port)
+      await this.d.client.connect({ force: true })
+      this.d.log.info(`connect: adopted the Host we started at ${host}:${String(port)}`)
+      this.d.notifyInfo(
+        `DeepSeek Harness: started a Host on ${host}:${String(port)}. This extension stops it when the window closes; `
+        + 'switch deepseekHarness.sessionMode back to "credentials" to run your own instead.',
+      )
+      return true
+    } catch (e) {
+      // `kind` is what the classifier turns into advice. Anything that is not a
+      // LaunchError is our own bug (the token exchange throwing, say) and is
+      // reported as-is rather than folded into a launch story it does not belong to.
+      if (e instanceof LaunchError) this.lastLaunchOutcome = e.kind
+      this.d.log.error(`managed launch failed: ${e instanceof Error ? e.message : String(e)}`)
+      const output = launcher.outputTail()
+      if (output !== '') {
+        this.d.log.error('managed launch output (redacted):')
+        for (const line of output.split('\n')) this.d.log.error(`  ${line}`)
+      }
+      return false
+    }
   }
 
   /**

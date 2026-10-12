@@ -691,9 +691,19 @@ catches it.
 
 Two rules make this a gate rather than an aspiration:
 
-- **Anything derivable is derived.** The README badges are live shields endpoints
-  (`github/v/release`, `vs-marketplace/v`) instead of typed numbers. A hardcoded version
-  badge is a number someone has to remember, and it was forgotten twice.
+- **Anything derivable is derived.** The README badges are live endpoints instead of typed
+  numbers — `github/v/release` and `github/license` from shields.io, `vs-marketplace/v` and
+  `vs-marketplace/i` from badgen.net. A hardcoded version badge is a number someone has to
+  remember, and it was forgotten twice.
+- **A badge host can retire a badge out from under you.** The Marketplace pair began on
+  shields.io as `img.shields.io/vs-marketplace/…`, which is not a slug shields ever served —
+  its namespace is `visual-studio-marketplace`, and that one now answers with an SVG labelled
+  *"retired badge"*. So the integration was withdrawn rather than renamed, and there was no
+  correct URL to switch to. The reader is shown none of that reasoning: they see two red
+  `404 badge not found` images at the top of the page, and from the outside a broken badge and
+  a careless project look exactly alike. The gate therefore asserts that the Marketplace
+  badges resolve to `badgen.net`, and that no `img.shields.io/vs-marketplace` URL survives in
+  either README.
 - **Anything a reader copies verbatim is checked, not templated.** The install command names
   the real VSIX filename, so a checker verifies it rather than replacing it with `<version>`
   — which would be accurate and useless.
@@ -986,7 +996,7 @@ media/
 ├── origin.png                # source material (excluded from VSIX)
 └── markdown-it.umd.min.js    # bundled for VSIX (114 KB)
 scripts/
-├── protocol-test.ts          # fake-harness protocol test, 342 assertions (no dsh web)
+├── protocol-test.ts          # fake-harness protocol test, 381 assertions (no dsh web)
 ├── protocol-probe.ts         # asks a live `dsh web` what it actually serves
 ├── check-versions.ts         # every version surface must agree with package.json
 ├── integration-test.ts       # closed-loop test against real dsh

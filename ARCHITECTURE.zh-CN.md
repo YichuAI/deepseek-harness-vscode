@@ -514,9 +514,16 @@ lockfile 在这个列表里，因为它是版本号会被写下的地方之一�
 
 两条规则让这件事成为闸门而不是口号：
 
-- **能推导的就推导。** README 的徽章换成了 shields 的实时端点（`github/v/release`、
-  `vs-marketplace/v`），不再是手写的数字。写死的版本徽章是一个需要靠人记住的数字，而它被忘了
-  两次。
+- **能推导的就推导。** README 的徽章是实时端点，不是手写的数字——`github/v/release` 和
+  `github/license` 来自 shields.io，`vs-marketplace/v` 和 `vs-marketplace/i` 来自 badgen.net。
+  写死的版本徽章是一个需要靠人记住的数字，而它被忘了两次。
+- **徽章托管方可以把徽章从你脚下撤掉。** Marketplace 那一对最初写在 shields.io 上，路径是
+  `img.shields.io/vs-marketplace/…`——而这个 slug 从来不是 shields 提供过的，它的命名空间是
+  `visual-studio-marketplace`，而后者现在返回一张标注着 *"retired badge"* 的 SVG。也就是说这
+  个集成是被撤下，而不是被改名，根本不存在「换成正确 URL」这个选项。读者看不到这中间的推理：
+  他们只看到页面顶部两张红色的 `404 badge not found` 图，而在外人看来，一张挂掉的徽章和一个
+  粗心的项目长得一模一样。所以闸门断言 Marketplace 徽章落在 `badgen.net` 上，并且两份 README
+  里都不再残留任何 `img.shields.io/vs-marketplace`。
 - **读者要照抄的东西，是去检查而不是去模板化。** 安装命令写的是真实的 VSIX 文件名，所以由检查
   器核验它，而不是把它换成 `<version>`——那样虽然永远准确，但也就没用了。
 
@@ -751,7 +758,7 @@ media/
 ├── origin.png                # 源材料（VSIX 排除）
 └── markdown-it.umd.min.js    # VSIX 打包用（114 KB）
 scripts/
-├── protocol-test.ts          # 假 harness 协议测试，342 项断言（无需 dsh web）
+├── protocol-test.ts          # 假 harness 协议测试，381 项断言（无需 dsh web）
 ├── protocol-probe.ts         # 向真实 `dsh web` 询问它实际提供什么
 ├── check-versions.ts         # 每一个版本展示面都必须和 package.json 一致
 ├── integration-test.ts       # 针对真实 dsh 的闭环测试

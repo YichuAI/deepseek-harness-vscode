@@ -5,6 +5,135 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.2] — 2026-10-12
+
+版本定位：**它不必再读那个装满你 API key 的文件了，而 `autoSession: false` 也终于有了实际含义。**
+
+### 新增
+
+- **托管启动——显式开启，由扩展自己把 `dsh web` 起起来。** 在此之前唯一的鉴权方式是读
+  `$DSH_HOME/.credentials.yaml`，而那个文件里同时装着用户的模型 API key。这是不装这个插件最
+  站得住的一条理由，而它当初是个有正当原因的取舍：本地签发 cookie 省掉了粘贴，而另一条路——
+  官方那种进程级 launch token 兑换——需要的是一行只存在于「别人控制的进程」的控制台上的东西。
+
+  `deepseekHarness.sessionMode: "managed"` 把这个取舍整个拿掉了。扩展运行
+  `deepseekHarness.launchCommand`（默认 `dsh web --port 0`），捕获它打印的启动 URL，再用那个
+  token 去兑换。拥有进程正是这件事成立的原因：它的 stdout 是我们的，所以既没有要粘的东西，也
+  没有要读的凭据文件。它启动的 Host 会在 `deactivate()` 时被停掉——这也是 `deactivate` 现在
+  是 async 的原因。
+
+  发现流程永远先跑，所以已经在跑的 Host（大概率是桌面端那个）会被采纳，而不是再起一个。
+
+- **`DeepSeek Harness: Use Launch URL`。** `paste` 那条路，做成命令：粘贴 `dsh web: http://…`
+  那一行，扩展拿 token 换会话。这才是 `autoSession: false` 本该有的样子。
+
+- **安装指引，且只在连接失败时出现。** `classifyConnectFailure` 新增了五个输入（`platform`、
+  `arch`、`credentialsUnavailable`、`desktopInstalled`、`managedAttempted`），现在最多返回一条
+  `install` 路线。Windows 与 macOS 给下载页链接；Linux 给可复制的构建命令，因为上游没有为它打
+  桌面端。面板只渲染一个按钮，只在连接处于 `error` 状态时出现，而且这个按钮不带任何载荷——该走
+  哪条路由扩展侧根据同一个 hint 决定，webview 没机会塞给它一个 URL。
+
+  这些情况按钮会被收回：桌面端已经在盘上（此时 fix 会叫你去打开它）、托管启动跑过并且退出了
+  （此时 fix 会说是端口被占了）、以及平台未知。叫别人去装一个他已经装好的东西，比什么都不说更糟。
+
+- **README 有截图了。** 之前是四个徽章、零张图，用这种方式描述一个视觉产品挺奇怪的。
+
+- **`scripts/launch-probe.ts`。** 拿真实的启动器对着真实的 `dsh web` 跑一遍，报告单元测试看不见
+  的东西：同一个 launch token 能否兑换两次、Host 会不会活得比我们 spawn 的子进程更久、以及
+  `stop()` 之后端口是否安静。三件事全部成立时退出码才是 0。
+
+### 变更
+
+- **`deepseekHarness.autoSession`（布尔）变成 `deepseekHarness.sessionMode`（枚举）。** 旧开关
+  只能把鉴权**关掉**——`false` 的意思是「不鉴权」，因为另一条路对应的命令早先被注销了。一个只能关
+  东西的开关不是设置项，是陷阱；它让这个扩展看起来非读那个凭据文件不可。
+
+  三个模式是 `credentials`（本地签发——旧行为，仍是默认）、`managed`（启动 Host）、`paste`
+  （你提供 URL）。不主动改的人升级前后毫无变化；`credentials` 被刻意设为默认，就是为了不让这个
+  版本悄悄改变任何人的行为。
+
+  `app/session-mode.ts` 里的 `traitsOf()` 是回答「这个模式允许什么」的唯一地方，所以 `managed`
+  不可能意外退回读凭据文件——那样选它就什么也没换到。
+
+- **`deepseekHarness.launchCommand`** —— 新设置，默认 `dsh web --port 0`。用 `--port 0` 是因为
+  托管启动本来就从启动 URL 里读真实端口，钉死端口只是多一种失败方式。命令走 shell，所以包装脚本
+  和 `npx` 会像在终端里一样解析。
+
+- **`DeepSeek Harness: Open Web UI` 现在真能做它说的事了。** 它以前是一条解释「为什么做不到」的
+  提示：harness 的 web UI 是按进程鉴权的，而别人启动的 Host 永远不会把 URL 给我们看。**我们**启
+  动的 Host 恰恰是扩展手里有 URL 的那种情况，所以 `managed` 下这条命令会直接打开它。
+
+- **连不上时，报错会指出你**没**在走的那条路。** `alternatives()` 按当前模式分支，因为「叫你去做
+  你正在做的事」比不说更糟。`authRequired()` 里的拒绝文案也会按「本地签发是否启用」分支——
+  在 `managed`/`paste` 下，没有 cookie 是设计，不是配置错误；指向一个用户明确要求不要打开的文件
+  是错的。
+
+- **README 开头讲产品，设计长文往后放。** 设计哲学以前是第四节，在首屏、在读者还不知道这东西干
+  什么之前就出现。现在首屏是一句价值主张、一张「同一个会话在两个窗口里」的截图、七条要点；
+  「写盘归 DSH」那篇长文排在 Development 之后。凭据那段挪进了《会话是怎么拿到的》，讲的也不再是
+  一份无法回避的权限，而是三种模式。
+
+- **Marketplace 分类 `Other` → `AI`，关键词扩到人们真的会搜的词**（`deepseek-harness`、`dsh`、
+  `ai-agent`、`coding-agent` 等）。
+
+### 修复
+
+- **README 里的 Marketplace 徽章指向一个 shields.io 从来不曾提供过的命名空间。**
+  `img.shields.io/vs-marketplace/v/…` 从版本闸门落地时就在那儿了，而它渲染出来的是
+  `404 badge not found`——GitHub 上如此，Marketplace 的列表页也如此，因为那一页会把这份 README
+  原样渲染。两枚徽章现在都读 `badgen.net`，它仍然提供真实的 Marketplace 数据。（版本那枚值得
+  盯着看，原因正在于此：它现在显示 `v0.2.0`，而这正是 Marketplace 一直停在的事实。）
+
+  并不存在「换成正确的 shields URL」这个选项。shields 的命名空间是
+  `visual-studio-marketplace`，而它现在返回一张标签写着 *"retired badge"* 的 SVG——这个集成是被
+  撤下，而不是被改名。当初本该抓住这件事的闸门比的是子串，而一张挂掉的徽章能完美匹配任何子串。
+  它现在改为断言主机名、拒绝任何残留的 `img.shields.io/vs-marketplace`，并在 `--online` 下真的
+  去取每一张徽章，一旦 SVG 自称 `not found` 或 `retired` 就判失败。
+
+- **一次成功的停止可能被报成 `signalled`。** `taskkill` 会输给「子进程自己先退出」的竞态，然后
+  报「没有找到进程」——这看着像失败，而 Host 其实已经没了，也就是我们想要的结果。`stop()` 现在会在
+  尝试失败后检查子进程是否还活着，只有它真还活着才报「未能确认」。
+
+- **`envWithAugmentedPath` 用的是**宿主**的 `PATH` 分隔符。** 它收了 `platform` 参数，却在分隔符上
+  忽略它，于是在 Windows 宿主上给 macOS 拼 `PATH` 会拼出一条不可用的单条目。这个问题是被一条
+  「在 Linux 上能过、在这里不可能过」的断言抓出来的——这正是断言存在的理由。`pathAugmentations`
+  和 `desktopInstallCandidates` 出于同样的原因，改用与平台匹配的 `win32`/`posix` 实现来拼接。
+
+- **`adoptLaunchUrl` 不再重复兑换已经兑换过的启动 URL。** 比对的是 URL 而不是 authority：一个
+  **新的** Host 可以占上刚被释放的端口，而那个 authority 上存着的 cookie 属于旧 Host 的密钥——
+  只按 authority 判断，会把「端口复用」变成一个无解的「鉴权失败」。
+
+- **README 把 launch token 说成了「一次性 token」。** 它不是。上游的 `authorizeIndex` 对 `/` 的
+  每一次请求都用 `timingSafeEqual` 把查询里的 token 跟进程密钥比对，所以同一个 URL 可以反复兑换
+  ——这一点在 `dsh-client-connection/lib/index.js` 里确认过，也用 `launch-probe.ts` 兑换两次验证过。
+
+- **一条被新功能证伪的说法删掉了：**「不替你启动任何进程。扩展不 spawn `dsh web`」以前是真的，
+  现在只在默认情况下为真。
+
+### 说明
+
+- 托管启动背后的实测行为，全部来自 Windows x64 上跑 `launch-probe.ts` 打
+  `@deepseek-ai/dsh@0.2.0-rc.2`：冷启动 `npx`（含下载）约 13 秒后 Host 起来、启动 URL 在 stdout
+  上且带 43 字符 token、兑换返回 `303`、裸 `GET /` 返回 `401`、第二次兑换仍返回 `303`、连续采样
+  3 秒子进程都活着并持有端口、`stop()` 之后端口连续 4 秒拒绝连接。
+
+- `dsh` 有「后台启动」这个概念——它提供的 HTML 里会出现 `--dsh-boot-bg`——所以「我们 spawn 的
+  子进程到底是不是持有端口的那个」值得去测而不是假设。答案是它是。如果不是，杀掉子进程会留下一个
+  用户无法解释的 Host 还在跑，而那正是这个扩展要避免制造的那种烂摊子。
+
+- 给读 diff 的人的一条现场笔记：本机全局安装的 `dsh` 是 `0.1.0-rc.6`，比桌面端写下的
+  `{version, refs, records}` 凭据文件格式还老——它会以
+  `the value for "version" in … must be a string` 失败，因为它把那份 YAML 当成扁平的
+  「凭据引用 → 字符串」表来解析。那是上游的版本错位，不是这里的缺陷；而且它恰好就是新增的
+  `exited` 分支要让它变得可读的那种失败：面板把你送去日志，日志里有子进程自己打出的调用栈。
+
+- **自 0.2.1 起也发布到 Open VSX。** Cursor、VSCodium 和 Windsurf 读的是 Open VSX 而不是微软
+  Marketplace，而只存在于其中一边的扩展，对那几个编辑器来说等于不存在。给下一个发版的人一条硬
+  教训：**版本号在 Open VSX 被接受的那一刻就被占住了，哪怕这个版本还处于未激活、取不到的状态。**
+  0.2.2 在上面的徽章修复之前就推了上去，而且始终没有对外可见；同号重发会被拒，带发行者 token 的
+  `DELETE` 返回 `403`。于是 Open VSX 继续服务 0.2.1，徽章修复要跟着下一个版本号才到得了那儿。
+  把 Open VSX 放到**最后**发，等产物不再变动之后——它是唯一一个「号交出去就收不回来」的注册表。
+
 ## [0.2.1] — 2026-10-11
 
 版本定位：**版本号再也没法各自跑偏，撤销也再没机会吃掉你的改动。**

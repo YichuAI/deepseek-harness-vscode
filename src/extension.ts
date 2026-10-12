@@ -18,8 +18,10 @@ import * as vscode from 'vscode'
 import { readFileSync } from 'node:fs'
 import { HarnessClient } from './harness/client.ts'
 import { BrowserSessionAuth, type AuthStore } from './harness/auth.ts'
+import { DEFAULT_LAUNCH_COMMAND, ManagedLauncher, detectDesktopInstall } from './harness/launcher.ts'
 import { AppController, attachmentKindFor } from './app/controller.ts'
 import { buildDiagnosticsReport } from './app/diagnosis.ts'
+import { parseSessionMode, traitsOf, USE_LAUNCH_URL_COMMAND, type SessionMode } from './app/session-mode.ts'
 import { DSH_REVIEW_SCHEME } from './review/virtualDocument.ts'
 import type { PendingAttachmentPayload, WebviewAction } from './view/provider.ts'
 import { HarnessWebviewViewProvider, type UiState } from './view/provider.ts'
@@ -30,7 +32,19 @@ const OUTPUT_CHANNEL = 'DeepSeek Harness'
 /** SecretStorage key holding the browser-session cookie JSON. */
 const SESSION_SECRET_KEY = 'deepseekHarness.browserSession'
 
-export function activate(context: vscode.ExtensionContext): void {
+/**
+ * The Host this extension started, if it started one.
+ *
+ * Module-level because `deactivate()` is a free function that receives no
+ * context, and because reaping the child is the one shutdown duty that cannot be
+ * left to a disposable: a `dispose()` runs synchronously and cannot wait for
+ * `taskkill` (or a signal to a process group) to land, and a Host left listening
+ * on a port after its owner is gone is exactly the mess this extension exists to
+ * avoid creating.
+ */
+let ownedLauncher: ManagedLauncher | undefined
+
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const log = vscode.window.createOutputChannel(OUTPUT_CHANNEL, { log: true })
   context.subscriptions.push(log)
   log.info('DeepSeek Harness Connector activating')
@@ -57,7 +71,7 @@ export function activate(context: vscode.ExtensionContext): void {
     port: cfg.port,
     store: authStore,
     log: (m) => log.info(m),
-    allowLocalMint: cfg.autoSession,
+    allowLocalMint: traitsOf(cfg.sessionMode).allowLocalMint,
   })
 
   const client = new HarnessClient({
@@ -66,6 +80,34 @@ export function activate(context: vscode.ExtensionContext): void {
     auth,
     log: (m) => log.info(m),
   })
+
+  /**
+   * The managed-launch Host, created only if the mode ever asks for one.
+   *
+   * One instance for the whole session, not one per connect: the child *is* the
+   * server, so a per-attempt lifetime would tear down the very thing it just
+   * started. `sessionMode()` is consulted on every connect, so switching the
+   * setting takes effect immediately without rebuilding the controller.
+   */
+  const launcher = new ManagedLauncher()
+  const launcherForMode = (): ManagedLauncher | undefined =>
+    traitsOf(cfg.sessionMode).startsHost ? launcher : undefined
+  ownedLauncher = launcher
+
+  /**
+   * Is the desktop app installed?
+   *
+   * Awaited before the first connect rather than probed in the background.
+   * Whether it is present changes the advice a failed connect gives — "open the
+   * app you already have" versus "here is how to install one" — and losing that
+   * race would show an install button to somebody who already installed it.
+   * Two `access()` calls, so the cost is noise.
+   */
+  const desktopInstall = await detectDesktopInstall()
+  log.info(desktopInstall === undefined
+    ? 'session: no desktop install found'
+    : `session: desktop app found at ${desktopInstall}`)
+  log.info(`session: mode=${cfg.sessionMode} (local mint ${traitsOf(cfg.sessionMode).allowLocalMint ? 'on' : 'off'})`)
 
   // ─── mutable UiState (owned here; controller + provider share via accessor)
   const state: UiState = {
@@ -116,6 +158,22 @@ export function activate(context: vscode.ExtensionContext): void {
     notifyError: (m) => vscode.window.showErrorMessage(`DeepSeek Harness: ${m}`),
     notifyInfo: (m) => vscode.window.showInformationMessage(m),
     autoDiscover: () => cfg.autoDiscover,
+    sessionMode: () => cfg.sessionMode,
+    launcher: launcherForMode,
+    launchCommand: () => cfg.launchCommand,
+    // The same exchange the paste route uses, minus the paste. `adoptLaunchUrl`
+    // checks whether it already holds a session for that authority before
+    // spending the token, which is what makes a reconnect cheap.
+    adoptLaunchUrl: async (url: string) => {
+      const { host, port } = await auth.adoptLaunchUrl(url)
+      client.retarget(host, port)
+      return { host, port }
+    },
+    desktopInstall: () => desktopInstall,
+    platform: process.platform,
+    arch: process.arch,
+    openExternal: async (url: string) => { await vscode.env.openExternal(vscode.Uri.parse(url)) },
+    copyToClipboard: async (text: string) => { await vscode.env.clipboard.writeText(text) },
     openHarnessHome: () => {
       void vscode.window.showInformationMessage(
         'Open the DeepSeek Harness web UI with the URL printed by `dsh web` — '
@@ -172,10 +230,68 @@ export function activate(context: vscode.ExtensionContext): void {
   const clearSessionToken = async (): Promise<void> => {
     await auth.clear()
     client.disconnect()
-    vscode.window.showInformationMessage(
-      'DeepSeek Harness: stored session cleared. Reconnecting will mint a fresh one from $DSH_HOME/.credentials.yaml.',
-    )
+    const how = cfg.sessionMode === 'managed'
+      ? 'Reconnecting will start a Host and take the session it issues.'
+      : cfg.sessionMode === 'paste'
+        ? 'Reconnecting will need a launch URL before it can authenticate — use "DeepSeek Harness: Use Launch URL".'
+        : 'Reconnecting will mint a fresh one from $DSH_HOME/.credentials.yaml.'
+    vscode.window.showInformationMessage('DeepSeek Harness: stored session cleared. ' + how)
     await controller.doConnect()
+  }
+
+  /**
+   * Hand the harness web UI to the browser.
+   *
+   * This used to be a message saying it could not be done: the harness
+   * authenticates its web UI per process, only the token-bearing launch URL
+   * works, and a Host started by somebody else never shows us that URL. A Host
+   * *we* started is a different story — we own its console, so we have the URL —
+   * which is the one case where this command can simply do what it says.
+   */
+  const openWebUi = async (): Promise<void> => {
+    const launched = launcherForMode()?.launchUrl()
+    if (launched !== undefined) {
+      await vscode.env.openExternal(vscode.Uri.parse(launched))
+      return
+    }
+    void vscode.window.showInformationMessage(
+      'Open the web UI with the URL `dsh web` printed to its console — it carries the '
+      + 'per-process token the browser needs. The extension authenticates on its own; set '
+      + 'deepseekHarness.sessionMode to "managed" and it will start the Host itself, which also '
+      + 'lets this command open the web UI for you.',
+    )
+  }
+
+  /**
+   * The `paste` route, as a command.
+   *
+   * This is what `autoSession: false` should always have been: a real
+   * alternative rather than a switch that turns authentication off. Start
+   * `dsh web` (or the desktop app), copy the line it printed, paste it here —
+   * the extension trades the token for a session and connects. Nothing is read
+   * from disk and nothing is started.
+   */
+  const useLaunchUrl = async (): Promise<void> => {
+    const pasted = await vscode.window.showInputBox({
+      title: 'DeepSeek Harness: Use Launch URL',
+      prompt: 'Paste the whole line `dsh web` printed — it carries the per-process token.',
+      placeHolder: 'dsh web: http://127.0.0.1:3080/?token=…',
+      ignoreFocusOut: true,
+    })
+    if (pasted === undefined || pasted.trim() === '') return
+    try {
+      const { host, port } = await auth.adoptLaunchUrl(pasted)
+      client.retarget(host, port)
+      log.info(`auth: adopted a pasted launch URL for ${host}:${String(port)}`)
+      await controller.doConnect()
+    } catch (e) {
+      // The exchange's own messages name the real problem ("that token is valid
+      // only for the current `dsh web` process"), so they are shown verbatim
+      // rather than wrapped in something vaguer.
+      const msg = e instanceof Error ? e.message : String(e)
+      log.error('launch URL rejected: ' + msg)
+      void vscode.window.showErrorMessage('DeepSeek Harness: ' + msg)
+    }
   }
 
   /**
@@ -209,11 +325,13 @@ export function activate(context: vscode.ExtensionContext): void {
       settings: {
         host: cfg.get('host'),
         port: cfg.get('port'),
-        autoSession: cfg.get('autoSession'),
+        sessionMode: cfg.get('sessionMode'),
+        launchCommand: cfg.get('launchCommand'),
         autoDiscover: cfg.get('autoDiscover'),
         autoApproveApprovals: cfg.get('autoApproveApprovals'),
         showSystemMessages: cfg.get('showSystemMessages'),
         dshHome: process.env['DSH_HOME'],
+        desktopInstall: desktopInstall ?? 'not found',
       },
       generatedAt: new Date().toISOString(),
     })
@@ -244,16 +362,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('deepseekHarness.reconnect', wireAction('connect')),
     vscode.commands.registerCommand('deepseekHarness.disconnect', wireAction('disconnect')),
     vscode.commands.registerCommand('deepseekHarness.clearSessionToken', clearSessionToken),
-    vscode.commands.registerCommand('deepseekHarness.openWebUI', () => {
-      // The harness authenticates its web UI per process, so a plain origin
-      // opens nothing useful; only the token-bearing launch URL does. That URL
-      // is on the `dsh web` console, and this extension has no way to guess it.
-      void vscode.window.showInformationMessage(
-        'Open the web UI with the URL `dsh web` printed to its console — it carries the '
-        + 'per-process token the browser needs. The extension itself authenticates on its own, '
-        + 'by minting a session cookie from $DSH_HOME/.credentials.yaml.',
-      )
-    }),
+    vscode.commands.registerCommand(USE_LAUNCH_URL_COMMAND, useLaunchUrl),
+    vscode.commands.registerCommand('deepseekHarness.openWebUI', openWebUi),
     vscode.commands.registerCommand('deepseekHarness.showLogs', () => log.show()),
     vscode.commands.registerCommand('deepseekHarness.diagnostics', diagnostics),
     vscode.commands.registerCommand('deepseekHarness.newSession', wireAction('newSession')),
@@ -364,38 +474,64 @@ export function activate(context: vscode.ExtensionContext): void {
       // Turning it on cannot hurt an already-connected client; turning it off
       // only stops future scans, so nothing to re-run here.
     }
-    if (next.autoSession !== cfg.autoSession) {
-      cfg.autoSession = next.autoSession
-      auth.setAllowLocalMint(next.autoSession)
-      // Re-evaluate connectivity: enabling may mint a cookie now; disabling
-      // leaves us without one, and there is no paste-a-URL fallback any more —
-      // the connect failure says so.
-      if (auth.cookieHeader() === undefined) {
-        client.disconnect()
-        void controller.doConnect()
-      }
+    if (next.sessionMode !== cfg.sessionMode) {
+      cfg.sessionMode = next.sessionMode
+      auth.setAllowLocalMint(traitsOf(next.sessionMode).allowLocalMint)
+      // A mode change moves where a session can come from, so the one we are
+      // holding is no evidence about the new mode: "credentials" may mint where
+      // "paste" could not, and "managed" may start a Host nothing else would.
+      // Reconnecting re-derives instead of leaving the panel on a session that
+      // no longer matches the setting the user just changed.
+      void controller.doConnect()
+    }
+    if (next.launchCommand !== cfg.launchCommand) {
+      cfg.launchCommand = next.launchCommand
+      // Only ever read at spawn time. A Host already running is left alone —
+      // killing it because a setting changed would be a surprising way to lose
+      // a session mid-conversation.
     }
   }))
 
-  // Auto-connect on activation. If no session can be minted the connect fails
-  // with an actionable message pointing at $DSH_HOME/.credentials.yaml and the
-  // `autoSession` setting.
+  // Auto-connect on activation. A failure here is classified into one specific
+  // next action (see `app/diagnosis.ts`), which is also where the install
+  // guidance for a machine that has no harness at all comes from.
   void controller.doConnect()
 }
 
-export function deactivate(): void {
-  // Disposables owned by context.subscriptions; nothing to do here.
+export async function deactivate(): Promise<void> {
+  // Disposables owned by context.subscriptions; the one thing they cannot do is
+  // wait. Reaping the Host we started is worth awaiting: `taskkill` and a signal
+  // to a process group are both asynchronous, and a Host that outlives its owner
+  // keeps holding a port the user cannot account for.
+  try {
+    await ownedLauncher?.stop()
+  } catch {
+    // `stop()` is best-effort by design and reports its own outcome; there is
+    // nothing left to tell anyone once the extension host is going away.
+  }
+  ownedLauncher = undefined
 }
 
-function readConfig(): { host: string; port: number; showSystemMessages: boolean; autoSession: boolean; autoApproveApprovals: boolean; autoDiscover: boolean } {
+function readConfig(): {
+  host: string
+  port: number
+  showSystemMessages: boolean
+  sessionMode: SessionMode
+  launchCommand: string
+  autoApproveApprovals: boolean
+  autoDiscover: boolean
+} {
   const cfg = vscode.workspace.getConfiguration(SECTION)
   const host = cfg.get<string>('host') ?? '127.0.0.1'
   const port = cfg.get<number>('port') ?? 3080
   const showSystemMessages = cfg.get<boolean>('showSystemMessages') ?? false
-  const autoSession = cfg.get<boolean>('autoSession') ?? true
+  // An unknown value falls back to the default rather than throwing: settings
+  // are hand-editable JSON and a typo should not stop the extension starting.
+  const sessionMode = parseSessionMode(cfg.get('sessionMode'))
+  const launchCommand = (cfg.get<string>('launchCommand') ?? '').trim() || DEFAULT_LAUNCH_COMMAND
   const autoApproveApprovals = cfg.get<boolean>('autoApproveApprovals') ?? false
   const autoDiscover = cfg.get<boolean>('autoDiscover') ?? true
-  return { host, port, showSystemMessages, autoSession, autoApproveApprovals, autoDiscover }
+  return { host, port, showSystemMessages, sessionMode, launchCommand, autoApproveApprovals, autoDiscover }
 }
 
 /**

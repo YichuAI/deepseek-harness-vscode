@@ -46,7 +46,8 @@
  *             payload: { args: { clientId, eventId, outcome } } }
  *
  * Every `/api/*` call and the mux upgrade require the browser-session cookie
- * (401 without one). The autoSession cookie machinery mints it locally.
+ * (401 without one). The `credentials` session mode mints it locally; the other
+ * two modes take a cookie issued by a Host instead.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -387,23 +388,45 @@ export class HarnessClient implements Disposable {
     // rejection when we never presented one made `describeGap()` report "the
     // running harness rejected the stored cookie — the signing secret was
     // almost certainly regenerated", which sends the user after the wrong
-    // problem. With no cookie at all the real cause is either the `autoSession`
-    // switch or a missing `$DSH_HOME/.credentials.yaml`, and the message below
-    // already names both.
+    // problem. With no cookie at all the real cause is either the session mode
+    // or a missing `$DSH_HOME/.credentials.yaml`, and the message below names
+    // whichever of those is actually reachable from here.
     if (this.opts.auth.cookieHeader() !== undefined) this.opts.auth.noteRejected()
     const gap = this.opts.auth.describeGap()
     const mintGap = this.opts.auth.describeMintGap()
+    const minting = this.opts.auth.localMintEnabled()
     return new HarnessAuthRequiredError(
       `DeepSeek Harness requires a browser session before it answers /api/* (${gap}). `
-      + 'The extension mints that session from $DSH_HOME/.credentials.yaml on every connect — '
-      + 'make sure `dsh web` runs under the same user that owns that file'
-      + (this.opts.auth.sessionOrigin() === undefined && mintGap !== undefined ? ` (local mint said: ${mintGap})` : '')
-      + ', or turn the "autoSession" setting back on if it was disabled.',
+      + (minting
+        ? 'This build mints that session from $DSH_HOME/.credentials.yaml on every connect — make sure '
+          + '`dsh web` runs under the same user that owns that file'
+          + (this.opts.auth.sessionOrigin() === undefined && mintGap !== undefined ? ` (local mint said: ${mintGap})` : '')
+          + '.'
+        // Naming the setting that is off is only half an answer; the other half
+        // is that two working alternatives exist, and one of them does not
+        // involve reading the credential file at all.
+        : 'Local minting is off, so the session has to come from a Host: set deepseekHarness.sessionMode '
+          + 'to "managed" and this extension will start one, run "DeepSeek Harness: Use Launch URL" with '
+          + 'the line a `dsh web` you started printed, or set the mode to "credentials" to mint one from '
+          + '$DSH_HOME/.credentials.yaml.'),
     )
   }
 
   // ─── unary RPCs (the only methods business code may call) ───────────────────
   describe(): HarnessInfo { return this.info ?? { home: '' } }
+
+  /**
+   * Why the local mint failed, when it did — or `undefined` if it never ran or
+   * succeeded.
+   *
+   * Exposed so the failure classifier can tell "nothing is listening" apart from
+   * "nothing is listening *and* there is no credential to authenticate with".
+   * Those need different advice, and the second one used to be indistinguishable
+   * from the first, which sent people to start a Host they had already started.
+   */
+  mintGap(): string | undefined {
+    return this.opts.auth.describeMintGap()
+  }
 
   /** Workspace list — derived from `session/list` projections; see listSessions.
    *

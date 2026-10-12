@@ -61,7 +61,11 @@ import {
   parseProcNetListeners, parseWebserverPort, probeHost,
 } from '../src/harness/discovery.ts'
 import { findHarnessWorkspace } from '../src/workspace/binding.ts'
-import { buildDiagnosticsReport, classifyConnectFailure, redact } from '../src/app/diagnosis.ts'
+import { buildDiagnosticsReport, classifyConnectFailure, installGuidanceFor, redact } from '../src/app/diagnosis.ts'
+import { SESSION_MODES, parseSessionMode, traitsOf } from '../src/app/session-mode.ts'
+import {
+  desktopInstallCandidates, envWithAugmentedPath, findLaunchUrl, redactLaunchUrl,
+} from '../src/harness/launcher.ts'
 import { ReviewStore } from '../src/review/store.ts'
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
@@ -1406,6 +1410,9 @@ async function main(): Promise<void> {
       notifyError: () => {},
       notifyInfo: () => {},
       autoDiscover: () => false,
+      // The default mode, so every existing assertion about connect behaviour
+      // keeps testing the path it was written for.
+      sessionMode: () => 'credentials' as const,
       openHarnessHome: () => {},
       moveToSecondarySideBar: async () => {},
       log: { info: () => {}, error: () => {} },
@@ -1472,14 +1479,17 @@ async function main(): Promise<void> {
     let refused = ''
     try { await gatedClient.connect() } catch (e) { refused = (e as Error).message }
     check('connect without a session is refused', /browser session/i.test(refused), refused.slice(0, 90))
-    // The paste-a-launch-URL command is gone: the only path is the local mint
-    // from $DSH_HOME/.credentials.yaml, so that is what the refusal must point
-    // at. A regression that reintroduces the command name here would send the
-    // user hunting for a menu item that no longer exists.
-    check('the refusal points at the local credential store',
-      /\.credentials\.yaml/.test(refused), refused.slice(0, 160))
-    check('the refusal names the autoSession setting as the on/off switch',
-      /autoSession/.test(refused))
+    // This auth object passes no `allowLocalMint`, i.e. the conservative
+    // default — which is also what `sessionMode: "managed"` and `"paste"`
+    // produce. The refusal must not send somebody who deliberately declined to
+    // hand over `$DSH_HOME/.credentials.yaml` to go and read it; it has to name
+    // the two routes that do not touch the file.
+    check('with minting off the refusal names the three-way setting',
+      /sessionMode/.test(refused), refused.slice(0, 160))
+    check('...and the managed mode, which reads no credential file',
+      /managed/.test(refused))
+    check('...and the paste command, which reads nothing at all',
+      /Use Launch URL/.test(refused))
     check('the refusal no longer names the removed paste-URL command',
       !/Set Session Token from Launch URL/.test(refused))
 
@@ -1604,6 +1614,25 @@ async function main(): Promise<void> {
       check('a store without the browser-session record cannot mint', !minted && !bareAuth.isReady())
       check('the failure names the missing record', /client-connection\/browser-session/.test(bareAuth.describeMintGap() ?? ''), bareAuth.describeMintGap()?.slice(0, 90))
       check('no cookie is persisted after a failed mint', bareStore === undefined)
+
+      // The refusal those two layers produce *together*, with minting on. The
+      // message has to send the reader to the file the mint just failed to read,
+      // and quote what it said — otherwise "authentication failed" is all they
+      // get, which is the shrug this whole module exists to replace.
+      const mintingAuth = new BrowserSessionAuth({
+        host: '127.0.0.1', port: gatedPort,
+        store: { load: async () => undefined, save: async () => {} }, log: () => {}, allowLocalMint: true,
+      })
+      const mintingClient = new HarnessClient({ host: '127.0.0.1', port: gatedPort, auth: mintingAuth, log: () => {} })
+      let mintRefusal = ''
+      try { await mintingClient.connect() } catch (e) { mintRefusal = (e as Error).message }
+      check('minting on: the refusal points at the file the mint reads',
+        /\.credentials\.yaml/.test(mintRefusal), mintRefusal.slice(0, 160))
+      check('minting on: ...and quotes the gap the mint reported',
+        /client-connection\/browser-session/.test(mintRefusal))
+      check('minting on: ...and does not offer a mode change for a setting that is already right',
+        !/sessionMode/.test(mintRefusal))
+      mintingClient.dispose()
     } finally {
       rmSync(emptyHome, { recursive: true, force: true })
     }
@@ -2025,6 +2054,9 @@ async function main(): Promise<void> {
       notifyError: () => {},
       notifyInfo: () => {},
       autoDiscover: () => false,
+      // The default mode, so every existing assertion about connect behaviour
+      // keeps testing the path it was written for.
+      sessionMode: () => 'credentials' as const,
       openHarnessHome: () => {},
       moveToSecondarySideBar: async () => {},
       log: { info: () => {}, error: () => {} },
@@ -2308,6 +2340,9 @@ async function main(): Promise<void> {
       notifyError: () => {},
       notifyInfo: () => {},
       autoDiscover: () => false,
+      // The default mode, so every existing assertion about connect behaviour
+      // keeps testing the path it was written for.
+      sessionMode: () => 'credentials' as const,
       openHarnessHome: () => {},
       moveToSecondarySideBar: async () => {},
       log: { info: () => {}, error: () => {} },
@@ -2565,6 +2600,126 @@ async function main(): Promise<void> {
     check('a discovered port is named in the fix rather than scanned for again', moved.fix.includes('3081'))
   }
 
+  // ─── O2. where a session comes from, and what to do when there is none ─────
+  //
+  // `sessionMode` replaced a boolean that could only ever turn authentication
+  // *off*. What is pinned here is the vocabulary and the advice: the mode
+  // semantics, the install route per platform, and the classifier's new inputs.
+  //
+  // The launcher's process handling is deliberately absent — it needs a real
+  // machine, and `scripts/launch-probe.ts` is where it is observed instead of
+  // asserted. These are the parts where being wrong is silent.
+  {
+    eq('the three modes round-trip', SESSION_MODES.map((m) => parseSessionMode(m)), ['credentials', 'managed', 'paste'])
+    eq('an unknown mode falls back to the default rather than throwing',
+      parseSessionMode('nonsense'), 'credentials')
+    eq('...and so does an absent one', parseSessionMode(undefined), 'credentials')
+    eq('...and so does a non-string one', parseSessionMode(3), 'credentials')
+
+    const creds = traitsOf('credentials')
+    check('credentials is the only mode that reads the credential file',
+      creds.allowLocalMint && !creds.startsHost && !creds.expectsPaste)
+    // The whole reason `managed` exists: if it fell back to reading
+    // `$DSH_HOME/.credentials.yaml` anyway, choosing it would buy nothing and
+    // the trust objection would survive untouched.
+    const managed = traitsOf('managed')
+    check('managed starts a Host and still never reads the credential file',
+      managed.startsHost && !managed.allowLocalMint && !managed.expectsPaste)
+    const pasted = traitsOf('paste')
+    check('paste neither reads nor starts anything',
+      pasted.expectsPaste && !pasted.allowLocalMint && !pasted.startsHost)
+
+    // Upstream ships a desktop build for Windows and Apple Silicon, and nothing
+    // for Linux or Intel Macs. Getting this wrong sends somebody to a download
+    // page with nothing on it for them.
+    eq('Windows gets the desktop route', installGuidanceFor('win32', 'x64').route, 'desktop')
+    eq('Apple Silicon gets the desktop route', installGuidanceFor('darwin', 'arm64').route, 'desktop')
+    eq('an Intel Mac falls through to the npm package', installGuidanceFor('darwin', 'x64').route, 'npx')
+    eq('Linux gets the source-build route', installGuidanceFor('linux', 'x64').route, 'source')
+    check('the desktop route opens a stable page, never a version-pinned installer',
+      (installGuidanceFor('win32', 'x64').url ?? '').endsWith('/dsh-desk/'))
+    // A link to `…/deepseek-harness-<build>-x64.exe` would rot within weeks: the
+    // build number is in the filename and there is no manifest to resolve it.
+    check('...and carries no command, because there is nothing to run locally',
+      installGuidanceFor('win32', 'x64').command === undefined)
+    check('the Linux route copies commands instead of opening a page',
+      installGuidanceFor('linux', 'x64').command?.includes('npx @deepseek-ai/dsh web') === true
+      && installGuidanceFor('linux', 'x64').url === undefined)
+
+    // The button is a claim about somebody's machine, so these are the
+    // expensive assertions: it must not appear when nothing is actually missing.
+    const bare = { host: '127.0.0.1', port: 3080, platform: 'win32', arch: 'x64' }
+    check('nothing listening offers exactly one install route',
+      classifyConnectFailure('fetch failed', bare).install?.route === 'desktop')
+    check('the install button is withheld when the desktop app is already installed',
+      classifyConnectFailure('fetch failed',
+        { ...bare, desktopInstalled: 'C:\\Program Files\\DeepSeek Harness.exe' }).install === undefined)
+    check('...and that fix says to open it rather than to install one',
+      /desktop app is installed/.test(classifyConnectFailure('fetch failed',
+        { ...bare, desktopInstalled: 'C:\\x\\DeepSeek Harness.exe' }).fix))
+    check('with no platform known there is no install guidance to give',
+      classifyConnectFailure('fetch failed', { host: '127.0.0.1', port: 3080 }).install === undefined)
+    check('a managed launch that exited offers no install button either',
+      classifyConnectFailure('fetch failed', { ...bare, managedAttempted: 'exited' }).install === undefined)
+    check('...and explains the exit instead of blaming the install',
+      /already taken/.test(classifyConnectFailure('fetch failed', { ...bare, managedAttempted: 'exited' }).fix))
+    check('a missing `dsh` command keeps the button and names the cause', (() => {
+      const h = classifyConnectFailure('fetch failed', { ...bare, managedAttempted: 'not-found' })
+      return h.install !== undefined && /not on PATH/.test(h.title)
+    })())
+    check('a timeout sends the reader to the log, not to a reinstall',
+      classifyConnectFailure('fetch failed', { ...bare, managedAttempted: 'timeout' }).install === undefined)
+    check('an unreadable credential store is reported alongside the dead socket', (() => {
+      const h = classifyConnectFailure('fetch failed',
+        { ...bare, credentialsUnavailable: true, sessionMode: 'credentials' })
+      return /credentials\.yaml could not be read/.test(h.fix)
+    })())
+    // Advice that names the mode the user is already in is worse than no advice.
+    check('the fallback names a route the reader is not already on', (() => {
+      const h = classifyConnectFailure('fetch failed', { ...bare, sessionMode: 'paste' })
+      return /Use Launch URL/.test(h.fix) && !/to "paste"/.test(h.fix)
+    })())
+  }
+
+  // ─── O3. the launcher's pure parts ─────────────────────────────────────────
+  //
+  // The launch URL *is* a credential, so the two guarantee-shaped functions are
+  // what keep it out of a log line — and the PATH repair below is the whole
+  // distance between "it works in my terminal" and "the extension cannot find
+  // node", because a window launched from Finder or the Start menu inherits a
+  // minimal PATH.
+  {
+    const token = 'A'.repeat(43)
+    const line = `dsh web: http://127.0.0.1:3080/?token=${token}`
+    eq('a launch URL is found wherever it sits in the line', findLaunchUrl(line)?.port, 3080)
+    eq('...including behind a prefix, which is how stderr arrives',
+      findLaunchUrl('  [dsh] ' + line)?.url, `http://127.0.0.1:3080/?token=${token}`)
+    eq('a non-loopback URL is not one we could use', findLaunchUrl('http://10.0.0.5:3080/?token=x'), undefined)
+    eq('a URL with no token is not a launch URL', findLaunchUrl('http://127.0.0.1:3080/'), undefined)
+    eq('an omitted port means the default', findLaunchUrl(`http://127.0.0.1/?token=${token}`)?.port, 80)
+    check('the token never survives redaction',
+      !redactLaunchUrl(line).includes(token) && redactLaunchUrl(line).includes('token=<redacted>'))
+
+    const darwin = envWithAugmentedPath('darwin', { PATH: '/usr/bin:/bin' })
+    check('macOS PATH gains the homebrew and local prefixes',
+      (darwin['PATH'] ?? '').includes('/opt/homebrew/bin') && (darwin['PATH'] ?? '').includes('/usr/local/bin'))
+    check('...and keeps what was already on it', (darwin['PATH'] ?? '').startsWith('/usr/bin:/bin'))
+    check('...without repeating an entry that is already there', (() => {
+      const parts = (envWithAugmentedPath('darwin', { PATH: '/usr/bin:/opt/homebrew/bin' })['PATH'] ?? '').split(':')
+      return parts.filter((p) => p === '/opt/homebrew/bin').length === 1
+    })())
+    check('Windows de-duplicates case-insensitively, because its PATH is',
+      (() => {
+        const parts = (envWithAugmentedPath('win32', { PATH: 'C:\\WINDOWS;C:\\Program Files\\nodejs' })['PATH'] ?? '')
+          .split(';').map((p) => p.toLowerCase())
+        return parts.filter((p) => p === 'c:\\program files\\nodejs').length === 1
+      })())
+    // Linux has no desktop package at all, and offering a path that never exists
+    // would make the "is it installed?" answer permanently wrong.
+    eq('a desktop install path is only offered where a desktop build exists',
+      desktopInstallCandidates('linux'), [])
+  }
+
   {
     // The document a user is asked to attach to a bug report. It has to be worth
     // attaching and safe to attach, and it cannot be both by accident.
@@ -2577,7 +2732,7 @@ async function main(): Promise<void> {
       port: 3080,
       connection: 'error',
       capabilities: { 'session/list': true, 'session/page': true, 'goals/list': false, 'schedule/list': false },
-      settings: { host: '127.0.0.1', port: 3080, autoSession: true },
+      settings: { host: '127.0.0.1', port: 3080, sessionMode: 'credentials' },
       generatedAt: '2026-10-11T00:00:00.000Z',
     }
 

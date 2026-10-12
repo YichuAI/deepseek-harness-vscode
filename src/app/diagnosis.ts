@@ -15,6 +15,8 @@
  * can be asserted directly instead of inferred from a rendered string.
  */
 
+import type { SessionMode } from './session-mode.ts'
+
 export type ConnectionFailureKind =
   /** Nothing is listening where we looked. */
   | 'runtime-not-running'
@@ -37,13 +39,139 @@ export interface ConnectionHint {
   fix: string
   /** The repair, when one exists as a command. */
   repair?: { command: string; label: string }
+  /**
+   * How to get the thing that is missing, when that is the answer.
+   *
+   * Only ever set on `runtime-not-running`, and only when nothing is installed
+   * yet. The panel renders exactly one button from it, and only while the
+   * connection is in the failed state — an extension that offers to install its
+   * own host while the host is happily running is just noise.
+   */
+  install?: InstallGuidance
 }
+
+// ─── install guidance ───────────────────────────────────────────────────────
+
+/**
+ * Which upstream route this platform should be told about.
+ *
+ * Windows and macOS have a desktop build; Linux does not. That is not a
+ * preference, it is what upstream ships, and saying so once here beats
+ * rediscovering it in every call site.
+ */
+export type InstallRoute = 'desktop' | 'npx' | 'source'
+
+export interface InstallGuidance {
+  route: InstallRoute
+  /** The one button's text. */
+  label: string
+  /** What pressing it does, in one line. */
+  detail: string
+  /** Opened by the button. Desktop route only. */
+  url?: string
+  /** Copied to the clipboard by the button. The other two routes. */
+  command?: string
+}
+
+/**
+ * Stable entry points only.
+ *
+ * The desktop installer itself is version-bearing
+ * (`…/dsh-desk/bin/win-x64/deepseek-harness-<build>-x64.exe`) and there is no
+ * `latest.yml` to resolve the build through, so a direct link would rot within
+ * weeks. Pointing at the page instead costs one click and never goes stale.
+ */
+export const DESKTOP_DOWNLOAD_URL = 'https://download.deepseek.com/dsh-desk/'
+export const SOURCE_REPO_URL = 'https://github.com/deepseek-ai/deepseek-harness'
+
+const NPX_COMMAND = 'npx @deepseek-ai/dsh web'
+const SOURCE_COMMAND =
+  'git clone https://github.com/deepseek-ai/deepseek-harness.git && ' +
+  'cd deepseek-harness && pnpm install && pnpm run build && pnpm dsh web'
+
+/**
+ * Pick the route for a platform. Pure, so the test can walk every platform.
+ *
+ * `arch` matters on one point only: the desktop build is Apple Silicon, so an
+ * Intel Mac has to fall through to the npm package.
+ */
+export function installGuidanceFor(platform: string, arch: string): InstallGuidance {
+  if (platform === 'win32') {
+    return {
+      route: 'desktop',
+      label: 'Download DeepSeek Harness',
+      detail: 'The desktop app starts a Host for you and adds the `dsh` command to your PATH.',
+      url: DESKTOP_DOWNLOAD_URL,
+    }
+  }
+  if (platform === 'darwin') {
+    if (arch === 'arm64') {
+      return {
+        route: 'desktop',
+        label: 'Download DeepSeek Harness',
+        detail: 'Apple Silicon build. It starts a Host for you and installs `dsh` to /usr/local/bin.',
+        url: DESKTOP_DOWNLOAD_URL,
+      }
+    }
+    return {
+      route: 'npx',
+      label: 'Copy command',
+      detail: 'Upstream ships no Intel-Mac desktop build. The npm package runs the same Host.',
+      command: NPX_COMMAND,
+    }
+  }
+  return {
+    route: 'source',
+    label: 'Copy setup commands',
+    detail:
+      'Upstream ships no desktop build for Linux. Source build is the supported route; ' +
+      'the npm package is the shortcut when a prebuilt binary covers your CPU.',
+    command: `# build from source\n${SOURCE_COMMAND}\n\n# or use the prebuilt web package\n${NPX_COMMAND}`,
+  }
+}
+
+/** What a managed-launch attempt ended in, when one was made. */
+export type ManagedLaunchOutcome = 'not-found' | 'timeout' | 'exited' | 'refused'
 
 export interface ConnectFailureContext {
   host: string
   port: number
   /** Set when discovery found a Host on a different loopback port. */
   discoveredPort?: number
+  /** `process.platform`; omit to get no install guidance. */
+  platform?: string
+  /** `process.arch`. Only consulted on macOS. */
+  arch?: string
+  /**
+   * Set when `$DSH_HOME/.credentials.yaml` could not be read, so local minting
+   * was never on the table.
+   */
+  credentialsUnavailable?: boolean
+  /** Set when the desktop app was found on disk. */
+  desktopInstalled?: string
+  /** Set when managed launch ran and did not produce a launch URL. */
+  managedAttempted?: ManagedLaunchOutcome
+  /** The active `deepseekHarness.sessionMode`, when known. */
+  sessionMode?: SessionMode
+}
+
+/**
+ * Name the routes the user is *not* already on.
+ *
+ * Telling somebody to do the thing they are already doing is the most annoying
+ * possible failure message, so the advice is always about the alternatives.
+ */
+function alternatives(mode: SessionMode | undefined): string {
+  switch (mode) {
+    case 'credentials':
+      return 'Or set deepseekHarness.sessionMode to "managed" (this extension starts a Host and takes its launch URL) or "paste" (you start it and hand over the URL) — neither one reads $DSH_HOME/.credentials.yaml.'
+    case 'managed':
+      return 'Or switch deepseekHarness.sessionMode to "credentials" to mint a session from $DSH_HOME/.credentials.yaml, or run "DeepSeek Harness: Use Launch URL" after starting the Host yourself.'
+    case 'paste':
+      return 'Or set deepseekHarness.sessionMode to "managed" so this extension starts a Host for you, or to "credentials" to mint a session from $DSH_HOME/.credentials.yaml.'
+    default:
+      return 'Or set deepseekHarness.sessionMode: "managed" starts the Host for you, "credentials" mints a session from $DSH_HOME/.credentials.yaml, and "paste" takes a launch URL you copy yourself.'
+  }
 }
 
 /**
@@ -70,6 +198,13 @@ export function classifyConnectFailure(message: string, ctx: ConnectFailureConte
   const kind = RULES.find((r) => r.re.test(message))?.kind ?? 'unknown'
   const where = `${ctx.host}:${String(ctx.port)}`
   const detail = message.trim()
+  // Offered only when something is genuinely absent: no desktop app on disk.
+  // The three `managedAttempted` branches below further narrow it to the one
+  // outcome where the command itself was missing.
+  const install =
+    ctx.platform !== undefined && ctx.desktopInstalled === undefined
+      ? installGuidanceFor(ctx.platform, ctx.arch ?? '')
+      : undefined
 
   switch (kind) {
     case 'auth-failed':
@@ -77,7 +212,12 @@ export function classifyConnectFailure(message: string, ctx: ConnectFailureConte
         kind,
         title: 'Authentication failed',
         detail,
-        fix: `The Host at ${where} refused the session cookie. Run "dsh web" once in this harness home so $DSH_HOME/.credentials.yaml exists, and check that deepseekHarness.autoSession is on. Running Diagnostics shows which file was looked for.`,
+        fix:
+          `The Host at ${where} refused the session cookie. ` +
+          (ctx.sessionMode === 'credentials'
+            ? 'In "credentials" mode the cookie is minted from $DSH_HOME/.credentials.yaml, so either that file moved, the signing secret in it was regenerated, or the Host is running as a different user.'
+            : `Currently in "${String(ctx.sessionMode ?? 'credentials')}" mode.`) +
+          ` ${alternatives(ctx.sessionMode)} Running Diagnostics shows which file was looked for.`,
         repair: { command: 'deepseekHarness.diagnostics', label: 'Diagnostics' },
       }
 
@@ -99,21 +239,87 @@ export function classifyConnectFailure(message: string, ctx: ConnectFailureConte
         repair: { command: 'deepseekHarness.diagnostics', label: 'Diagnostics' },
       }
 
-    case 'runtime-not-running':
+    case 'runtime-not-running': {
+      if (ctx.discoveredPort !== undefined) {
+        return {
+          kind,
+          title: 'Harness is not running',
+          detail,
+          fix: `Nothing is listening on ${where}. A Host was found on port ${String(ctx.discoveredPort)} instead — reconnect to use it.`,
+          repair: { command: 'deepseekHarness.reconnect', label: 'Reconnect' },
+        }
+      }
+
+      // A desktop install changes the answer completely, and it is the one case
+      // where telling the user to install something would be an insult.
+      if (ctx.desktopInstalled !== undefined) {
+        return {
+          kind,
+          title: 'Harness is not running',
+          detail: `${detail}\n(desktop app found at ${ctx.desktopInstalled})`,
+          fix: `Nothing is listening on ${where}, but the desktop app is installed. Open it — it starts a Host on a loopback port and prints the URL — then connect again. If it is already open, pick "管理 dsh 命令…" from its menu to register the command.`,
+          repair: { command: 'deepseekHarness.connect', label: 'Retry' },
+        }
+      }
+
+      // Managed launch was tried and failed. Each ending has its own cause, and
+      // only one of them means "you do not have this installed yet".
+      if (ctx.managedAttempted !== undefined) {
+        switch (ctx.managedAttempted) {
+          case 'not-found':
+            return {
+              kind,
+              title: '`dsh` is not on PATH',
+              detail,
+              fix: `Managed launch could not find a \`dsh\` command to run. Install the route below, then reconnect. ${alternatives(ctx.sessionMode)}`,
+              repair: { command: 'deepseekHarness.connect', label: 'Retry' },
+              ...(install !== undefined ? { install } : {}),
+            }
+          case 'timeout':
+            return {
+              kind,
+              title: 'Harness started but never printed a URL',
+              detail,
+              fix: 'A `dsh` command did run, but no launch URL appeared within 120 seconds. Open the DeepSeek Harness log to see what it printed. If it is waiting on first-run setup, finish that in a terminal once.',
+              repair: { command: 'deepseekHarness.diagnostics', label: 'Diagnostics' },
+            }
+          case 'exited':
+            return {
+              kind,
+              title: 'Harness exited immediately',
+              detail,
+              fix: `The command exited before printing a launch URL — usually because port ${String(ctx.port)} is already taken by something else. Check the log for its last lines, or run it in a terminal once to see the error in full.`,
+              repair: { command: 'deepseekHarness.diagnostics', label: 'Diagnostics' },
+            }
+          case 'refused':
+            return {
+              kind,
+              title: 'Launch URL was printed, nothing accepted it',
+              detail,
+              fix: 'A launch URL was printed but no connection was accepted on it. Something is likely intercepting loopback traffic — this machine has a proxy configured. See the Diagnostics report for what was tried.',
+              repair: { command: 'deepseekHarness.diagnostics', label: 'Diagnostics' },
+            }
+        }
+      }
+
+      // Nothing was attempted: managed launch is off, which is the default.
+      const credentials = ctx.credentialsUnavailable === true
+        ? ' $DSH_HOME/.credentials.yaml could not be read either, so there is no stored session to fall back on.'
+        : ''
+      const paste = ctx.sessionMode === 'paste'
+        ? ' This is "paste" mode: start the Host yourself and then run "DeepSeek Harness: Use Launch URL".'
+        : ''
       return {
         kind,
         title: 'Harness is not running',
         detail,
-        ...(ctx.discoveredPort !== undefined
-          ? {
-              fix: `Nothing is listening on ${where}. A Host was found on port ${String(ctx.discoveredPort)} instead — reconnect to use it.`,
-              repair: { command: 'deepseekHarness.reconnect', label: 'Reconnect' },
-            }
-          : {
-              fix: 'Nothing is listening on ' + where + '. This extension never starts the Host for you: run "dsh web" in a terminal (or open the desktop app) and connect again. If it is already running, check deepseekHarness.port.',
-              repair: { command: 'deepseekHarness.connect', label: 'Retry' },
-            }),
+        fix:
+          `Nothing is listening on ${where}.${credentials}${paste} ` +
+          `Open the desktop app, or run "dsh web" in a terminal. ${alternatives(ctx.sessionMode)}`,
+        repair: { command: 'deepseekHarness.connect', label: 'Retry' },
+        ...(install !== undefined ? { install } : {}),
       }
+    }
 
     case 'unknown':
       return {
@@ -226,6 +432,19 @@ export function buildDiagnosticsReport(input: DiagnosticsInput): string {
     }
     lines.push(input.hint.fix)
     lines.push('')
+    if (input.hint.install) {
+      lines.push(`**Get started** — ${input.hint.install.detail}`)
+      lines.push('')
+      if (input.hint.install.command) {
+        lines.push('```sh')
+        lines.push(input.hint.install.command)
+        lines.push('```')
+        lines.push('')
+      } else if (input.hint.install.url) {
+        lines.push(input.hint.install.url)
+        lines.push('')
+      }
+    }
   } else if (input.lastError) {
     lines.push('## Last error')
     lines.push('')

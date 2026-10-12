@@ -138,6 +138,16 @@ export type WebviewAction =
    * (up to 300 truncated frames) is worth riding every state push.
    */
   | { type: 'inspectorToggle'; open: boolean }
+  /**
+   * The one install affordance, and it is only rendered while the panel is in
+   * the failed state.
+   *
+   * Carries no payload on purpose: which route to take, and therefore whether
+   * this opens a page or copies a command, is decided extension-side from the
+   * same `ConnectionHint` that produced the button. A webview-supplied URL or
+   * command would be an injection surface bought for nothing.
+   */
+  | { type: 'install' }
   // ─── `@` completion (host-served fileReferences/list) ──────
   | { type: 'refsQuery'; query: string }
   // ─── composer attachments (images ride the prompt; files are staged) ──

@@ -5,6 +5,170 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),  
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] — 2026-10-12
+
+Tagline: **it no longer has to read a file full of your API keys, and `autoSession: false` finally means something.**
+Tagline (ZH): **它不必再读那个装满你 API key 的文件了，而 `autoSession: false` 也终于有了实际含义。**
+
+### Added
+
+- **Managed launch — opt-in, and the extension starts `dsh web` itself.** Until now the only
+  way to authenticate was to read `$DSH_HOME/.credentials.yaml`, which also holds the user's
+  model API keys. That was the single largest reason not to install this plugin, and it was a
+  trade made for a real reason: minting the cookie locally costs no paste, and the alternative
+  — the sanctioned per-process launch-token exchange — needs a line that only exists on the
+  console of a process nobody controls.
+
+  `deepseekHarness.sessionMode: "managed"` removes the trade entirely. The extension runs
+  `deepseekHarness.launchCommand` (`dsh web --port 0` by default), captures the launch URL it
+  prints, and redeems that token. Owning the process is what makes this possible: its stdout
+  is ours, so there is nothing to paste and no credential file to read. The Host it started is
+  stopped on `deactivate()`, which is why `deactivate` is now async.
+
+  Discovery always runs first, so an already-running Host — the desktop app's, most likely —
+  is adopted rather than duplicated.
+
+- **`DeepSeek Harness: Use Launch URL`.** The `paste` route, as a command: paste the
+  `dsh web: http://…` line and the extension trades the token for a session. This is what
+  `autoSession: false` should always have been.
+
+- **Install guidance, and it appears only on a failed connection.** `classifyConnectFailure`
+  gained five inputs (`platform`, `arch`, `credentialsUnavailable`, `desktopInstalled`,
+  `managedAttempted`) and now returns at most one `install` route. Windows and macOS get a
+  link to the download page; Linux gets the build commands to copy, because upstream ships no
+  desktop build for it. The panel renders one button, only while the connection is in the
+  `error` state, and the button carries no payload — which route to take is decided
+  extension-side from the same hint that produced it, so the webview cannot hand it a URL.
+
+  The button is withheld when the desktop app is already on disk (the fix then says to open
+  it), when a managed launch ran and exited (the fix says the port is taken), and when no
+  platform is known. Telling somebody to install something they already have is worse than
+  saying nothing.
+
+- **Screenshots in the README.** It had four badges and zero images, which is a strange way to
+  describe a visual product.
+
+- **`scripts/launch-probe.ts`.** Runs the real launcher against a real `dsh web` and reports
+  what a unit test cannot: whether a launch token can be redeemed twice, whether the Host
+  outlives the child we spawned, and whether the port is quiet after `stop()`. Exit code is 0
+  only when all three hold.
+
+### Changed
+
+- **`deepseekHarness.autoSession` (boolean) becomes `deepseekHarness.sessionMode` (enum).**
+  The old switch could only turn authentication *off* — `false` meant "do not authenticate",
+  because the command that would have offered the other route had been unregistered. A switch
+  that can only disable things is not a setting, it is a trap, and it made the extension look
+  like it could not work without reading the credential file.
+
+  The three modes are `credentials` (mint locally — the previous behaviour, and still the
+  default), `managed` (start the Host), and `paste` (you supply the URL). Upgrading changes
+  nothing for anyone who does not change it; `credentials` is deliberately the default so that
+  a silent change of behaviour is not what this release delivers.
+
+  `traitsOf()` in `app/session-mode.ts` is the one place that answers "what does this mode
+  permit", so `managed` cannot accidentally fall back to reading the credential file — which
+  would make choosing it buy nothing.
+
+- **`deepseekHarness.launchCommand`** — new setting, default `dsh web --port 0`. `--port 0`
+  because managed launch reads the real port off the launch URL, so pinning one only adds a
+  way to fail. Run through a shell, so wrappers and `npx` resolve the way they would in a
+  terminal.
+
+- **`DeepSeek Harness: Open Web UI` can now do what it says.** It used to be a message
+  explaining why it could not: the harness authenticates its web UI per process, and a Host
+  somebody else started never shows us its URL. A Host *we* started is the case where the
+  extension has the URL, so under `managed` the command opens it.
+
+- **A failed connect now names the route you are *not* on.** `alternatives()` switches on the
+  active mode, because advice that tells you to do the thing you are already doing is worse
+  than no advice. The refusing message in `authRequired()` also branches on whether local
+  minting is even enabled — in `managed`/`paste`, the absence of a cookie is the design, not a
+  misconfiguration, and pointing at a file the user asked us not to open would be wrong.
+
+- **The README leads with the product and trails with the essay.** The design philosophy was
+  the fourth section, above the fold, before a reader had been told what the thing does. The
+  first screen is now a value proposition, a screenshot of the same session in two windows,
+  and seven bullets; the "DSH owns the write" essay sits after Development. The credential
+  discussion moved into "How the session is obtained" and is now about three modes rather than
+  one unavoidable privilege.
+
+- **Marketplace category `Other` → `AI`, and the keyword list expanded** to the terms people
+  actually search (`deepseek-harness`, `dsh`, `ai-agent`, `coding-agent`, …).
+
+### Fixed
+
+- **The Marketplace badges in the README pointed at a namespace shields.io never served.**
+  `img.shields.io/vs-marketplace/v/…` had been sitting there since the version gate landed, and
+  it draws `404 badge not found` — on GitHub, and on the Marketplace listing too, which renders
+  this README verbatim. Both badges now read `badgen.net`, which still serves real Marketplace
+  data. (The version half is worth watching for exactly that reason: it reads `v0.2.0`, which is
+  the truth the Marketplace has been sitting on.)
+
+  There was no "correct shields URL" to switch to. shields' namespace is
+  `visual-studio-marketplace`, and that one now answers with an SVG labelled *"retired badge"*
+  — the integration was withdrawn rather than renamed. The gate that was meant to catch this
+  compared substrings, and a dead badge string-matches perfectly. It now asserts the host,
+  rejects any surviving `img.shields.io/vs-marketplace` URL, and under `--online` fetches each
+  badge and fails when the SVG announces `not found` or `retired`.
+
+- **A successful stop could be reported as `signalled`.** `taskkill` loses a race with a child
+  that exits on its own, and then reports "no process found" — which reads like a failure while
+  the Host is already gone, i.e. exactly the desired outcome. `stop()` now checks whether the
+  child is still alive after a failed attempt, and only reports an unconfirmed stop when it
+  truly is.
+
+- **`envWithAugmentedPath` used the *host* `PATH` delimiter.** It takes a `platform` argument
+  and then ignored it for the separator, so a Windows host building a macOS `PATH` produced a
+  single unusable entry. Found by an assertion that passed on Linux and could not pass here —
+  which is the argument for the assertion. `pathAugmentations` and `desktopInstallCandidates`
+  now join with the matching `win32`/`posix` implementation for the same reason.
+
+- **`adoptLaunchUrl` no longer re-redeems a launch URL it has already redeemed.** The
+  comparison is against the URL, not the authority: a *new* Host can bind a port a dead one
+  just released, and a persisted cookie for that authority belongs to the old Host's secret —
+  so matching on authority alone would turn a port reuse into an unrecoverable
+  "authentication failed".
+
+- **The README called the launch token a "one-shot token".** It is not. Upstream's
+  `authorizeIndex` compares the query token against the process secret with `timingSafeEqual`
+  on every request to `/`, so the same URL can be redeemed repeatedly — confirmed both in
+  `dsh-client-connection/lib/index.js` and by redeeming it twice in `launch-probe.ts`.
+
+- **A factual claim the new feature made false is gone:** "Never starts a process for you. The
+  extension does not spawn `dsh web`" was true and is now only true by default.
+
+### Notes
+
+- The measured behaviour behind managed launch, all from `launch-probe.ts` on Windows
+  x64 against `@deepseek-ai/dsh@0.2.0-rc.2`: Host up in ~13 s from a cold `npx` (including
+  the download), launch URL on stdout with a 43-character token, exchange `303`, bare `GET /`
+  `401`, second exchange `303`, child alive and holding the port across 3 s of sampling, and
+  the port refusing connections for 4 s after `stop()`.
+
+- `dsh` has a background-boot concept — `--dsh-boot-bg` appears in the HTML it serves — so
+  "does the child we spawned actually own the port?" was worth answering rather than assuming.
+  It does. If it did not, killing the child would leave a Host running that the user could not
+  account for, which is the specific mess this extension exists to avoid creating.
+
+- Prototype note for anyone reading the diff: this machine's globally-installed `dsh` was
+  `0.1.0-rc.6`, which predates the `{version, refs, records}` credential-file schema the
+  desktop app writes — it fails with `the value for "version" in … must be a string`, because
+  it parses that YAML as a flat map of credential-ref → string. That is an upstream version
+  skew, not a defect here, and it is exactly the failure the new `exited` branch is designed to
+  make legible: the panel sends you to the log, and the log carries the child's own stack
+  trace.
+
+- **Also published to Open VSX, starting with 0.2.1.** Cursor, VSCodium and Windsurf read
+  Open VSX rather than the Microsoft Marketplace, and an extension present in only one of the
+  two does not exist for those editors. One hard lesson for whoever publishes the next one:
+  **a version number is occupied on Open VSX the moment it is accepted, even while the version
+  is still inactive and unfetchable.** 0.2.2 was pushed there before the badge fix above and
+  never became visible; re-publishing the same number is refused, and a `DELETE` carrying a
+  publisher token answers `403`. So Open VSX keeps serving 0.2.1, and the badge fix will reach
+  it with whatever version follows. Publish to Open VSX *last*, once the artifact has stopped
+  changing — it is the one registry where that number stops being yours.
+
 ## [0.2.1] — 2026-10-11
 
 Tagline: **version numbers that cannot drift apart, and an undo that cannot eat your work.**

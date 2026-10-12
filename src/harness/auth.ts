@@ -75,8 +75,10 @@ export interface BrowserSessionAuthOptions {
   log: (msg: string) => void
   /**
    * Allow {@link tryMintLocalSession} to mint the cookie from the harness's own
-   * persisted signing secret, skipping the paste. Mirrors the `autoSession`
-   * setting; defaults to false (conservative) — extension.ts enables it via config.
+   * persisted signing secret, skipping the paste. Mirrors
+   * `sessionMode: "credentials"` — the other two modes hand us a cookie from a
+   * Host instead, and reading this file in them would defeat the point. Defaults
+   * to false (conservative); extension.ts derives it from the mode.
    */
   allowLocalMint?: boolean
 }
@@ -113,6 +115,14 @@ export class BrowserSessionAuth {
    * here would send the user chasing the wrong fix.
    */
   private rejected = false
+  /**
+   * The launch URL whose token we last redeemed successfully.
+   *
+   * In-memory only, and deliberately not persisted: it is a "we already did
+   * this during this session" marker, and after a restart there is no Host
+   * holding that token anyway — a new one prints a new URL.
+   */
+  private adoptedLaunchUrl: string | undefined
 
   constructor(private readonly opts: BrowserSessionAuthOptions) {}
 
@@ -273,6 +283,34 @@ export class BrowserSessionAuth {
       this.opts.log(`auth: normalised authority ${url.host} → ${authority}`)
     }
 
+    // Re-adopting the exact Host we already redeemed this URL from.
+    //
+    // Managed launch reaches here on every reconnect: the launcher keeps its
+    // child alive across connect attempts, so the second connect gets the same
+    // launch URL back.
+    //
+    // Redeeming it again would *work* — upstream's `authorizeIndex` compares the
+    // query token against the process secret with `timingSafeEqual` on every
+    // request, so a launch token is a reusable per-process secret rather than a
+    // single-use grant (verified in `dsh-client-connection/lib/index.js`). This
+    // guard is therefore about not doing pointless work on every reconnect, not
+    // about avoiding a refusal.
+    //
+    // The comparison is against the URL rather than the authority, and that part
+    // does matter: a *new* Host can bind a port a dead one just released, and a
+    // persisted cookie for that authority belongs to the old Host's secret. There
+    // the fresh token is the only thing that works, so matching on authority
+    // alone would turn a port reuse into "authentication failed" with no way out.
+    if (
+      this.adoptedLaunchUrl === url.href
+      && this.session !== undefined
+      && this.session.authority === authority
+      && this.cookieHeader() !== undefined
+    ) {
+      this.opts.log(`auth: ${authority} is the Host we already redeemed this launch URL from; not exchanging again`)
+      return { host: url.hostname, port }
+    }
+
     // The exchange must hit the exact origin: the cookie is bound to the Host header.
     const res = await httpRequest({
       host: url.hostname,
@@ -304,6 +342,7 @@ export class BrowserSessionAuth {
       expiresAt: parsed.expiresAt ?? Date.now() + 30 * 24 * 60 * 60 * 1000,
     }
     this.rejected = false
+    this.adoptedLaunchUrl = url.href
     await this.opts.store.save(JSON.stringify(this.session))
     this.opts.log(`auth: acquired ${parsed.name} for ${authority}, valid until ${new Date(this.session.expiresAt).toISOString()}`)
     return { host: url.hostname, port }
@@ -315,9 +354,21 @@ export class BrowserSessionAuth {
     this.opts.port = port
   }
 
-  /** Toggle the auto-mint behaviour at runtime to match the `autoSession` setting. */
+  /** Toggle the auto-mint behaviour at runtime to match `sessionMode: "credentials"`. */
   setAllowLocalMint(value: boolean): void {
     this.opts.allowLocalMint = value
+  }
+
+  /**
+   * Whether local minting is currently permitted.
+   *
+   * Read by the refusal message, which has to say something different when the
+   * mode is `managed` or `paste` — there, the absence of a cookie is the design
+   * rather than a misconfiguration, and pointing at `$DSH_HOME/.credentials.yaml`
+   * would be advice for a file the user deliberately asked us not to open.
+   */
+  localMintEnabled(): boolean {
+    return this.opts.allowLocalMint === true
   }
 }
 

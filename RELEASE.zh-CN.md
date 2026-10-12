@@ -52,7 +52,7 @@ npm run check-versions     # → 全部检查通过；加 --online 会把已发�
 npm run build              # → dist/extension.js
 
 # 1.4 协议测试（假 harness——不需要 dsh web）
-npm run protocol-test      # → 全部 342 项断言 ✓
+npm run protocol-test      # → 全部 381 项断言 ✓
 
 # 1.5 端到端链路（真实文件系统；会自己报告覆盖情况）
 npm run e2e-test           # → 已编写的链路全部通过，覆盖情况会打印出来
@@ -89,10 +89,10 @@ npm run package            # → harness-connector-deepseek-<版本>.vsix
       不是每次发版再临时判断的事。
 - [ ] `CHANGELOG.md` 与 `ARCHITECTURE.md` 里的断言数与 `npm run protocol-test`
       的**当前**输出一致（它已历经 50 → 64 → 98 → 83 → 156 → 178 → 180 → 190 →
-      211 → 231 → 243 → 268 → 295 → 312 → 342，其中 rc.2 重写用新假 harness
-      替换了 rc.6 假 harness，之后又加入了瀑布/待答面板两组；此处数字过期是最常见的
-      文档漂移——**而自 v0.2.1 起，`check-versions` 会直接让构建失败，不再靠这一行
-      靠人记**）。
+      211 → 231 → 243 → 268 → 295 → 312 → 342 → 381，其中 rc.2 重写用新假 harness
+      替换了 rc.6 的那套，waterfall／待处理面板两组随之落地，v0.2.2 又加上了会话模式
+      词表、分平台安装路线和启动器的两个纯函数；此处数字过期是最常见的文档漂移——
+      **而自 v0.2.1 起，`check-versions` 会直接让构建失败，不再靠这一行靠人记**）。
 - [ ] `README.md` 最新的「新特性」标题就是这个版本，而且 README 只保留**一个**版本的
       说明。历史写进 CHANGELOG。
 - [ ] `LICENSE` 存在（MIT）。
@@ -116,7 +116,7 @@ npm run package            # → harness-connector-deepseek-<版本>.vsix
 unzip -l harness-connector-deepseek-<版本>.vsix
 ```
 
-预期（v0.2.1 = 14 个文件，313,441 字节，约 306 KB）：
+预期（v0.2.2 = 14 个文件，331,709 字节，约 324 KB）：
 
 ```
 [Content_Types].xml
@@ -201,7 +201,9 @@ Release 说明应为 `CHANGELOG.md` 中对应的 `## [<版本>]` 章节。**仅*
 
 ---
 
-## 5. （可选）发布到 VS Code Marketplace
+## 5. （可选）发布到注册表
+
+### VS Code Marketplace
 
 仅在已设置发布者 ID（`lucasliang`）和 PAT 后执行，
 详见 https://marketplace.visualstudio.com/manage。
@@ -231,6 +233,35 @@ node ./node_modules/@vscode/vsce/vsce publish --no-dependencies
 ```bash
 code --install-extension harness-connector-deepseek-<版本>.vsix
 ```
+
+### Open VSX
+
+Cursor、VSCodium 和 Windsurf 读的是 Open VSX 而不是微软 Marketplace，而只存在于其中一边的
+扩展，对那几个编辑器来说等于不存在。自 0.2.1 起以同一个 `lucasliang` 命名空间发布。
+
+```bash
+# 本机 npmjs 走代理会拿到 502，所以每次 npx 都要带镜像源；换台机器就可以去掉。
+REG=https://registry.npmmirror.com
+
+# 命名空间必须先存在。首次 *发布* 会隐式创建它，但在那之前 `verify-pat` 和 `get`
+# 都会以「Namespace not found」失败。
+npx --registry=$REG ovsx create-namespace lucasliang
+
+# 优先用环境变量：`--pat` 能用，但不在 --help 里，看着像不支持。token 是
+# open-vsx.org → Settings → Access Tokens 里签的 `ovsxat_…` 串。
+# 就地传入，绝不写进文件、也绝不进仓库 secret。
+OVSX_PAT=<token> npx --registry=$REG ovsx publish harness-connector-deepseek-<版本>.vsix
+
+# 确认它上去了。索引不是即时的——刚发布的版本会 404 一阵子，那个 404 是延迟，不是失败。
+npx --registry=$REG ovsx get lucasliang.harness-connector-deepseek
+```
+
+**放到最后发，等产物不再变动之后。** 这是唯一一个「号一交出去就不再是你的」注册表。一个仍处于
+*未激活* 状态的版本——对外不可见、取不到、公开 API 里也查不到——照样占着那个号：重发会被拒，
+报 `… is already published, but currently isn't active and therefore not visible`；用发行者
+token 打 `DELETE /api/-/publish/<ns>/<ext>/<ver>` 返回 `403`。（网页端可以删版本，token 不行。）
+`0.2.2` 就是这么丢的——在 README 徽章修复之前先推了上去，从未激活，也删不掉——于是 Open VSX
+继续服务 `0.2.1`，那个修复只能等下一个版本号。
 
 ---
 
@@ -331,10 +362,13 @@ Actions → **Release** → *Run workflow* → 填 `tag: v0.2.1`。它会检出�
 - 发布说明本身就在 VSIX **里面**：`README.md`/`CHANGELOG.md` 经 vsce 以 `readme.md`/
   `changelog.md` 的形式随包，`*.zh-CN.md` 双胞胎原样随包。所以下面每一条基线都属于某一棵
   特定的树，事后再改一个随包文档，那个数字就作废了。重新量，不要把旧数字往下带。
-  （`v0.2.1` = 313,441 字节；`v0.2.0` = 312,853，树是 `581ba27`；`v0.1.9` = 309,620；
-  `v0.1.7` = 288,750。）v0.2.1 这个数字在准备这个版本的过程中动了三次——312,063、312,745、
-  313,441——每一次都是因为包内某个文档在上次测量之后又被改了。中间那几次读数不是错的，它们量的是
-  另一棵树。重新量，不要把数字往下带，更不要用眼睛估计。
+  （`v0.2.2` = 331,709 字节；`v0.2.1` = 313,441；`v0.2.0` = 312,853，树是 `581ba27`；
+  `v0.1.9` = 309,620；`v0.1.7` = 288,750。）v0.2.1 那个数字在准备那个版本的过程中动了三次
+  ——312,063、312,745、313,441——每一次都是因为包内某个文档在上次测量之后又被改了。中间那几次
+  读数不是错的，它们量的是另一棵树。重新量，不要把数字往下带，更不要用眼睛估计。
+  `RELEASE.md` 在 `.vscodeignore` 的排除表里，所以改**这个**文件不会让上一段写下的那个数字
+  发生变化。基线之所以能记在这里、然后继续在同一个文档里写字，唯一的原因就是这个；换成本文件
+  之外的任何一个文件都不成立。
 
 ## 附录 — 本机 SSH 配置
 

@@ -55,7 +55,7 @@ npm run check-versions     # → all checks pass; add --online to include the
 npm run build              # → dist/extension.js
 
 # 1.4 protocol test (fake harness — no dsh web needed)
-npm run protocol-test      # → all 342 assertions ✓
+npm run protocol-test      # → all 381 assertions ✓
 
 # 1.5 end-to-end chains (real filesystem; reports its own coverage)
 npm run e2e-test           # → every written chain passes, coverage reported
@@ -87,9 +87,11 @@ Manual checks:
       twin. This is a standing rule, not a per-release judgement call.
 - [ ] `CHANGELOG.md` and `ARCHITECTURE.md` still quote the **current** assertion
       count from `npm run protocol-test` (it has grown 50 → 64 → 98 → 83 → 156 →
-      178 → 180 → 190 → 211 → 231 → 243 → 268 → 295 → 312 → 342 as the rc.2
-      rewrite replaced the rc.6 fake harness and the waterfall/pending-panel
-      groups landed; stale counts are the most common doc drift here — and since
+      178 → 180 → 190 → 211 → 231 → 243 → 268 → 295 → 312 → 342 → 381 as the
+      rc.2 rewrite replaced the rc.6 fake harness and the waterfall/pending-panel
+      groups landed, and v0.2.2 added the session-mode vocabulary, the per-platform
+      install routing and the launcher's pure functions;
+      stale counts are the most common doc drift here — and since
       v0.2.1 `check-versions` fails the build on it rather than leaving it to
       this line).
 - [ ] `README.md`'s newest "What's new" heading is this version, and the README
@@ -119,7 +121,7 @@ Manual checks:
 unzip -l harness-connector-deepseek-<ver>.vsix
 ```
 
-Expected (v0.2.1 = 14 files, 313,441 bytes, ~306 KB):
+Expected (v0.2.2 = 14 files, 331,709 bytes, ~324 KB):
 
 ```
 [Content_Types].xml
@@ -207,7 +209,9 @@ The Release notes should be the matching `## [<version>]` section from
 
 ---
 
-## 5. (Optional) Publish to the VS Code Marketplace
+## 5. (Optional) Publish to a registry
+
+### VS Code Marketplace
 
 Only do this once a publisher ID (`lucasliang`) and PAT are set
 up at https://marketplace.visualstudio.com/manage.
@@ -229,6 +233,41 @@ directly from the GitHub Release VSIX:
 ```bash
 code --install-extension harness-connector-deepseek-<ver>.vsix
 ```
+
+### Open VSX
+
+Cursor, VSCodium and Windsurf read Open VSX rather than the Microsoft Marketplace, and an
+extension present in only one of the two does not exist for those editors. Published since
+0.2.1 under the same `lucasliang` namespace.
+
+```bash
+# On this machine npmjs is behind a proxy that answers 502, so every npx call
+# needs the mirror; omit it elsewhere.
+REG=https://registry.npmmirror.com
+
+# a namespace has to exist before anything else touches it. A first *publish*
+# creates it implicitly, but `verify-pat` and `get` fail with "Namespace not found"
+# until it does.
+npx --registry=$REG ovsx create-namespace lucasliang
+
+# Prefer the env var: `--pat` works but is absent from --help, so it looks
+# unsupported. The token is an `ovsxat_…` string from open-vsx.org → Settings →
+# Access Tokens. Pass it inline, never write it to a file or a repo secret.
+OVSX_PAT=<token> npx --registry=$REG ovsx publish harness-connector-deepseek-<ver>.vsix
+
+# confirm it landed. Indexing is not instant — a fresh publish 404s for a while,
+# and that 404 means lag, not failure.
+npx --registry=$REG ovsx get lucasliang.harness-connector-deepseek
+```
+
+**Publish here last, once the artifact has stopped changing.** This is the one registry where
+the number stops being yours the moment it is accepted. A version that is still *inactive* —
+not visible, not fetchable, absent from the public API — occupies the number anyway:
+re-publishing it is refused with `… is already published, but currently isn't active and
+therefore not visible`, and `DELETE /api/-/publish/<ns>/<ext>/<ver>` with a publisher token
+answers `403`. (The web UI can delete a version; a token cannot.) `0.2.2` was lost that way —
+pushed ahead of the README badge fix, never activated, undeletable — so Open VSX kept serving
+`0.2.1` and the fix had to wait for a later version.
 
 ---
 
@@ -366,11 +405,15 @@ Marketplace, the bytes in the Release asset and the sha256 printed in the log ar
   `readme.md`/`changelog.md`, and the `*.zh-CN.md` twins ship verbatim. So every baseline
   below belongs to one particular tree, and editing a shipped doc afterwards invalidates it.
   Re-measure; do not carry the old figure forward.
-  (`v0.2.1` = 313,441 bytes; `v0.2.0` = 312,853 at `581ba27`; `v0.1.9` = 309,620;
-  `v0.1.7` = 288,750.) That v0.2.1 figure moved three times while the release was being
-  prepared — 312,063, then 312,745, then 313,441 — each time because a doc inside the VSIX was
-  edited after the last measurement. The intermediate reads were not wrong; they were readings
-  of a different tree. Re-measure, never carry a number forward, and never adjust one by eye.
+  (`v0.2.2` = 331,709 bytes; `v0.2.1` = 313,441; `v0.2.0` = 312,853 at `581ba27`;
+  `v0.1.9` = 309,620; `v0.1.7` = 288,750.) The v0.2.1 figure moved three times while that
+  release was being prepared — 312,063, then 312,745, then 313,441 — each time because a doc
+  inside the VSIX was edited after the last measurement. The intermediate reads were not
+  wrong; they were readings of a different tree. Re-measure, never carry a number forward,
+  and never adjust one by eye.
+  `RELEASE.md` is on the `.vscodeignore` list, so editing *this* file cannot move the number
+  written one paragraph above it. That is the whole reason a baseline is safe to record here
+  and then keep writing in the same document; it is not true of any of the other files.
 
 ## Appendix — SSH setup on this machine
 

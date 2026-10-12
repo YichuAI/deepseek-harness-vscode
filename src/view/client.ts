@@ -177,6 +177,20 @@ export const CLIENT_SCRIPT = /* js */ `
     connectBtn.title = conn === 'connected'
       ? 'Reconnect: drop the current session and negotiate a fresh one'
       : 'Connect to the local DeepSeek Harness Host';
+    // One install affordance, and only while the connection is in the failed
+    // state. Offering to install a Host that is already running would be noise;
+    // offering it when nothing is running is the answer to the only question
+    // that user has. What the button does lives extension-side (see
+    // AppController.runInstall) because the route differs by platform.
+    const installBtn = $('install');
+    const install = (conn === 'error' && hint) ? hint.install : null;
+    if (install) {
+      installBtn.style.display = '';
+      installBtn.textContent = install.label;
+      installBtn.title = install.detail;
+    } else {
+      installBtn.style.display = 'none';
+    }
     const hi = state.hostInfo;
     const bits = [];
     if (hi) {
@@ -1741,6 +1755,7 @@ export const CLIENT_SCRIPT = /* js */ `
     if (e.target.value) post({ type: 'selectSession', sessionId: e.target.value });
   });
   $('connect').addEventListener('click', () => post({ type: 'connect' }));
+  $('install').addEventListener('click', () => post({ type: 'install' }));
   $('new-session').addEventListener('click', () => post({ type: 'newSession' }));
   $('refresh').addEventListener('click', () => post({ type: 'refreshSessions' }));
   $('send').addEventListener('click', () => sendPrompt());

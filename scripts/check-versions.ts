@@ -135,7 +135,7 @@ check('README.zh-CN H1 carries no version', !/\(v?\d+\.\d+\.\d+\)/.test(h1Zh), h
 
 // ─── 3. badges are derived, not typed
 //
-// A shields.io endpoint that reads GitHub/Marketplace cannot go stale. A
+// A live endpoint that reads GitHub/Marketplace cannot go stale. A
 // `badge/version-0.2.0-blue.svg` URL is a number someone typed, and it was the
 // easiest surface to forget (it was, twice).
 
@@ -146,9 +146,26 @@ for (const [label, text] of [['README', readme], ['README.zh-CN', readmeZh]] as 
     `${label} uses a live GitHub release badge`,
     text.includes(`img.shields.io/github/v/release/${REPO}`),
   )
+  // The Marketplace pair lives on badgen.net, and that is not a preference.
+  // shields.io never served a `vs-marketplace` slug — its namespace is
+  // `visual-studio-marketplace`, and that one now answers with an SVG reading
+  // "retired badge", i.e. the integration was withdrawn rather than renamed.
+  // There was no correct shields URL to switch to. Hence an assertion on the
+  // host rather than on "there is some badge here": a dead badge still renders,
+  // it just renders red, which is invisible from a source-level check.
   check(
-    `${label} uses a live Marketplace badge`,
-    text.includes(`img.shields.io/vs-marketplace/v/${EXT_ID}`),
+    `${label} uses a live Marketplace version badge`,
+    text.includes(`badgen.net/vs-marketplace/v/${EXT_ID}`),
+  )
+  check(
+    `${label} uses a live Marketplace install badge`,
+    text.includes(`badgen.net/vs-marketplace/i/${EXT_ID}`),
+  )
+  const retired = text.match(/img\.shields\.io\/vs-marketplace\//g) ?? []
+  check(
+    `${label} carries no retired shields Marketplace badge`,
+    retired.length === 0,
+    retired.join(', ') || 'none',
   )
 }
 
@@ -361,6 +378,30 @@ async function published(): Promise<void> {
     eq('the newest GitHub Release is the current version', (json.tag_name ?? '').replace(/^v/, ''), VERSION)
   } catch (e) {
     check('could not reach the GitHub releases API', false, e instanceof Error ? e.message : String(e))
+  }
+
+  // A badge URL that string-matches is not a badge that renders — which is the
+  // exact gap that let `img.shields.io/vs-marketplace/...` ship for releases: it
+  // satisfies every substring assertion and still draws `404 badge not found`.
+  // So fetch them and read the label the SVG announces about itself.
+  const badges: [string, string][] = [
+    ['Marketplace version', `https://badgen.net/vs-marketplace/v/${EXT_ID}`],
+    ['Marketplace installs', `https://badgen.net/vs-marketplace/i/${EXT_ID}`],
+    ['GitHub release', `https://img.shields.io/github/v/release/${REPO}`],
+  ]
+  for (const [name, url] of badges) {
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': 'check-versions' } })
+      const svg = await res.text()
+      const label = /aria-label="([^"]*)"/.exec(svg)?.[1] ?? ''
+      check(
+        `the ${name} badge still renders`,
+        res.ok && label !== '' && !/not found|retired|invalid|deprecated/i.test(label),
+        label || `HTTP ${String(res.status)} with no label`,
+      )
+    } catch (e) {
+      check(`could not reach the ${name} badge`, false, e instanceof Error ? e.message : String(e))
+    }
   }
 }
 

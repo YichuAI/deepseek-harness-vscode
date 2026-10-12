@@ -2,7 +2,7 @@
   "name": "harness-connector-deepseek",
   "displayName": "DeepSeek Harness Connector",
   "description": "Native VS Code client for DeepSeek Harness. Connect to your existing local Harness instance and continue the same workspaces and sessions directly inside VS Code.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "publisher": "lucasliang",
   "license": "MIT",
   "repository": {
@@ -13,13 +13,19 @@
     "vscode": "^1.85.0"
   },
   "categories": [
-    "Other"
+    "AI"
   ],
   "keywords": [
     "deepseek",
+    "deepseek-harness",
     "harness",
+    "dsh",
     "agent",
-    "ai"
+    "ai",
+    "ai-agent",
+    "coding-agent",
+    "chat",
+    "vscode"
   ],
   "activationEvents": [
     "onStartupFinished"
@@ -67,6 +73,11 @@
       {
         "command": "deepseekHarness.clearSessionToken",
         "title": "DeepSeek Harness: Clear Stored Session",
+        "category": "DeepSeek Harness"
+      },
+      {
+        "command": "deepseekHarness.useLaunchUrl",
+        "title": "DeepSeek Harness: Use Launch URL",
         "category": "DeepSeek Harness"
       },
       {
@@ -190,16 +201,31 @@
           "default": false,
           "markdownDescription": "Automatically answer tool-approval requests with `allow once` (only those answerable from VS Code). Equivalent of Copilot's `/autoApprove` — review the security trade-off before enabling."
         },
-    "deepseekHarness.autoSession": {
-      "type": "boolean",
-      "default": true,
-      "markdownDescription": "Mint the browser-session cookie locally from `$DSH_HOME/.credentials.yaml`, which is how the extension authenticates today (there is no paste-a-launch-URL command any more). Turning this off leaves the extension unauthenticated — it is a security switch, not a convenience toggle. See the README's 'How the session is obtained'."
-    },
-    "deepseekHarness.autoDiscover": {
-      "type": "boolean",
-      "default": true,
-      "markdownDescription": "When the configured port answers nothing, look for a dsh Host elsewhere on loopback: ports pinned in `$DSH_HOME/profiles/<name>/cordis.patch.yml` first, then whatever is listening that answers the Host's own refusal text. Needed by the **desktop app**, which starts its Host on an OS-assigned port (`--port 0`) that changes every launch. The discovered port is used for this session only and is never written to your settings."
-    }
+        "deepseekHarness.sessionMode": {
+          "type": "string",
+          "enum": [
+            "credentials",
+            "managed",
+            "paste"
+          ],
+          "enumDescriptions": [
+            "Read the signing secret from `$DSH_HOME/.credentials.yaml` and mint the browser-session cookie locally. No paste and no extra process, but it means reading a file that also holds your model API keys.",
+            "Start `dsh web` yourself and take the launch URL it prints. Nothing is read from disk and nothing is pasted — this extension starts a process for you, which is why it is opt-in. The command it runs is `deepseekHarness.launchCommand`, and the Host it started is stopped when the window closes.",
+            "Ask you for the launch URL printed by a `dsh web` you started. Nothing is read from disk and nothing is started. Run \"DeepSeek Harness: Use Launch URL\" to supply it."
+          ],
+          "default": "credentials",
+          "markdownDescription": "How this extension obtains a Harness session.\n\n- `credentials` — mint the cookie locally from `$DSH_HOME/.credentials.yaml` (the original behaviour).\n- `managed` — start `dsh web` and read the launch URL off its console. No credential file, no paste.\n- `paste` — you start it and hand over the URL.\n\nThe default is unchanged from earlier versions; the other two are deliberate opt-ins. See the README's \"How the session is obtained\"."
+        },
+        "deepseekHarness.launchCommand": {
+          "type": "string",
+          "default": "dsh web --port 0",
+          "markdownDescription": "The command `sessionMode: \"managed\"` runs to start a Host. The default binds an OS-assigned port, because managed launch reads the real port off the launch URL and pinning one only adds a way to fail. Whatever you put here runs through a shell, so wrappers and `npx` work. Only read when a Host is started — changing it does not disturb a Host that is already running."
+        },
+        "deepseekHarness.autoDiscover": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When the configured port answers nothing, look for a dsh Host elsewhere on loopback: ports pinned in `$DSH_HOME/profiles/<name>/cordis.patch.yml` first, then whatever is listening that answers the Host's own refusal text. Needed by the **desktop app**, which starts its Host on an OS-assigned port (`--port 0`) that changes every launch. The discovered port is used for this session only and is never written to your settings. Discovery always runs before managed launch, so an already-running Host is adopted rather than duplicated."
+        }
       }
     }
   },

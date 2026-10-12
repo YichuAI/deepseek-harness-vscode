@@ -121,7 +121,7 @@ Manual checks:
 unzip -l harness-connector-deepseek-<ver>.vsix
 ```
 
-Expected (v0.2.2 = 14 files, 331,709 bytes, ~324 KB):
+Expected (v0.2.2 = 14 files, 331,706 bytes, ~324 KB):
 
 ```
 [Content_Types].xml
@@ -142,6 +142,16 @@ extension/media/markdown-it.umd.min.js
 
 If `src/`, `scripts/`, `test/`, `node_modules/`, `.workbuddy/`, or `*.map`
 appear, the `.vscodeignore` is wrong — fix it and re-package.
+
+The size above is the **clean-checkout** figure, and it is the same number CI produced for the
+Release asset. It is not the only number this tree can produce. With `core.autocrlf = true`
+on Windows, any file git has round-tripped carries CRLF on disk while the blob it came from —
+and therefore the CI checkout — does not. At v0.2.2 exactly one file was in that state,
+`media/icon.svg`: its seven CR bytes compressed to 3 more bytes, so the local archive read
+331,709 where CI read 331,706. Compare the two archives and the other **13 entries have
+identical CRC32 and length**; only that one differs. So when a figure here disagrees with a
+fresh clone by a few bytes, check `git status` and the line endings before assuming the tree
+changed — and when recording a baseline, say which of the two you measured.
 
 ---
 
@@ -404,13 +414,18 @@ Marketplace, the bytes in the Release asset and the sha256 printed in the log ar
 - Release notes live **inside** the VSIX: `README.md`/`CHANGELOG.md` ship through vsce as
   `readme.md`/`changelog.md`, and the `*.zh-CN.md` twins ship verbatim. So every baseline
   below belongs to one particular tree, and editing a shipped doc afterwards invalidates it.
-  Re-measure; do not carry the old figure forward.
-  (`v0.2.2` = 331,709 bytes; `v0.2.1` = 313,441; `v0.2.0` = 312,853 at `581ba27`;
-  `v0.1.9` = 309,620; `v0.1.7` = 288,750.) The v0.2.1 figure moved three times while that
-  release was being prepared — 312,063, then 312,745, then 313,441 — each time because a doc
-  inside the VSIX was edited after the last measurement. The intermediate reads were not
-  wrong; they were readings of a different tree. Re-measure, never carry a number forward,
-  and never adjust one by eye.
+  Re-measure; do not carry the old figure forward. Shipped bytes, as `gh release view --json
+  assets` reports them — i.e. what a user actually downloads: `v0.2.2` = 331,706;
+  `v0.2.1` = 313,426; `v0.2.0` = 312,853 at `581ba27`; `v0.1.9` = 309,620;
+  `v0.1.7` = 288,750.
+  The v0.2.1 *local* figure moved three times while that release was being prepared — 312,063,
+  then 312,745, then 313,441 — each time because a doc inside the VSIX was edited after the
+  last measurement. Those intermediate reads were not wrong; they were readings of a different
+  tree. Re-measure, never carry a number forward, and never adjust one by eye.
+  Two local figures disagree with the released assets by a few bytes: v0.2.1 by 15 (313,441
+  against 313,426), v0.2.2 by 3 (331,709 against 331,706). The v0.2.2 gap was run down to
+  `media/icon.svg`'s line endings — step 2 says how to check it. The v0.2.1 gap of 15 bytes was
+  never run down, and is left named rather than smoothed over. v0.2.0 agreed exactly.
   `RELEASE.md` is on the `.vscodeignore` list, so editing *this* file cannot move the number
   written one paragraph above it. That is the whole reason a baseline is safe to record here
   and then keep writing in the same document; it is not true of any of the other files.

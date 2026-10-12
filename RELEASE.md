@@ -286,6 +286,16 @@ no Entra app registration, no personal access token.
    - environment: leave blank unless the page asks
 4. Save.
 
+> **Where that setting actually is — unresolved as of 2026-10-12.** The `lucasliang` publisher
+> page renders exactly three tabs: **Extensions**, **Details**, **Members**. There is no
+> *Trusted publishers* tab on it, which is why this step is written as "find it" rather than
+> as coordinates. Other publishers do use this flow, so the feature exists; what is
+> unverified is whether it is exposed for this publisher, and under which tab. Check
+> **Details** first. If it is genuinely absent, the next move is a note to Marketplace
+> support — **not** a descent into Azure. The exchange consumes a GitHub OIDC token and
+> nothing else; it needs no Azure subscription, no managed identity and no Entra app
+> registration, so none of that machinery is on the critical path.
+
 After that, a tag push mints a short-lived GitHub OIDC token for the
 `marketplace.visualstudio.com` audience; `vsce` exchanges it at
 `POST /_apis/gallery/token?api-version=7.2-preview.1` (`Authorization: FederatedToken …`)
@@ -306,12 +316,27 @@ Actions → Variables), not a secret:
 | `pat` | publish with the `VSCE_PAT` secret and emit a warning — Azure DevOps global PATs are retired on **2026-12-01** |
 | `off` | skip, visibly and on purpose |
 
-Why the CI installs vsce 4 rather than the pinned devDependency: `--oidc` landed in
-`@vscode/vsce@4.0.0` (#1291) and is deliberately absent from `--help` (#1297), while the local
-pin stays at `3.9.2` so that this change cannot rewrite the shipped `package.json` of a
-release that already has a GitHub Release behind it. The two versions produce
-entry-for-entry identical VSIXs — same file list, same per-entry CRC and length — so the
-skew is inert. Fold the bump into the next version that edits a shipped file anyway.
+**Pin `4.0.1-3`, never `latest`.** `--oidc` landed in `@vscode/vsce@4.0.0` (#1291) and is
+deliberately hidden from `--help` (#1297), so its absence there proves nothing. What does
+matter is that the released **4.0.0 makes a request the service refuses**: the URL omits
+`api-version` and the header says `Bearer` where the endpoint expects `FederatedToken`. Every
+attempt therefore dies at the exchange with
+
+```
+400 … No api-version was supplied for the "POST" request.
+```
+
+before permissions are consulted at all — which is why this reads like an authorization
+failure and is not one. Upstream fixed both lines in `c960f2e97` *Update OIDC exchange to the
+final Marketplace contract* (2026-09-29), first shipped in `4.0.1-1`. On npm the dist-tags are
+`latest` → **4.0.0** (still broken) and `next` → **4.0.1-3** (first published build with the
+fix), so the obvious `npx @vscode/vsce` selects precisely the build that cannot work.
+
+The local devDependency stays at `3.9.2` on purpose: bumping it would rewrite the shipped
+`package.json` of a release that already has a GitHub Release behind it, and change the bytes
+users download. All three versions produce entry-for-entry identical VSIXs — same file list,
+same per-entry CRC and length — so the skew is inert. Fold the devDependency bump into the
+next version that edits a shipped file anyway.
 
 ### Backfilling a version that predates the policy
 

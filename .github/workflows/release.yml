@@ -13,9 +13,10 @@ name: Release
 # Marketplace authentication is OIDC **trusted publishing**: GitHub mints a
 # short-lived token for this repository and workflow, the Marketplace exchanges it
 # for a session credential valid for ~15 minutes, and nothing long-lived is stored
-# anywhere. It needs a one-time trust policy on the publisher page — the exact
-# click-path is in RELEASE.md §8. Azure DevOps global PATs are retired on
-# 2026-12-01, so the PAT path is a fallback with an expiry date, not the plan.
+# anywhere. It needs a one-time trust policy on the Marketplace publisher page —
+# see RELEASE.md §8, including the caveat that the entry point was not visible on
+# this publisher when this file was written. Azure DevOps global PATs are retired
+# on 2026-12-01, so the PAT path is a fallback with an expiry date, not the plan.
 #
 # `MARKETPLACE_PUBLISH` (a repository *variable*, not a secret) selects the mode:
 #   unset, or `oidc` → trusted publishing
@@ -166,14 +167,31 @@ jobs:
               exit 0
               ;;
             oidc)
-              # vsce is invoked at a pinned version rather than through the local
-              # devDependency on purpose. `--oidc` landed in 4.0.0 (#1291) and is
-              # hidden from `--help` by design (#1297); the local pin stays at 3.9.2
-              # so that this change cannot rewrite the shipped `package.json` of a
-              # release that already has a GitHub Release behind it. The two
-              # versions produce entry-for-entry identical VSIXs — same file list,
-              # same per-entry CRC and length — so the skew is inert.
-              publish=(npx --yes @vscode/vsce@4.0.0 publish --no-dependencies --oidc)
+              # Pinned to 4.0.1-3, and deliberately NOT to `latest`.
+              #
+              # `--oidc` landed in 4.0.0 (#1291) but 4.0.0 is wired to a draft
+              # contract and the service rejects every exchange:
+              #   • the request URL carries no `api-version`
+              #   • the header says `Bearer` where the endpoint wants `FederatedToken`
+              # so an attempt dies immediately with
+              #   `400 … No api-version was supplied for the "POST" request.`
+              # which says nothing about permissions — it never gets that far. That
+              # error was observed on run 38251354419, and it is the same failure the
+              # vsce tracker calls "the client request did not match the current
+              # protocol".
+              #
+              # Upstream fix: c960f2e97 "Update OIDC exchange to the final Marketplace
+              # contract" (2026-09-29). It is in 4.0.1-1 onwards, and on npm the
+              # dist-tags are `latest` → 4.0.0 (still broken) and `next` → 4.0.1-3
+              # (first published build with the fix). Hence the explicit pin: asking
+              # for the latest release is exactly the thing that does not work.
+              #
+              # The local devDependency stays at 3.9.2 on purpose — bumping it would
+              # rewrite the shipped package.json of a release that already has a
+              # GitHub Release behind it, and change the bytes users download. All
+              # three versions emit entry-for-entry identical VSIXs (same file list,
+              # same per-entry CRC and length), so the skew is inert.
+              publish=(npx --yes @vscode/vsce@4.0.1-3 publish --no-dependencies --oidc)
               how='OIDC trusted publishing'
               ;;
             pat)

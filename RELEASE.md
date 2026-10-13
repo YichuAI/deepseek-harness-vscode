@@ -172,8 +172,26 @@ bytes git will check out, and this tree packages to 368,277 locally and ships as
 `git diff --stat` is empty and `git cat-file blob :<path> | tr -cd '\r' | wc -c` reads 0 — the
 worktree content genuinely is the blob. Note that `git checkout-index` cannot produce this:
 it obeys `core.eol`, which defaults to native, so even
-`-c core.autocrlf=false checkout-index -f` still writes CRLF. Exporting the blob bytes by hand
-is the route that worked; do not hand-copy the old `checkout-index` recipe.
+`-c core.autocrlf=false checkout-index -f` still writes CRLF. `git archive` does the same
+thing for the same reason — measured on this machine, `git archive v0.2.3` emitted a
+`CHANGELOG.md` with 1,581 CR bytes, so an archive is **not** a clean checkout either unless
+the filter is switched off.
+
+To measure a past tag without a second machine, export it with the filter off and package it
+there. `vsce` still refuses to run with no `node_modules` present, so point one at it — a
+directory junction on Windows is enough, and `--no-dependencies` never walks it:
+
+```bash
+mkdir -p /c/tmp/vclean
+git -c core.autocrlf=false archive <tag> | tar -x -C /c/tmp/vclean   # LF, unlike plain archive
+cd /c/tmp/vclean
+# Windows: make node_modules a junction to the real one first
+#   New-Item -ItemType Junction -Path .\node_modules -Target <repo>\node_modules
+node <repo>/node_modules/@vscode/vsce/vsce package --no-dependencies  # → the CI figure
+```
+
+That is how `v0.2.3`'s 353,363 was confirmed after the fact, and how the claim that it was
+ever *shipped* was found to be wrong.
 
 So when a figure here disagrees with a fresh clone by a few bytes, check `git status` and the
 line endings before assuming the tree changed — and when recording a baseline, say which of the
@@ -439,24 +457,36 @@ Marketplace, the bytes in the Release asset and the sha256 printed in the log ar
   GitHub Release on purpose, because there is no artifact by that name. Retagging is only
   safe while the number has neither a release nor a Marketplace publish behind it; once a
   user can install it, the number is frozen and the fix becomes the next version.
+- `0.2.3` is the other number with a tag and no Release, for a different reason — it was
+  never withdrawn, it simply never went out. It was committed (`200e708`), annotated, and
+  packaged, but the three fixes that landed the next day went into `0.2.4` instead of being
+  merged back, and the tag was never pushed. It measures 353,366 in a working tree that has
+  the CRLF-on-disk pair and **353,363** from a clean LF export; neither is a download count,
+  because nobody could download it. The check is one command, and it is worth running before
+  writing any version into a "shipped" list: `git ls-remote --tags origin`. If the tag is not
+  there, no Release exists for it, whatever the CHANGELOG says — a CHANGELOG entry describes
+  a tree, not a publication.
 - Release notes live **inside** the VSIX: `README.md`/`CHANGELOG.md` ship through vsce as
   `readme.md`/`changelog.md`, and the `*.zh-CN.md` twins ship verbatim. So every baseline
   below belongs to one particular tree, and editing a shipped doc afterwards invalidates it.
   Re-measure; do not carry the old figure forward. Shipped bytes, as `gh release view --json
-  assets` reports them — i.e. what a user actually downloads: `v0.2.5` = 368,277; `v0.2.4` = 363,809; `v0.2.3` = 353,363; `v0.2.2` = 331,706;
+  assets` reports them — i.e. what a user actually downloads: `v0.2.5` = 368,277; `v0.2.4` = 363,809; `v0.2.2` = 331,706;
   `v0.2.1` = 313,426; `v0.2.0` = 312,853 at `581ba27`; `v0.1.9` = 309,620;
   `v0.1.7` = 288,750.
+  (`v0.2.3` is deliberately absent — it has a tag, a CHANGELOG entry and a package, and no
+  Release, so no bytes of it were ever downloaded. See the policy bullet above.)
   The v0.2.1 *local* figure moved three times while that release was being prepared — 312,063,
   then 312,745, then 313,441 — each time because a doc inside the VSIX was edited after the
   last measurement. Those intermediate reads were not wrong; they were readings of a different
   tree. Re-measure, never carry a number forward, and never adjust one by eye.
   Local and shipped figures disagree by a few bytes, and it is always a file that was CRLF on
-  disk in the working tree: v0.2.2 and v0.2.3 by 3 each (331,709 / 353,366 against 331,706 /
-  353,363) and v0.2.4 by 157 (363,966 against 363,809), all run down in step 2. v0.2.1 was
-  off by 15 (313,441 against 313,426), never run down and left named rather than smoothed
-  over — the same shape of cause, but the file was not identified. v0.2.0 and v0.2.5 agreed
-  exactly, and v0.2.5 agreed on purpose: the exposed files were normalised to LF before the
-  measurement rather than after.
+  disk in the working tree: v0.2.2 by 3 (331,709 against 331,706) and v0.2.4 by 157
+  (363,966 against 363,809), both run down in step 2. v0.2.1 was off by 15 (313,441 against
+  313,426), never run down and left named rather than smoothed over — the same shape of cause,
+  but the file was not identified. v0.2.0 and v0.2.5 agreed exactly, and v0.2.5 agreed on
+  purpose: the exposed files were normalised to LF before the measurement rather than after.
+  v0.2.3 shows the same 3 as v0.2.2 (353,366 local against 353,363 clean) but belongs to
+  neither column, because it was never published — see the policy bullet above.
   `RELEASE.md` is on the `.vscodeignore` list, so editing *this* file cannot move the number
   written one paragraph above it. That is the whole reason a baseline is safe to record here
   and then keep writing in the same document; it is not true of any of the other files.

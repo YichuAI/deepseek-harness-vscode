@@ -21,6 +21,14 @@
  *   4. a file the turn created, unedited → removed
  *   5. a file the turn created, then edited → refused, file survives
  *   6. a file the tool deleted → restored
+ *   7. two hunks in one file: undo one, keep the other — and then the other,
+ *      which is the case the whole-file guard used to make impossible
+ *   8. the same two, undone in the other order
+ *   9. a file already half-undone, still revertible whole
+ *  10. an edit made after a hunk undo still refuses the next hunk
+ *  11. clicking undo twice writes once
+ *  12. a hunk undo on a file the call deleted, and on one it created
+ *  13. a review with no captured text refuses instead of reporting success
  *
  * Run: npm run e2e-test   (or: node node_modules/tsx/dist/cli.mjs test/e2e/run.ts)
  */
@@ -79,6 +87,38 @@ export async function runChain5(): Promise<ChainResult> {
     const file = review.files.find((f) => f.path === path)!
     return { id, review, file }
   }
+
+  /** The same, for a tool that replaced two separate regions of one file. */
+  const reviewWithHunks = (
+    store: ReviewStore,
+    path: string,
+    before: string | null,
+    after: string | null,
+    hunks: Array<{ oldText: string | null; newText: string }>,
+  ) => {
+    const id = store.createFromToolResult({
+      sessionId: 'session-e2e',
+      callId: `call-${String(store.forSession('session-e2e').length + 1)}`,
+      toolName: 'edit',
+      arguments: '{}',
+      resultMeta: { diffs: [{ path, before, after, hunks }] },
+    })
+    if (id === undefined) throw new Error('e2e: the store refused to build a review for ' + path)
+    const review = store.getById(id)!
+    const file = review.files.find((f) => f.path === path)!
+    const hunk = (hunkId: string) => {
+      const found = file.hunks.find((h) => h.id === hunkId)
+      if (found === undefined) throw new Error(`e2e: no hunk ${hunkId} in ${path}`)
+      return found
+    }
+    return { id, review, file, hunk }
+  }
+
+  // A two-hunk edit: the tool changed one line in each half of the file.
+  const baseText = 'alpha\none\nbeta\ntwo\ngamma\n'
+  const editedText = 'alpha\nONE\nbeta\nTWO\ngamma\n'
+  const halfUndone = 'alpha\nONE\nbeta\ntwo\ngamma\n'
+  const twoHunks = [{ oldText: 'one', newText: 'ONE' }, { oldText: 'two', newText: 'TWO' }]
 
   try {
     // ── 1. the ordinary case ────────────────────────────────────────────────
@@ -163,6 +203,163 @@ export async function runChain5(): Promise<ChainResult> {
       const result = await new ReviewMaterializer(realWorkspace()).rejectFile(review, file)
       check('a file the turn deleted is restored', result.ok === true, JSON.stringify(result))
       check('...with its old contents', readFileSync(path, 'utf8') === 'was here\n')
+    }
+
+    // ── 7. two hunks in one file: undo one, keep the other ──────────────────
+    //
+    // This is the assertion the whole release exists for. Before it, the first
+    // hunk-level undo poisoned every later one: the guard compared the file to
+    // the tool's original result, the file no longer matched, and the rest of
+    // the turn came back "has been modified since this review was created".
+    {
+      const path = join(dir, 'two-hunks.txt')
+      writeFileSync(path, editedText)
+      const store = new ReviewStore()
+      const { id, review, file, hunk } = reviewWithHunks(store, path, baseText, editedText, twoHunks)
+
+      const second = await new ReviewMaterializer(realWorkspace()).rejectHunk(review, file, hunk('h1'))
+      check('undoing the second of two hunks succeeds', second.ok === true, JSON.stringify(second))
+      check('...and takes only that hunk out of the file',
+        readFileSync(path, 'utf8') === halfUndone, JSON.stringify(readFileSync(path, 'utf8')))
+
+      // The controller records this after a successful revert, and the guard
+      // reads it back on the next one — so the test must do it too, or it would
+      // be asserting against a state the app never produces.
+      store.setHunkState(id, path, 'h1', 'rejected')
+
+      const first = await new ReviewMaterializer(realWorkspace()).rejectHunk(review, file, hunk('h0'))
+      check('...and the FIRST hunk is still undoable afterwards', first.ok === true, JSON.stringify(first))
+      check('...reaching the file’s original bytes', readFileSync(path, 'utf8') === baseText,
+        JSON.stringify(readFileSync(path, 'utf8')))
+    }
+
+    // ── 8. the same two, undone the other way round ─────────────────────────
+    {
+      const path = join(dir, 'two-hunks-reverse.txt')
+      writeFileSync(path, editedText)
+      const store = new ReviewStore()
+      const { id, review, file, hunk } = reviewWithHunks(store, path, baseText, editedText, twoHunks)
+
+      const first = await new ReviewMaterializer(realWorkspace()).rejectHunk(review, file, hunk('h0'))
+      check('the user may pick the first hunk first', first.ok === true, JSON.stringify(first))
+      check('...leaving the second where it is',
+        readFileSync(path, 'utf8') === 'alpha\none\nbeta\nTWO\ngamma\n',
+        JSON.stringify(readFileSync(path, 'utf8')))
+
+      store.setHunkState(id, path, 'h0', 'rejected')
+      const second = await new ReviewMaterializer(realWorkspace()).rejectHunk(review, file, hunk('h1'))
+      check('...and then the second one', second.ok === true, JSON.stringify(second))
+      check('...also reaching the original bytes', readFileSync(path, 'utf8') === baseText)
+    }
+
+    // ── 9. a half-undone file can still be reverted whole ───────────────────
+    //
+    // Without this the file-level button would strand the file: it is offered
+    // while the file is 'partial', and the old guard would have refused it
+    // because the file no longer equalled the tool's result.
+    {
+      const path = join(dir, 'partial-then-file.txt')
+      writeFileSync(path, editedText)
+      const store = new ReviewStore()
+      const { id, review, file, hunk } = reviewWithHunks(store, path, baseText, editedText, twoHunks)
+      await new ReviewMaterializer(realWorkspace()).rejectHunk(review, file, hunk('h1'))
+      store.setHunkState(id, path, 'h1', 'rejected')
+
+      const whole = await new ReviewMaterializer(realWorkspace()).rejectFile(review, file)
+      check('a file already half-undone still reverts whole', whole.ok === true, JSON.stringify(whole))
+      check('...because the guard expects the undo it already made',
+        readFileSync(path, 'utf8') === baseText, JSON.stringify(readFileSync(path, 'utf8')))
+    }
+
+    // ── 10. an edit after a hunk undo still stops the next hunk ─────────────
+    //
+    // The rule that must survive the new leniency. Accounting for our own undo
+    // must not become "anything goes".
+    {
+      const path = join(dir, 'partial-then-user-edit.txt')
+      writeFileSync(path, editedText)
+      const store = new ReviewStore()
+      const { id, review, file, hunk } = reviewWithHunks(store, path, baseText, editedText, twoHunks)
+      await new ReviewMaterializer(realWorkspace()).rejectHunk(review, file, hunk('h1'))
+      store.setHunkState(id, path, 'h1', 'rejected')
+
+      writeFileSync(path, halfUndone + 'and mine\n')
+      const refused = await new ReviewMaterializer(realWorkspace()).rejectHunk(review, file, hunk('h0'))
+      check('an edit made after a hunk undo still blocks the next one', refused.ok === false)
+      check('...classified as drift, not as something else',
+        refused.ok === false && refused.reason === 'stale', refused.ok === false ? refused.reason : 'ok')
+      check('...and the user’s line survives',
+        readFileSync(path, 'utf8') === halfUndone + 'and mine\n',
+        JSON.stringify(readFileSync(path, 'utf8')))
+    }
+
+    // ── 11. clicking undo twice ─────────────────────────────────────────────
+    {
+      const path = join(dir, 'double-click.txt')
+      writeFileSync(path, editedText)
+      const store = new ReviewStore()
+      const { id, review, file, hunk } = reviewWithHunks(store, path, baseText, editedText, twoHunks)
+      await new ReviewMaterializer(realWorkspace()).rejectHunk(review, file, hunk('h1'))
+      store.setHunkState(id, path, 'h1', 'rejected')
+
+      const again = await new ReviewMaterializer(realWorkspace()).rejectHunk(review, file, hunk('h1'))
+      check('undoing a hunk twice is a no-op, not an error', again.ok === true, JSON.stringify(again))
+      check('...and writes nothing the second time', readFileSync(path, 'utf8') === halfUndone)
+    }
+
+    // ── 12. the two ends of a diff, where a hunk has only one side ──────────
+    {
+      const path = join(dir, 'deleted-by-tool-hunk.txt')
+      const store = new ReviewStore()
+      const { review, file, hunk } = reviewWithHunks(store, path, 'was here\n', null, [
+        { oldText: 'was here\n', newText: '' },
+      ])
+      const result = await new ReviewMaterializer(realWorkspace()).rejectHunk(review, file, hunk('h0'))
+      check('a hunk undo on a file the call deleted restores it',
+        result.ok === true, JSON.stringify(result))
+      check('...with its old contents', readFileSync(path, 'utf8') === 'was here\n')
+    }
+    {
+      const path = join(dir, 'created-by-tool-hunk.txt')
+      writeFileSync(path, 'brand new\n')
+      const store = new ReviewStore()
+      const { review, file, hunk } = reviewWithHunks(store, path, null, 'brand new\n', [
+        { oldText: null, newText: 'brand new\n' },
+      ])
+      const result = await new ReviewMaterializer(realWorkspace()).rejectHunk(review, file, hunk('h0'))
+      check('a hunk undo on a file the call created removes it',
+        result.ok === true, JSON.stringify(result))
+      let gone = false
+      try { readFileSync(path) } catch { gone = true }
+      check('...since there is no earlier version to patch towards', gone)
+    }
+
+    // ── 13. a diff with no captured text ────────────────────────────────────
+    //
+    // A review built from a tool call alone. It cannot be reverted, and the
+    // honest answer is to say so: this path used to fall through to the
+    // "new file" branch and DELETE the file.
+    {
+      const path = join(dir, 'no-diff.txt')
+      writeFileSync(path, 'on disk\n')
+      const store = new ReviewStore()
+      const id = store.createFromToolResult({
+        sessionId: 'session-e2e',
+        callId: 'call-no-diff',
+        toolName: 'edit',
+        arguments: JSON.stringify({ path, oldText: 'old', newText: 'new' }),
+        resultMeta: {},
+      })
+      if (id === undefined) throw new Error('e2e: expected a review built from arguments alone')
+      const review = store.getById(id)!
+      const file = review.files.find((f) => f.path === path)!
+
+      const result = await new ReviewMaterializer(realWorkspace()).rejectFile(review, file)
+      check('a review with no captured text refuses', result.ok === false)
+      check('...saying what is missing rather than reporting a phantom success',
+        result.ok === false && result.reason === 'no-diff', result.ok === false ? result.reason : 'ok')
+      check('...and above all does not delete the file',
+        readFileSync(path, 'utf8') === 'on disk\n', JSON.stringify(readFileSync(path, 'utf8')))
     }
   } finally {
     rmSync(dir, { recursive: true, force: true })

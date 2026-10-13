@@ -26,6 +26,7 @@ import { join } from 'node:path'
 import { HarnessClient } from '../src/harness/client.ts'
 import { BrowserSessionAuth } from '../src/harness/auth.ts'
 import { discoverHosts, probeHost } from '../src/harness/discovery.ts'
+import { nonLoopbackRefusal } from '../src/harness/endpoint.ts'
 import { ConversationModel } from '../src/conversation/model.ts'
 import type { ConversationItem } from '../src/conversation/types.ts'
 
@@ -88,9 +89,20 @@ async function main(): Promise<void> {
     store: { load: async () => undefined, save: async () => {} },
     log: () => {},
   })
+  // Asserted against the exported refusal rather than against a phrase from it, so
+  // this cannot pass while the message drifts somewhere the panel cannot render.
+  // `0.0.0.0` is the interesting value: the fence refuses it AND it is not a valid
+  // client-side authority, so it would fail twice over if the fence let it by.
   const evil = new HarnessClient({ host: '0.0.0.0', port: PORT, auth: evilAuth, log: () => {} })
-  try { await evil.connect(); check('loopback fence', false, '0.0.0.0 was accepted') }
-  catch (e) { check('loopback fence', /local DeepSeek Harness/i.test((e as Error).message), (e as Error).message) }
+  try {
+    await evil.connect()
+    check('loopback fence', false, '0.0.0.0 was accepted')
+  } catch (e) {
+    const message = (e as Error).message
+    check('loopback fence', message === nonLoopbackRefusal('0.0.0.0'), message)
+    check('...and the refusal names every host that would work',
+      ['127.0.0.1', 'localhost', '::1'].every((h) => message.includes(h)), message)
+  }
 
   // 02. Connect + state.
   await client.connect()

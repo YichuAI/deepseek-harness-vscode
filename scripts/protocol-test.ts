@@ -55,6 +55,8 @@ import { HTML_SKELETON } from '../src/view/html.ts'
 import { ControlSurface } from '../src/conversation/control.ts'
 import { ConversationModel } from '../src/conversation/model.ts'
 import { cookieNameForAuthority } from '../src/harness/auth.ts'
+import { authorityOf, hostLiteral, httpOrigin, isLoopbackHost, nonLoopbackRefusal, wsOrigin } from '../src/harness/endpoint.ts'
+import { muxUrl } from '../src/harness/events.ts'
 import { isMissingMethodError, isShapeRejection, negotiateWire, wireEndpoint } from '../src/harness/wire.ts'
 import {
   DSH_FENCE_FINGERPRINT, discoverHosts, parseLsofListeners, parseNetstatListeners,
@@ -67,6 +69,9 @@ import {
   desktopInstallCandidates, envWithAugmentedPath, findLaunchUrl, redactLaunchUrl,
 } from '../src/harness/launcher.ts'
 import { ReviewStore } from '../src/review/store.ts'
+import type { HunkState } from '../src/review/types.ts'
+import { applyUndo, rebuild } from '../src/review/patch.ts'
+import { isOpenableScheme, quickAskInput, quickAskPrompt } from '../src/context/quick-task.ts'
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 
@@ -2473,6 +2478,19 @@ async function main(): Promise<void> {
     eq('...while a URI with no authority resolves to nothing',
       provider.provideTextDocumentContent({ scheme: 'dsh-review', authority: '', path: '/x/after' } as never), '')
 
+    // The same parser is exported for the "ask about this change" quick tasks,
+    // which need the *real* path behind a virtual document. A second, drifting
+    // copy of this parsing is exactly how the URI shape broke before, so the
+    // two are asserted against the same URIs.
+    eq('the exported parser hands back the path a mention needs',
+      virtualDoc.reviewFilePath(reviewUri('after')), 'src/app/controller.ts')
+    eq('...for either side of the comparison',
+      virtualDoc.reviewFilePath(reviewUri('before')), 'src/app/controller.ts')
+    eq('...and declines a URI that is not a review document',
+      virtualDoc.reviewFilePath({ scheme: 'file', authority: '', path: '/x/after' } as never), undefined)
+    eq('...including one whose last segment is neither side',
+      virtualDoc.reviewFilePath({ scheme: 'dsh-review', authority: 'r', path: '/x/middle' } as never), undefined)
+
     // M4. A `workspace/changes` announcement becomes exactly one card per turn.
     const model = new ConversationModel('session-1')
     const asked: { turn: number; seq: number }[] = []
@@ -2515,6 +2533,253 @@ async function main(): Promise<void> {
     await cf.stop()
   }
 
+  // ─── M2. per-hunk undo ──────────────────────────────────────────────────────
+  //
+  // The sibling of the turn-level undo, and the thing it cannot do: a call that
+  // rewrote three regions of one file should let you drop one of them and keep
+  // the rest.
+  //
+  // Two layers make that work and both fail silently. The patch can write the
+  // wrong bytes — `indexOf` finds the first occurrence, which is not the one a
+  // diff meant. And the card can offer no way to reach the patch at all, which
+  // is exactly what it did until now: the materializer had a `rejectHunk` since
+  // v0.1.8 and the webview never once posted `reviewRejectHunk`, so the feature
+  // existed only in code.
+  {
+    // ── the patch ───────────────────────────────────────────────────────────
+    //
+    // `rebuild` is driven directly, because it is the layer that can write the
+    // WRONG bytes: every offset in it is recovered by searching, and a search
+    // that lands on the wrong occurrence corrupts the file without raising.
+    const h = (id: string, oldText: string | null, newText: string, state: HunkState = 'pending') =>
+      ({ id, oldText, newText, state })
+
+    const before = 'alpha\none\nbeta\ntwo\ngamma\n'
+    const after = 'alpha\nONE\nbeta\nTWO\ngamma\n'
+    const hunks = [h('h0', 'one', 'ONE'), h('h1', 'two', 'TWO')]
+    const patch = (over: Partial<Parameters<typeof rebuild>[0]>) =>
+      rebuild({ beforeText: before, afterText: after, hunks, ...over })
+
+    eq('with nothing undone the rebuilt text is the tool’s own result', patch({})?.text, after)
+    eq('a hunk’s offset is where its new text starts, not where the file does',
+      patch({ targetHunkId: 'h1' })?.at, after.indexOf('TWO'))
+
+    // The whole reason the second hunk of a turn was impossible to undo: the
+    // first undo moves the file off `afterText`, and the old guard compared
+    // against `afterText` and refused everything after it.
+    const firstUndone = [h('h0', 'one', 'ONE', 'rejected'), hunks[1]!]
+    const rebuilt = patch({ hunks: firstUndone, targetHunkId: 'h1' })
+    eq('undoing the first hunk takes only that hunk back out',
+      rebuilt?.text, 'alpha\none\nbeta\nTWO\ngamma\n')
+    eq('...and the second hunk is still located in what is left',
+      rebuilt?.at !== undefined ? rebuilt.text.slice(rebuilt.at, rebuilt.at + 3) : undefined, 'TWO')
+    eq('...so undoing it lands on the original file',
+      applyUndo(rebuilt!.text, rebuilt!.at!, hunks[1]!), before)
+
+    // Ordering the other way round has to work too — the user picks the hunk,
+    // not the diff.
+    const secondUndone = [hunks[0]!, h('h1', 'two', 'TWO', 'rejected')]
+    const other = patch({ hunks: secondUndone, targetHunkId: 'h0' })
+    eq('undoing the second hunk first', other?.text, 'alpha\nONE\nbeta\ntwo\ngamma\n')
+    eq('...then the first gives the original back',
+      applyUndo(other!.text, other!.at!, hunks[0]!), before)
+
+    // A repeated fragment is the case a plain `indexOf` gets wrong: the same
+    // line occurs twice and a diff means the later one. Patching the first would
+    // write a file that is quietly wrong rather than an error.
+    {
+      const dupBefore = 'keep\nAAAA\nother\n'
+      const dupAfter = 'keep\nBBBB\nkeep\n'
+      const pair = [h('h0', 'AAAA', 'BBBB'), h('h1', 'other', 'keep')]
+      const located = rebuild({ beforeText: dupBefore, afterText: dupAfter, hunks: pair, targetHunkId: 'h1' })
+      eq('a repeated fragment resolves to the occurrence the hunk order implies',
+        located?.at, dupAfter.lastIndexOf('keep'))
+      eq('...so undoing it leaves the earlier copy alone',
+        applyUndo(dupAfter, located!.at!, pair[1]!), 'keep\nBBBB\nother\n')
+    }
+
+    // A deletion has no text on the result side to be found by, and an insertion
+    // has none on the original side. Each is located from the side that has it —
+    // guessing from the other end would put the line back at the wrong offset.
+    {
+      const delBefore = 'head\ngone\ntail\n'
+      const delAfter = 'head\ntail\n'
+      const one = [h('h0', 'gone\n', '')]
+      eq('a deletion contributes nothing to the rebuilt text, since the file already reflects it',
+        rebuild({ beforeText: delBefore, afterText: delAfter, hunks: one })?.text, delAfter)
+      const del = rebuild({ beforeText: delBefore, afterText: delAfter, hunks: one, targetHunkId: 'h0' })
+      eq('...and undoing it puts the line back where it came from, not at the top',
+        applyUndo(delAfter, del!.at!, one[0]!), delBefore)
+    }
+    {
+      const insBefore = 'head\ntail\n'
+      const insAfter = 'head\nadded\ntail\n'
+      const one = [h('h0', null, 'added\n')]
+      const ins = rebuild({ beforeText: insBefore, afterText: insAfter, hunks: one, targetHunkId: 'h0' })
+      eq('an insertion is located on the side that carries its text', ins?.at, 5)
+      eq('...and undoing it removes exactly that line',
+        applyUndo(insAfter, ins!.at!, one[0]!), insBefore)
+    }
+
+    // Sides that do not line up. Both searches succeed here, so only the
+    // consistency check catches it — and without that check the splice below
+    // would restore a line somewhere it never was.
+    eq('sides that disagree about the text between two hunks are refused',
+      rebuild({
+        beforeText: 'x\nAA\nyy\nBB\nz\n',
+        afterText: 'x\nyy\nCC\nz\n',
+        hunks: [h('h0', 'AA', ''), h('h1', 'BB', 'CC')],
+      }), undefined)
+
+    // Drift: the diff names text the file does not contain. The patch has to
+    // decline rather than write something plausible.
+    eq('a hunk the file no longer contains yields nothing to write',
+      rebuild({ beforeText: before, afterText: 'alpha\nbeta\n', hunks }), undefined)
+
+    // ── the store's hunk summary ────────────────────────────────────────────
+    {
+      const store = new ReviewStore()
+      const id = store.createFromToolResult({
+        sessionId: 'session-m2',
+        callId: 'call-m2',
+        toolName: 'edit',
+        arguments: '{}',
+        resultMeta: {
+          diffs: [{
+            path: 'src/app.ts', before, after,
+            hunks: [
+              { oldText: 'one', newText: 'ONE' },
+              { oldText: 'two', newText: 'TWO' },
+            ],
+          }],
+        },
+      })
+      check('the store builds a review for a two-hunk diff', id !== undefined)
+      const summary = store.summaries('session-m2').find((r) => r.id === id)!
+      const f = summary.files[0]!
+      eq('every hunk reaches the card, in order', f.hunks.map((x) => x.id), ['h0', 'h1'])
+      eq('...each starting out pending', f.hunks.map((x) => x.state), ['pending', 'pending'])
+      eq('...carrying the text that identifies it', f.hunks.map((x) => x.preview), ['ONE', 'TWO'])
+      eq('...and its own line counts, not the file’s',
+        f.hunks.map((x) => x.addedLines), [1, 1])
+      eq('...so the card can say which hunk is which',
+        f.hunks.map((x) => x.removedLines), [1, 1])
+
+      store.setHunkState(id!, 'src/app.ts', 'h1', 'rejected')
+      const partly = store.summaries('session-m2').find((r) => r.id === id)!.files[0]!
+      eq('undoing one hunk moves the file to partial rather than to rejected', partly.state, 'partial')
+      eq('...and only that hunk changes state', partly.hunks.map((x) => x.state), ['pending', 'rejected'])
+    }
+
+    // ── the card ────────────────────────────────────────────────────────────
+    //
+    // Driven through the real emitted script, because the gap this closes was
+    // in the webview, not in the materializer: the code to undo a hunk existed
+    // and nothing ever called it.
+    {
+      const reviewFile = (path: string, state: string, hunks: Record<string, unknown>[]) => ({
+        path, state, addedLines: 4, removedLines: 2, hunks,
+      })
+      const reviewOf = (file: Record<string, unknown>, state = 'pending') => ({
+        id: 'review-1', callId: 'call-1', toolName: 'write', state, createdAt: 1, files: [file],
+      })
+      const snapshot = (review: Record<string, unknown> | undefined, rev = 1) => ({
+        activeSessionId: 'session-card',
+        reviews: review === undefined ? [] : [review],
+        snapshot: {
+          sessionId: 'session-card', renderVersion: rev, running: false, systemMessageCount: 0,
+          items: [{
+            kind: 'tool', seq: 5, uid: 5, rev, reviewId: 'review-1',
+            name: 'edit', arguments: '{}', state: 'completed',
+          }],
+        },
+      })
+
+      const byClass = (root: unknown, cls: string): StubEl[] =>
+        walk(root).filter((n) => String(n['className'] ?? '').split(/\s+/).includes(cls))
+
+      const threeHunks = [
+        { id: 'h0', state: 'pending', addedLines: 1, removedLines: 1, preview: 'ONE' },
+        { id: 'h1', state: 'pending', addedLines: 2, removedLines: 0, preview: 'TWO' },
+        { id: 'h2', state: 'pending', addedLines: 1, removedLines: 1, preview: 'THREE' },
+      ]
+      const boot = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON,
+        snapshot(reviewOf(reviewFile('src/app.ts', 'pending', threeHunks))))
+      eq('the card boots with a review attached to a tool row', boot.error, '')
+      const card = () => boot.el('messages')
+      eq('one row per hunk', byClass(card(), 'rf-hunk').length, 3)
+      eq('...each carrying the text that names it',
+        byClass(card(), 'rf-hunk-text').map((n) => String(n['textContent'])),
+        ['ONE', 'TWO', 'THREE'])
+      eq('...and an undo button apiece',
+        byClass(card(), 'rf-hunk').filter((row) => stubButtons(row).length === 1).length, 3)
+
+      // The click that did not exist before this release.
+      const secondRow = byClass(card(), 'rf-hunk')[1]!
+      fire(stubButtons(secondRow)[0], 'click')
+      const posted = boot.actions.filter((a) => a['type'] === 'reviewRejectHunk')
+      eq('undoing a hunk posts the one action that names it', posted.length, 1)
+      eq('...with the hunk id, not a position', posted[0]?.['hunkId'], 'h1')
+      eq('...and the file it belongs to', posted[0]?.['filePath'], 'src/app.ts')
+      eq('...and the review', posted[0]?.['reviewId'], 'review-1')
+
+      // A single-hunk file draws no hunk rows: the file row's own button IS that
+      // hunk, and two buttons for one action is worse than one.
+      const single = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON,
+        snapshot(reviewOf(reviewFile('src/one.ts', 'pending', [
+          { id: 'h0', state: 'pending', addedLines: 1, removedLines: 0, preview: 'ONLY' },
+        ]))))
+      eq('a single-hunk file offers only the file-level undo',
+        byClass(single.el('messages'), 'rf-hunk').length, 0)
+      const fileUndo = stubButtons(single.el('messages'))
+        .find((b) => String(b['title']) === 'Revert this file')
+      check('...and that button is on screen', fileUndo !== undefined)
+      eq('...which posts a file revert',
+        (() => { fire(fileUndo, 'click'); return single.actions[0]?.['type'] })(),
+        'reviewRejectFile')
+
+      // A file left half-undone must stay reachable: if the file-level button
+      // vanished on 'partial', the remaining hunks would have no undo at all.
+      const partial = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON,
+        snapshot(reviewOf(reviewFile('src/app.ts', 'partial', [
+          { id: 'h0', state: 'rejected', addedLines: 1, removedLines: 1, preview: 'ONE' },
+          { id: 'h1', state: 'pending', addedLines: 2, removedLines: 0, preview: 'TWO' },
+          { id: 'h2', state: 'pending', addedLines: 1, removedLines: 1, preview: 'THREE' },
+        ]), 'partial')))
+      eq('a half-undone file still offers to revert the rest',
+        byClass(partial.el('messages'), 'rf-hunk').filter((row) => stubButtons(row).length === 1).length, 2)
+      eq('...and the undone hunk shows that it is undone, with no button',
+        (() => {
+          const row = byClass(partial.el('messages'), 'rf-hunk')[0]!
+          return String(row['className']).includes('rejected') && stubButtons(row).length === 0
+        })(), true)
+      eq('...and revert-all is still offered',
+        stubButtons(partial.el('messages')).some((b) => String(b['textContent']) === 'Revert all'), true)
+
+      // The signature gate: reverting one hunk of three leaves the file
+      // 'partial' and every count unchanged, so a card whose render signature
+      // watched only the file would never repaint the row it just undid.
+      const before = snapshot(reviewOf(reviewFile('src/app.ts', 'partial', [
+        { id: 'h0', state: 'rejected', addedLines: 1, removedLines: 1, preview: 'ONE' },
+        { id: 'h1', state: 'pending', addedLines: 2, removedLines: 0, preview: 'TWO' },
+        { id: 'h2', state: 'pending', addedLines: 1, removedLines: 1, preview: 'THREE' },
+      ]), 'partial'), 1)
+      const gate = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, before)
+      const nodesBefore = gate.stats.nodes
+      const nodes0 = gate.stats.nodes
+      gate.push(snapshot(reviewOf(reviewFile('src/app.ts', 'partial', [
+        { id: 'h0', state: 'rejected', addedLines: 1, removedLines: 1, preview: 'ONE' },
+        { id: 'h1', state: 'rejected', addedLines: 2, removedLines: 0, preview: 'TWO' },
+        { id: 'h2', state: 'pending', addedLines: 1, removedLines: 1, preview: 'THREE' },
+      ]), 'partial'), 2))
+      check('a second hunk undo repaints the row it changed',
+        gate.stats.nodes - nodes0 > 0, `${String(gate.stats.nodes - nodesBefore)} node(s)`)
+      eq('...so the second hunk now reads as undone too',
+        byClass(gate.el('messages'), 'rf-hunk').map((n) => String(n['className']).includes('rejected')),
+        [true, true, false])
+    }
+  }
+
   // ─── N. composer mention chips ──────────────────────────────────────────────
   //
   // The chip strip under the composer is the only place the `@` grammar becomes
@@ -2550,6 +2815,184 @@ async function main(): Promise<void> {
       typed('@"my notes/plan.md" and then prose'), ['my notes/plan.md'])
     eq('an @ inside a word is not a mention', typed('mail bob@example.com'), [])
     eq('and the strip goes away once nothing is referenced', typed('just prose'), [])
+  }
+
+  // ─── N2. right-click quick tasks ────────────────────────────────────────────
+  //
+  // The nine context-menu commands all funnel through one string composer, and
+  // the only failure mode that matters is the quiet one: a prompt that reads
+  // fine but whose mention never becomes a chip, so the agent is asked about
+  // *nothing*. That is a property of the text under the REAL `@` grammar, not
+  // of the composer — so these assertions drive the webview script rather than
+  // pattern-matching the strings it was handed.
+  {
+    const chat = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, {})
+    check('the webview boots for the quick-task assertions', chat.error === '', chat.error)
+
+    const input = chat.el('input') as { value: string }
+    const strip = chat.el('context-files') as { children: Record<string, unknown>[] }
+    const chips = (text: string): string[] => {
+      input.value = text
+      fire(input, 'input')
+      return strip.children.map((c) => String(c['textContent']))
+    }
+
+    eq('a selection ask says what it is about', quickAskPrompt('explain', 'selection'),
+      'Explain what this code does.')
+    eq('a file ask says "file"', quickAskPrompt('fix', 'file'),
+      'Fix the problems in this file.')
+    eq('a change ask says "change"', quickAskPrompt('review', 'change'),
+      'Review this change and point out anything wrong.')
+
+    const prompt = quickAskPrompt('explain', 'file')
+    const composed = quickAskInput(prompt, '@src/app/controller.ts')
+    check('the instruction sits on its own line above the mention',
+      composed.startsWith(prompt + '\n@'), JSON.stringify(composed))
+    check('...and the text ends where the next token can start',
+      composed.endsWith(' '), JSON.stringify(composed))
+
+    // The load-bearing one: what the composer produces must chip the path, and
+    // chip it ALONE. A missing newline puts the prompt into the path; a missing
+    // trailing space swallows whatever the person types next.
+    eq('the composed ask yields exactly one chip, holding the path',
+      chips(composed), ['src/app/controller.ts'])
+
+    // The same for a selection, where the range has to survive.
+    const ranged = quickAskInput(quickAskPrompt('review', 'selection'), '@src/app.ts:L10-L20')
+    eq('a selection ask keeps its line range on the chip',
+      chips(ranged), ['src/app.ts:L10-L20'])
+
+    // A path with a space is quoted by `formatMention`; the composer must not
+    // undo that, or the mention silently ends at the space.
+    const quoted = quickAskInput(quickAskPrompt('fix', 'change'), '@"my notes/plan.md"')
+    eq('a quoted mention still chips as one path',
+      chips(quoted), ['my notes/plan.md'])
+
+    // The scheme policy behind "ask about this change". A diff editor hands
+    // over whichever pane is focused, and the original side of a comparison is
+    // rarely a file on disk — those must not become mentions.
+    check('a plain file is openable', isOpenableScheme('file'))
+    check('...and so is every remote scenario, which VS Code funnels through one scheme',
+      isOpenableScheme('vscode-remote'))
+    check('...but the HEAD side of a git comparison is not',
+      !isOpenableScheme('git'), 'a `git:` URI is a view of a revision, not the working-tree file')
+    check('...nor is our own virtual review document',
+      !isOpenableScheme('dsh-review'))
+    check('...nor a GitLens revision',
+      !isOpenableScheme('gitlens'))
+  }
+
+  // ─── N3. the loopback fence, which *is* the remote-support matrix ───────────
+  //
+  // "Does this work over Remote-SSH / WSL / a container?" is not answered by a
+  // setting. It is answered here, before a socket exists, and the README's
+  // matrix is a description of these assertions rather than a promise beside
+  // them. Three levels, because a fence with one hole is not a fence:
+  //
+  //   1. which host strings are accepted at all,
+  //   2. the three strings built from an accepted one — the cookie is named
+  //      `sha256(authority)`, so a client that formats its own cookie key
+  //      differently from its own `Host` header is told its own cookie is
+  //      invalid, and an IPv6 literal has to be bracketed in both or in neither,
+  //   3. the refusal itself, raised at each of the three entry points.
+  //
+  // The connect-level refusal is asserted against an auth object that THROWS if
+  // any property is read. That is the whole point of the assertion: "refused"
+  // has to mean "refused before the credential file was opened", or a security
+  // boundary would be enforcing itself after the interesting part was over.
+  {
+    check('loopback is accepted as the dotted quad', isLoopbackHost('127.0.0.1'))
+    check('...as the name', isLoopbackHost('localhost'))
+    check('...and as the IPv6 literal', isLoopbackHost('::1'))
+    check('a LAN address is not loopback', !isLoopbackHost('192.168.68.221'))
+    check('...nor is the wildcard', !isLoopbackHost('0.0.0.0'))
+    check('...nor the bridge gateway a container sees the host through', !isLoopbackHost('172.17.0.1'))
+    check('...nor a name that merely resolves here', !isLoopbackHost('host.docker.internal'))
+
+    // Unbracketed, `http://::1:3080/` parses as host `::1:3080` on port 80 — so
+    // `::1` used to be accepted by the fence and unusable past it.
+    eq('a dotted quad keeps its authority', authorityOf('127.0.0.1', 3080), '127.0.0.1:3080')
+    eq('an IPv6 literal is bracketed in the authority', authorityOf('::1', 3080), '[::1]:3080')
+    eq('...and therefore in the origin', httpOrigin('::1', 3080), 'http://[::1]:3080')
+    eq('...and in the socket URL', muxUrl('::1', 3080, '/api/remote.mux'), 'ws://[::1]:3080/api/remote.mux')
+    eq('an already-bracketed host is not bracketed twice', hostLiteral('[::1]'), '[::1]')
+    eq('the origin and the authority agree — which is what makes the cookie valid',
+      httpOrigin('localhost', 3080).slice('http://'.length), authorityOf('localhost', 3080))
+    check('the socket URL and the origin agree about the same endpoint',
+      muxUrl('127.0.0.1', 3081, '/api/remote.mux').startsWith(wsOrigin('127.0.0.1', 3081)))
+
+    const refusedHost = '192.168.68.221'
+    const untouchedAuth = new Proxy({}, {
+      get(_target, prop) {
+        throw new Error(`auth.${String(prop)} was read, but the fence should have refused first`)
+      },
+    }) as unknown as BrowserSessionAuth
+
+    const fenced = new HarnessClient({ host: refusedHost, port: 3080, auth: untouchedAuth, log: () => {} })
+    let refusal = ''
+    try {
+      await fenced.connect()
+    } catch (e) {
+      refusal = e instanceof Error ? e.message : String(e)
+    }
+    eq('connect refuses a non-loopback host, in the fence’s own words',
+      refusal, nonLoopbackRefusal(refusedHost))
+    check('...without ever reading the credential store', !refusal.includes('auth.'), refusal)
+    const fencedState = fenced.getState()
+    check('...and leaves a state the panel can act on',
+      fencedState.kind === 'error' && fencedState.message.includes(refusedHost),
+      fencedState.kind)
+
+    // The fence is read on every call rather than only at connect, because
+    // `retarget()` exists: a client that was pointed at loopback can be pointed
+    // elsewhere afterwards, and that must not become the way around the check.
+    // `retarget` itself has to reach the auth owner — that is what re-keys the
+    // stored cookie — so this one gets a stub rather than the throwing proxy.
+    const retargetAuth = {
+      retarget: () => {}, init: async () => {}, isReady: () => true, cookieHeader: () => undefined,
+    } as unknown as BrowserSessionAuth
+    const retargeted = new HarnessClient({ host: '127.0.0.1', port: 1, auth: retargetAuth, log: () => {} })
+    retargeted.retarget(refusedHost, 3080)
+    let afterRetarget = ''
+    try {
+      await retargeted.listSessions()
+    } catch (e) {
+      afterRetarget = e instanceof Error ? e.message : String(e)
+    }
+    eq('the fence is re-read after retarget, not only at connect',
+      afterRetarget, nonLoopbackRefusal(refusedHost))
+
+    const stillFenced = new HarnessClient({
+      host: refusedHost, port: 3080, auth: untouchedAuth, log: () => {},
+    })
+    let rpcRefusal = ''
+    try {
+      await stillFenced.listSessions()
+    } catch (e) {
+      rpcRefusal = e instanceof Error ? e.message : String(e)
+    }
+    eq('a unary RPC refuses it too, rather than letting connect be the only gate',
+      rpcRefusal, nonLoopbackRefusal(refusedHost))
+
+    let routeRefusal = ''
+    try {
+      await stillFenced.changesSummary('session-n3', 1)
+    } catch (e) {
+      routeRefusal = e instanceof Error ? e.message : String(e)
+    }
+    eq('and so does the changes route, which sits beside the gateway',
+      routeRefusal, nonLoopbackRefusal(refusedHost))
+
+    // The refusal is its own diagnosis, not an "unknown failure". This is the
+    // one failure whose fix is "you are in the wrong configuration", and the
+    // reader is usually a remote user who needs to be told which side to move.
+    const hint = classifyConnectFailure(nonLoopbackRefusal(refusedHost),
+      { host: refusedHost, port: 3080 })
+    eq('the refusal classifies as itself', hint.kind, 'non-loopback-host')
+    check('...and the advice names all three accepted values',
+      ['127.0.0.1', 'localhost', '::1'].every((h) => hint.fix.includes(h)))
+    check('...and points a remote user at the matrix rather than at a port number',
+      /Remote development/.test(hint.fix))
   }
 
   // ─── O. failure classification, the diagnostics report, and the refusal ──────

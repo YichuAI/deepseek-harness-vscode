@@ -36,6 +36,7 @@
  */
 
 import { createHash, createHmac } from 'node:crypto'
+import { authorityOf } from './endpoint.ts'
 import { firstHeader, httpRequest } from './http.ts'
 import {
   describeSecretGap,
@@ -96,10 +97,13 @@ export function cookieNameForAuthority(authority: string): string {
   return 'dsh-auth-' + createHash('sha256').update(authority).digest('base64url')
 }
 
-/** `host:port` exactly as the Host header will carry it. */
-export function authorityOf(host: string, port: number): string {
-  return `${host}:${String(port)}`
-}
+/**
+ * `host:port` as the Host header will carry it — re-exported so the cookie code
+ * and the request code cannot drift apart. The definition lives in `endpoint.ts`
+ * with the loopback fence and the URL composition, because all four are the same
+ * decision: which endpoint is this, and what is it called.
+ */
+export { authorityOf }
 
 export class BrowserSessionAuth {
   private session: StoredSession | undefined

@@ -5,6 +5,156 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),  
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] — 2026-10-13
+
+Tagline: **undo part of a change, and get a written answer about remote workspaces instead of a refusal.**
+Tagline (ZH): **可以只撤销一处改动的一部分了；远程工作区拿到的是一份写下来的回答，而不是一句拒绝。**
+
+### Added
+
+- **Per-hunk undo, in the changes card.** Each hunk inside a file gets its own row — a preview
+  line, its own `+`/`−` counts, and an ↩ that reverts that hunk alone. The file-level button
+  stays and now means "revert whatever is left", which is the same action it always was; what
+  changed is that it is no longer the only one. `ReviewSummary.files[].hunks` grew from
+  `{id, state}` to include `addedLines`, `removedLines` and a `preview`, because a card cannot
+  offer a choice between hunks it cannot name.
+
+  The text surgery lives in `src/review/patch.ts` — a pure module with no filesystem, no
+  `vscode` and no store — so the interesting case is asserted directly rather than through a
+  rendered card. That case is *where* a hunk is. A deletion hunk has no text on the result
+  side to search for and an insertion hunk has none on the original side, so offsets have to
+  be recovered from both sides at once; and a single `indexOf` per hunk silently mis-locates a
+  repeated fragment, patching the first occurrence rather than the one the diff meant. Both
+  are now handled by a forward-only cursor on each side, plus a consistency check that refuses
+  when the unchanged text between two hunks does not read the same on both sides.
+
+- **Nine context-menu commands, in three submenus.** *Explain / Fix / Review* against a
+  selection (`editor/context`), a file or folder (`explorer/context`), or a change — reachable
+  from a diff editor (`isInDiffEditor`) and from a source-control row (`scm/resourceState/context`).
+  The one that needed thought is "this change": a diff tab can be open while the person
+  right-clicks a different SCM row, so the resolver tries the menu argument first, then the
+  diff tab's modified side, then its original side, then the active editor — and the ordering
+  is load-bearing rather than incidental. `src/context/quick-task.ts` holds the prompt strings
+  and the scheme policy (`file` and `vscode-remote` are openable; `git`, `gitlens` and our own
+  `dsh-review` are not, since none of them is the working-tree file).
+
+  The prompts are asserted through the webview's real `@` grammar rather than by
+  pattern-matching the string, because the failure that matters is quiet: a prompt that reads
+  perfectly and whose mention never becomes a chip, so the agent is asked about nothing.
+
+- **`src/harness/endpoint.ts`** — the loopback fence and the three strings built from a
+  `{host, port}` (the `Origin:` header, the authority the cookie is named after, the `ws://`
+  URL). One module because they are one decision, and because the answer to "does this work
+  over Remote-SSH?" should be a file you can point at rather than a setting you can look for.
+
+- **A remote-development matrix in both READMEs.** Four scenarios, their state, and what each
+  one means — including the three this machine could not exercise.
+
+### Changed
+
+- **`deepseekHarness.host` accepts three values, and now so does the documentation.**
+  `127.0.0.1`, `localhost` and `::1` were always the accepted set; the README and the setting's
+  description said "`127.0.0.1` or `localhost`", which was wrong in a way that cost nothing
+  until it did — see the `::1` fix below.
+
+- **The refusal is one message, and it is a diagnosis.** `connect()`, the unary `rpc()` path
+  and the `changes.*` routes each had their own wording for the same rule, and the connect-time
+  one still said "v0.0.x only supports local DeepSeek Harness instances". They now all raise
+  `nonLoopbackRefusal(host)`, which names the three accepted values and the machine they mean,
+  and `classifyConnectFailure` gained a `non-loopback-host` kind for it — first in the rule
+  list, since it is a decision rather than a failure to diagnose. Previously a user who typed
+  a LAN address got "Could not connect" with no fix.
+
+- **`extensionKind: ["workspace"]` is now declared.** It was implicit before, and the default
+  is a *preference* rather than a constraint. In a remote window the extension host has to run
+  on the remote machine — that is the only place its `$DSH_HOME`, its listener table and its
+  loopback all describe the same Harness — and a silent fallback to running locally would point
+  the plugin at the wrong machine's loopback with the wrong machine's credential file.
+
+- **`test/**/*.ts` is typechecked.** It never had been. Adding it to `tsconfig.json` immediately
+  caught a real error: chain 4 was calling `respondQuestion` with `selected: 'Beta'` where the
+  field is `string[]` — a question may allow several choices — so the most recently written
+  end-to-end chain had been shipping a type error that `tsc` had never been asked about.
+
+- **`ReviewMaterializer` takes an explicit `RevertWorkspace` interface** instead of
+  `typeof vscode.workspace`, and `test/e2e/vscode-stub.ts` aliases that type rather than
+  maintaining a second copy of it. Narrowing the constructor is what made the e2e suite
+  typecheckable; aliasing the type is what keeps the stub from drifting into disagreement with
+  the thing it stands in for.
+
+- **End-to-end coverage went from 1 chain to 3.** Chains 1 and 4 are the two the
+  v0.0.4→v0.1.1 changelog makes the case for: the panel did not start until v0.1.1, and "Allow"
+  never actually allowed until later, and a unit test would have been green through both.
+
+### Fixed
+
+- **Undoing the second hunk of a file was refused as `stale`, every time.** The guard compared
+  the *whole file* against `afterText`, and once the first hunk had been reverted the file no
+  longer matched — so hunk 2 onward could never be undone, and the refusal blamed an edit that
+  had not happened. The expected content is now derived from the diff (current text, plus back
+  every hunk not yet undone) and compared that way. A genuine edit made in between still
+  refuses; the difference is that "you edited this" is now true when it is said.
+
+- **A click on a review that had captured no text deleted the file.** A review built from a
+  tool call's arguments alone has `beforeText === null && afterText === null`; `rejectFile`
+  fell through to the "this file was created" branch and removed the path. It now refuses with
+  a new `no-diff` reason and says what is missing. Found by writing the per-hunk tests, not by
+  a user — the only good way to find it.
+
+- **The card could not repaint after a hunk undo.** `reviewSigFor` built its signature from
+  file-level fields only, and undoing one hunk of three leaves the file `partial` with
+  unchanged counts — so the click looked like it did nothing. The signature now folds in
+  per-hunk state.
+
+- **`reviewRejectHunk` had been dead code since v0.1.8.** The materializer had supported
+  `rejectHunk` all along and `src/view/client.ts` had never once posted it; there was no hunk
+  row in the webview to post it from. A file-level revert button also now shows for `partial`,
+  not only `pending` — a half-undone file is exactly when you want the "revert the rest"
+  affordance.
+
+- **`::1` was accepted by the fence and unusable past it.** `LOOPBACK_HOSTS` has listed it
+  since the fence was written, and every URL was composed as
+  `` `http://${host}:${port}` `` — which for an IPv6 literal yields `http://::1:3080`, parsed
+  as host `::1:3080` on port 80. `events.ts` already knew to bracket a literal for the socket
+  URL; the HTTP origin, the upload URL and `authorityOf` did not. All of them now go through
+  `endpoint.ts`, and `authorityOf` brackets too — which matters beyond the URL, because the
+  cookie is named `sha256(authority)` and a client that formats its own cookie key differently
+  from its own `Host` header is told its own cookie is invalid.
+
+- **`muxUrl` had a private copy of the bracketing rule.** Same fix, same module.
+
+### Notes
+
+- **The two fences behind the remote answer, both measured on this machine.** *This plugin's*:
+  `127.0.0.1`, `localhost` and `::1` are accepted; a LAN address, `0.0.0.0`,
+  `host.docker.internal` and `172.17.0.1` are refused before a socket exists, asserted against
+  an auth object that throws if touched — so "refused" means refused *before* the credential
+  file was opened. *The Host's own*: with a Host on `127.0.0.1:3080`, the listener table reads
+  `TCP 127.0.0.1:3080 … LISTENING` and nothing else on that port, and
+  `192.168.68.221:3080` answers `ECONNREFUSED`.
+
+- **Three of the four matrix rows could not be exercised here, and say so.** `wsl.exe` is on
+  this sandbox's program blacklist and could not be launched at all; `docker` is not installed;
+  there is no SSH server (`localhost:22` refuses). What is measured is the part that decides
+  all four rows.
+
+- **Test counts.** Protocol assertions 381 → **461** (the new N3 group covers the fence and the
+  three derived strings; M2 covers the per-hunk surgery and the card that drives it; N2 covers
+  the nine right-click asks). End-to-end 15 → **91** across three written chains (chain 1 = 23,
+  chain 4 = 31, chain 5 = 37 — chain 5 grew from 6 sections to 13). Integration against a live
+  `@deepseek-ai/dsh@0.2.0-rc.2` Host: **40/40** — one of them new, because the fence refusal
+  is now asserted against the exported message rather than against a phrase from it, so the
+  assertion cannot pass while the wording drifts somewhere the panel cannot render.
+  Coverage is reported as `3 of 5 chains covered,
+  2 not written`; the other two are still printed as unwritten rather than omitted.
+
+- **Chains 1 and 4 need no Extension Host, and that is why they exist.** `HarnessClient` and
+  `BrowserSessionAuth` import no `vscode`, so `test/e2e/fake-host.ts` is a real `http.Server`
+  with a hand-written WebSocket and both chains run in plain Node. The fake Host keeps the
+  real one's fences on purpose: a POST route that forgot to require the cookie answers the
+  wire-negotiation probe with `200` instead of `401`, and the test would then be measuring the
+  wrong classifier.
+
 ## [0.2.2] — 2026-10-12
 
 Tagline: **it no longer has to read a file full of your API keys, and `autoSession: false` finally means something.**

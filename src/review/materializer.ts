@@ -1,83 +1,152 @@
 /**
- * Materializer — performs the actual filesystem operations for Reject.
+ * Materializer — performs the actual filesystem operations for a revert.
  *
- * Accept is a no-op (the change is already on disk; we just mark accepted).
- * Reject reverses the applied change:
- *   - For existing files: replace afterText → beforeText
- *   - For new files (beforeText === null): delete the file
- *   - Per hunk: replace just the hunk's newText → oldText within the file
+ * There is no "accept" counterpart any more: a mutation reaches disk before a
+ * review can be built from its result, so accepting could only ever mark a fact
+ * as acknowledged. Rejecting reverses the applied change:
+ *   - existing file   : write `beforeText` back
+ *   - new file        : delete it
+ *   - one hunk        : reverse-patch just that hunk, leaving the rest alone
  *
- * Stale Guard (goal.md §9):
- *   Before reverting, verify the current file content matches the captured
- *   afterText. If the user (or another tool) has modified the file since the
- *   review was created, we refuse to revert and mark the file as conflicted.
+ * Guards (goal.md §9–10):
+ *   dirty editor — a VS Code editor holding unsaved changes blocks the write
+ *   drift        — the file must still hold what this review expects
  *
- * Dirty Editor Guard (goal.md §10):
- *   If a VS Code editor for the file is dirty (unsaved changes), we refuse
- *   to auto-revert and mark as conflicted.
+ * The drift guard is the subtle one. "What this review expects" is NOT
+ * `afterText`: once a hunk has been undone the file deliberately stops matching
+ * it, and requiring a whole-file match made the second hunk of a turn
+ * impossible to revert — the first undo poisoned every later one. The
+ * expectation is therefore `afterText` with the already-undone hunks taken back
+ * out, which is a function of the captured diff alone. That keeps the
+ * materializer stateless (nothing has to remember what each write produced) and
+ * keeps the guarantee that matters: a file the user has edited since the turn
+ * still refuses.
  */
 
 import * as crypto from 'node:crypto'
 import * as vscode from 'vscode'
+import { applyUndo, rebuild } from './patch.ts'
 import type { ReviewFile, ReviewHunk, ReviewTransaction } from './types.ts'
 
 export type MaterializeResult =
   | { ok: true }
-  | { ok: false; reason: 'stale' | 'dirty' | 'read-error' | 'write-error'; message: string }
-
-export class ReviewMaterializer {
-  constructor(private readonly workspace: typeof vscode.workspace) {}
-
-  /** Reject an entire file — revert to beforeText or delete if new file. */
-  async rejectFile(review: ReviewTransaction, file: ReviewFile): Promise<MaterializeResult> {
-    const guard = await this.staleGuard(file)
-    if (!guard.ok) return guard
-
-    if (file.beforeText === null) {
-      // New file — delete it
-      return this.deleteFile(file.path)
-    }
-
-    // Existing file — replace content with beforeText
-    return this.writeFile(file.path, file.beforeText)
+  | {
+    ok: false
+    reason: 'stale' | 'dirty' | 'read-error' | 'write-error' | 'no-diff'
+    message: string
   }
 
-  /** Reject a single hunk — reverse patch just that hunk. */
-  async rejectHunk(review: ReviewTransaction, file: ReviewFile, hunk: ReviewHunk): Promise<MaterializeResult> {
-    const guard = await this.staleGuard(file)
-    if (!guard.ok) return guard
+/** Just enough of a `Uri` for the filesystem calls below. */
+export interface RevertUri {
+  readonly fsPath: string
+}
 
-    if (file.hunks.length === 1 || file.beforeText === null) {
-      // Single hunk or new file — revert the whole file
-      if (file.beforeText === null) return this.deleteFile(file.path)
+/**
+ * The slice of the VS Code workspace API a revert uses.
+ *
+ * Spelled out rather than written as `typeof vscode.workspace` so that what this
+ * class depends on is visible at a glance — and so that a test can hand it a
+ * real filesystem without imitating forty methods it will never call. The e2e
+ * suite reports against a real temp directory through exactly this shape.
+ */
+export interface RevertWorkspace {
+  readonly textDocuments: ReadonlyArray<{ readonly fileName: string; readonly isDirty: boolean }>
+  readonly fs: {
+    readFile(uri: RevertUri): Thenable<Uint8Array>
+    writeFile(uri: RevertUri, content: Uint8Array): Thenable<void>
+    delete(uri: RevertUri, options?: unknown): Thenable<void>
+  }
+}
+
+/** Reading a file and holding it to what a review expects. */
+type Reconciled =
+  | { ok: true; text: string; at: number | undefined }
+  | { ok: false; reason: 'stale' | 'read-error'; message: string }
+
+export class ReviewMaterializer {
+  constructor(private readonly workspace: RevertWorkspace) {}
+
+  /** Reject an entire file — back to `beforeText`, or delete it if this call created it. */
+  async rejectFile(review: ReviewTransaction, file: ReviewFile): Promise<MaterializeResult> {
+    const refuse = this.dirtyGuard(file)
+    if (refuse !== undefined) return refuse
+
+    // The tool deleted the file. There is no result left to hold it to, and the
+    // only way back is the captured original — so no drift check is possible.
+    const { afterText } = file
+    if (afterText === null) {
+      // Both sides missing means the review was built from a tool call alone,
+      // with no captured text at all. There is nothing to write back and nothing
+      // to look for, so say so: this used to fall through to the "new file"
+      // branch and DELETE the file.
+      if (file.beforeText === null) {
+        return {
+          ok: false,
+          reason: 'no-diff',
+          message: `${file.path} was recorded without its before/after text, so there is nothing to revert to.`,
+        }
+      }
       return this.writeFile(file.path, file.beforeText)
     }
 
-    // Multi-hunk: replace just this hunk's newText with oldText in the file
-    const current = await this.readFile(file.path)
-    if (current === undefined) {
-      return { ok: false, reason: 'read-error', message: `Cannot read ${file.path}` }
-    }
+    // Checked even for a created file: the delete below is a write, and a file
+    // the user has touched since the turn is theirs.
+    const reconciled = await this.reconcile(file, afterText, file.beforeText ?? '', undefined)
+    if (!reconciled.ok) return reconciled
 
-    const idx = current.indexOf(hunk.newText)
-    if (idx === -1) {
+    if (file.beforeText === null) return this.deleteFile(file.path)
+    return this.writeFile(file.path, file.beforeText)
+  }
+
+  /**
+   * Reject a single hunk — reverse just that hunk.
+   *
+   * The granularity the file-level and turn-level buttons cannot offer: a call
+   * that reformatted three functions and fixed one bug should let you keep the
+   * fix and drop the reformat, without hand-editing the file back to prove it.
+   */
+  async rejectHunk(review: ReviewTransaction, file: ReviewFile, hunk: ReviewHunk): Promise<MaterializeResult> {
+    const refuse = this.dirtyGuard(file)
+    if (refuse !== undefined) return refuse
+
+    // A file this call created, or one whose diff arrived with only one side,
+    // has nothing to patch between — the honest undo is the whole file.
+    const { beforeText, afterText } = file
+    if (beforeText === null || afterText === null) return this.rejectFile(review, file)
+
+    // Two clicks on one button are two requests, and the second arrives while
+    // the first write is still in flight. The end state the caller asked for
+    // already holds, so this is a no-op rather than a refusal — anything else
+    // would paint a red "could not undo" on a hunk that is already undone.
+    if (hunk.state === 'rejected') return { ok: true }
+
+    const reconciled = await this.reconcile(file, afterText, beforeText, hunk.id)
+    if (!reconciled.ok) return reconciled
+
+    if (reconciled.at === undefined) {
       return {
         ok: false,
         reason: 'stale',
-        message: `Hunk content not found in current file — file may have been modified.`,
+        message: `This change is no longer present in ${file.path} — nothing to undo.`,
       }
     }
 
-    const reverted = current.slice(0, idx) + (hunk.oldText ?? '') + current.slice(idx + hunk.newText.length)
-    return this.writeFile(file.path, reverted)
+    const { text, at } = reconciled
+    return this.writeFile(file.path, applyUndo(text, at, hunk))
   }
 
-  // ─── stale guard ──────────────────────────────────────────────────────────
+  // ─── guards ───────────────────────────────────────────────────────────────
 
-  private async staleGuard(file: ReviewFile): Promise<MaterializeResult> {
-    // 1. Dirty editor check — fail closed if VS Code has unsaved changes
-    const docs = this.workspace.textDocuments
-    for (const doc of docs) {
+  /**
+   * Refuse while VS Code holds unsaved changes for the file.
+   *
+   * Its own reason rather than folded into drift: it is a different fact with a
+   * different remedy. The newer text is in the user's buffer and saving is
+   * theirs to decide, which is not what "modified since this review" would send
+   * them looking for.
+   */
+  private dirtyGuard(file: ReviewFile): MaterializeResult | undefined {
+    for (const doc of this.workspace.textDocuments) {
       if (doc.fileName === file.path && doc.isDirty) {
         return {
           ok: false,
@@ -86,32 +155,46 @@ export class ReviewMaterializer {
         }
       }
     }
+    return undefined
+  }
 
-    // 2. Content staleness check
-    if (file.afterText === null) {
-      // File was deleted by the tool — nothing to guard
-      return { ok: true }
-    }
-
+  /**
+   * Read the file and confirm it still holds what this review expects, then say
+   * where `targetHunkId` sits inside it.
+   *
+   * One read, one pass, because the two answers have to be about the same bytes:
+   * deciding the file is unchanged and *then* locating the hunk in a second read
+   * would leave a window where the two disagree.
+   *
+   * `beforeText` and `afterText` are passed in rather than read off `file` so
+   * that the caller's "this diff has both sides" check is the only place that
+   * decides, and the compiler can see it. Both sides are needed: a hunk that
+   * only deletes has no text on the result side to be found by, so its position
+   * is recovered from the original.
+   *
+   * @param afterText the file as the tool left it, which is what the walk starts
+   *                  from and what the rebuilt text is compared against
+   */
+  private async reconcile(
+    file: ReviewFile,
+    afterText: string,
+    beforeText: string,
+    targetHunkId: string | undefined,
+  ): Promise<Reconciled> {
     const current = await this.readFile(file.path)
     if (current === undefined) {
-      // File doesn't exist on disk anymore — stale
-      return {
-        ok: false,
-        reason: 'stale',
-        message: `${file.path} no longer exists on disk.`,
-      }
+      return { ok: false, reason: 'stale', message: `${file.path} no longer exists on disk.` }
     }
 
-    if (hash(current) !== hash(file.afterText)) {
-      return {
-        ok: false,
-        reason: 'stale',
-        message: `${file.path} has been modified since this review was created.`,
-      }
+    const rebuilt = rebuild({ beforeText, afterText, hunks: file.hunks, targetHunkId })
+    if (rebuilt === undefined) {
+      return { ok: false, reason: 'stale', message: `This change is no longer present in ${file.path}.` }
     }
 
-    return { ok: true }
+    if (hash(current) !== hash(rebuilt.text)) {
+      return { ok: false, reason: 'stale', message: `${file.path} has been modified since this review was created.` }
+    }
+    return { ok: true, text: rebuilt.text, at: rebuilt.at }
   }
 
   // ─── low-level file I/O ────────────────────────────────────────────────────

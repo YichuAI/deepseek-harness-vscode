@@ -21,7 +21,8 @@
 
 - **Continues the session you already have.** Workspaces and sessions are read from the running Host. Refresh that session in a browser and you see exactly what VS Code sent.
 - **Answers approvals and agent questions from VS Code.** Both waterfalls are settled by this plugin, so a run is never blocked on a browser tab you have closed.
-- **Reports what each turn changed, and can undo it.** Fed by the Host's own turn record, so it covers a file a shell command edited — not only what a file tool reported. The undo checks the file's current bytes first and refuses rather than overwriting you.
+- **Reports what each turn changed, and can undo it — one hunk at a time.** Fed by the Host's own turn record, so it covers a file a shell command edited — not only what a file tool reported. The card lists each hunk with its own undo, and the file-level undo reverts whatever is left. Both check the file's current bytes first and refuse rather than overwriting you.
+- **Right-click to ask about things.** Select code, a file in the explorer, or a change in the diff editor and the context menu offers *Explain / Fix / Review* — pre-filled with a prompt and the right `@` mention, including the line range for a selection.
 - **Opens VS Code's own editor for anything that is code.** A diff is a real diff editor; a path opens the file. Nothing is reimplemented in the webview.
 - **Finds the Host by itself**, including the desktop app, which starts its Host on an OS-assigned port that changes on every launch.
 - **Three ways to obtain a session, and you choose which.** Mint one from the harness's own credential store (zero configuration, but it means reading a file that also holds your API keys), let the extension start `dsh web` and take the launch URL it prints, or paste a launch URL yourself. See [How the session is obtained](#how-the-session-is-obtained).
@@ -53,17 +54,16 @@ VS Code reads the workspaces and sessions the browser already has, and continues
 
 ![The Harness browser UI on its own](https://raw.githubusercontent.com/YichuAI/deepseek-harness-vscode/main/docs/screenshots/02-browser-web-ui.png)
 
-## What's new in v0.2.2
+## What's new in v0.2.3
 
-**You no longer have to let it read a file full of your API keys, and `autoSession: false` finally means something.**
+**The two things the last release left on the table: undoing *part* of a change, and an honest answer about remote workspaces.**
 
-- **Managed launch — opt in, and the extension starts the Host itself.** Until now the only way to authenticate was to read `$DSH_HOME/.credentials.yaml`, which also holds your model API keys. That was the single biggest reason not to install this. With `deepseekHarness.sessionMode: "managed"` the extension runs `dsh web` and reads the launch URL off the console it owns, so it needs neither the credential file nor a paste. It is deliberately off by default: starting no process for you is still the default promise.
-- **`sessionMode` replaces the `autoSession` boolean.** The old setting could only turn authentication *off* — "false" meant "do not authenticate", because the command that would have offered the other route had been removed. It is now a three-way choice: `credentials` (mint from the credential store — the previous behaviour and still the default), `managed` (start the Host), `paste` (you start it and hand over the URL, via the restored **Use Launch URL** command). Upgrading changes nothing unless you change it.
-- **A failed connection now tells you what to do about it.** If nothing is listening, the panel offers exactly one install button — a download page on Windows and macOS, the build commands on Linux — and it only appears in the failed state. If the desktop app is already on disk it says to open that instead. There is no button telling you to install something you already have.
-- **The README has screenshots.** It had badges and no images, which is a strange way to describe a visual product.
-- **`dsh web` no longer has to be running before VS Code starts.** Related to the above, not a separate feature: with managed launch on, the first connect starts it.
+- **Per-hunk undo.** The changed-files card now lists each hunk inside a file with its own ↩, next to a preview line and its own `+`/`−` counts. The file-level button stays, and reverts whatever is left — so undoing two hunks of three and then giving up on the third is two clicks, not a decision you have to make up front. The Host has always served the hunk list; what it never had was a wire path from the card to the materializer, and the materializer's own whole-file guard refused every hunk after the first. Both are fixed, and the guard is now *derived from the diff* — the expected text is "the current file minus the hunks you already undid" — which is why the second undo works and a genuine edit made in between still does not.
+- **Right-click a selection, a file, or a change and ask about it.** Three submenus — on the editor, the explorer, and a source-control row — offering **Explain / Fix / Review** against the thing you right-clicked. It inserts a prompt plus the matching `@` mention, with the line range when you had a selection; nothing about your file's contents goes anywhere. A diff editor is the interesting case: "this change" resolves to the file's working-tree side, not to whichever pane happened to be focused.
+- **A click on a review that had captured no text used to delete the file.** A review built from a tool call's arguments alone has no `before` *and* no `after`; the revert walked into the "this was a creation" branch and removed the path. It now refuses with `no-diff` and says what is missing. Found while writing the per-hunk tests, not by a user — which is the only good way to find it.
+- **Remote development is now a written-down answer instead of a one-line refusal.** The README has a matrix for local / Remote-SSH / WSL / containers, the extension declares `extensionKind: "workspace"`, and the loopback fence moved into a single module that also owns the URL and cookie-authority formatting — which surfaced that `::1` was accepted by the fence and unusable past it. A non-loopback host is also a first-class diagnosis now: the panel says which three values it accepts and, for a remote user, which side has to move.
 
-Verification: **381 assertions** (was 342) — the new ones pinning the mode vocabulary and its invariants, the install route per platform, the classifier's new inputs, and the launcher's two guarantee-shaped functions (finding a launch URL anywhere in a child's output, and never letting the token survive into a log). The launcher's process handling is *not* asserted there, because it needs a real machine: `scripts/launch-probe.ts` runs it for real and reports whether the token can be redeemed twice, whether the Host outlives the child we spawned, and whether the port is quiet afterwards.
+Verification: **461 assertions** (was 381), and the end-to-end chains went from **15 to 91**. Chains 1 and 4 — the two whose absence the changelog of v0.0.4→v0.1.1 justified fixing, because the panel did not start and "Allow" never actually allowed — now run for real against a fake Host that can be killed and restarted, with no VS Code Extension Host needed. Chain 5 grew from 6 sections to 13 as hunk-level undo landed. Coverage is now **3 of 5 chains written**, and the suite still prints the other two as unwritten rather than quietly omitting them.
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full diff, and for the notes of every earlier release.
 
@@ -71,6 +71,7 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full diff, and for the notes of every
 
 - VS Code ≥ 1.85
 - A local `dsh web` (default port `3080`), either already running or started for you by `sessionMode: "managed"`.
+- The Harness must be on **the same machine as the VS Code window**. That is the one hard constraint; [Remote development](#remote-development) covers what it means for Remote-SSH, WSL and containers.
 
 ## Quick start
 
@@ -104,7 +105,7 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full diff, and for the notes of every
    Or install the VSIX from [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases):
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.2.2.vsix
+   code --install-extension harness-connector-deepseek-0.2.3.vsix
    ```
 
 3. Nothing to configure. In the default `sessionMode: "credentials"` the extension
@@ -193,7 +194,7 @@ authority that minted it).
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| `deepseekHarness.host` | `127.0.0.1` | Only `127.0.0.1` or `localhost` is allowed. Any other value is refused. |
+| `deepseekHarness.host` | `127.0.0.1` | Exactly three values are accepted — `127.0.0.1`, `localhost`, `::1`. Any other value is refused before a socket is opened. See [Remote development](#remote-development). |
 | `deepseekHarness.port` | `3080` | The default `dsh web` port. Override if you started `dsh web --port <n>`. |
 | `deepseekHarness.showSystemMessages` | `false` | Show plugin-injected system messages (runtime context, approval notices). Hidden by default; toggle live with the `SYS` button in the webview header. |
 | `deepseekHarness.sessionMode` | `credentials` | How a session is obtained. `credentials` mints the cookie locally from `$DSH_HOME/.credentials.yaml`; `managed` starts `dsh web` and takes its launch URL; `paste` waits for you to supply one. See [How the session is obtained](#how-the-session-is-obtained). |
@@ -231,13 +232,27 @@ instead of buttons that would fail.
 
 ### Context menu actions
 
-- **Add to Harness Chat** (explorer right-click) — inserts an `@<relative-path>` mention into the chat input.
-- **Send Selection to Harness** (editor right-click, requires selection) — inserts `@<relative-path>:L<start>-L<end>`.
+Nine commands, in three submenus. Two of them insert a bare mention; the other seven are the same three asks against the thing you right-clicked.
 
-Both insert a *mention*, not file content: the host's mention grammar is
+| Where | Command | What it inserts |
+| --- | --- | --- |
+| Explorer, right-click a file or folder | **Add to Harness Chat** | `@<relative-path>` |
+| Editor, with text selected | **Send Selection to Harness** | `@<relative-path>:L<start>-L<end>` |
+| Explorer → **DeepSeek Harness** | Explain / Fix / Review **this file** | a prompt line, then `@<relative-path>` |
+| Editor → **DeepSeek Harness** (selection) | Explain / Fix / Review **this code** | a prompt line, then `@<path>:L<n>-L<m>` |
+| Editor → **DeepSeek Harness** (diff editor) | Explain / Fix / Review **this change** | a prompt line, then `@<path>` — the working-tree side of the diff |
+| Source control, right-click a file row → **DeepSeek Harness** | Explain / Fix / Review **this change** | the same, resolved from the SCM row |
+
+Every one of them inserts a *mention*, not file content: the host's mention grammar is
 `@path`, `@"path with spaces"`, `@dir/`, with an optional `:L<n>`/`:L<n>-L<m>`
 suffix. Picking a candidate from the `@` completion list attaches nothing either —
-the agent reads the file itself.
+the agent reads the file itself. The prompt text lands above the mention, on its own
+line, so it stays your text rather than becoming part of a path.
+
+The nine are hidden from the Command Palette, because "Fix the problems in this file"
+with no file in hand is a command with nothing to act on. **Add to Harness Chat** and
+**Send Selection to Harness** are the two that also work with no host connected — they
+insert text and stop there.
 
 ## Architecture
 
@@ -258,7 +273,7 @@ that implements the `0.2.1-alpha.2` server half exactly — so no `dsh web` is
 needed:
 
 ```bash
-npm run protocol-test    # 381 assertions: the two-stream transport split
+npm run protocol-test    # 461 assertions: the two-stream transport split
                          # ($events allowlist vs session/follow), wire negotiation
                          # (dot/slash, cookie gating, event socket), auth and cookie
                          # derivation, {args} payloads (wrapped vs bare), the approval
@@ -281,7 +296,14 @@ npm run protocol-test    # 381 assertions: the two-stream transport split
                          # changed-files routes (plain authenticated GETs, a gone
                          # summary as "no card"), the hunk-to-sides line alignment,
                          # the virtual URI authority contract, the one-card-per-turn
-                         # model semantics, and the webview script's integrity
+                         # model semantics, the per-hunk undo's text surgery (an
+                         # undo from either side, a repeated fragment located where
+                         # the diff meant it, and a refusal when the two sides
+                         # disagree), the nine right-click asks driven through the
+                         # real `@` grammar so a prompt that would not chip fails
+                         # here rather than in the agent's lap, the loopback fence
+                         # and the three strings built from an accepted host, and
+                         # the webview script's integrity
 ```
 
 What the protocol test deliberately does **not** cover is the whole product. It
@@ -314,30 +336,43 @@ reject, time out. That is the layer this project is now building out.
 
 `test/e2e/` is where those chains live. **This table is the honest state of it, not a
 roadmap of intent** — a chain that is not written says so, in the suite's own output as
-well as here, because a suite that quietly omits four of five chains looks identical to one
-that passes.
+well as here, because a suite that quietly omits two of five chains looks identical to
+one that passes.
 
 | # | Chain | State |
 | --- | --- | --- |
-| 1 | Connect and auth — Host up → VS Code connects → Host restarts → recovers | ⬜ not written — needs a Host that can be killed and restarted between two connects |
+| 1 | Connect and auth — Host up → VS Code connects → Host restarts → recovers | ✅ **23 assertions passing**, against a fake Host that is killed and restarted between two connects |
 | 2 | Session consistency — browser sends → VS Code sees it → switch → reload → history intact | ⬜ not written — needs a real Extension Host |
 | 3 | Streaming — long reply → tool call → drop the socket → no duplicate, loss or reorder | ⬜ not written — needs a Host that can kill one connection without dying itself |
-| 4 | Approvals — allow, reject, time out, Host error → every card reaches a terminal state | ⬜ not written — needs a real Extension Host to click in |
-| 5 | File changes — agent edits → user re-edits → revert must not clobber the user | ✅ **15 assertions passing**, on a real filesystem |
+| 4 | Approvals — allow, reject, time out, Host error → every card reaches a terminal state | ✅ **31 assertions passing**, against a fake Host that drives all four endings |
+| 5 | File changes — agent edits → user re-edits → revert must not clobber the user | ✅ **37 assertions passing**, on a real filesystem |
 
-Chain 5 is the one with a hazard rather than a bug, and it is the only one that does not
-need an Extension Host to be tested honestly: `ReviewMaterializer` takes the workspace API
-as a constructor argument, so it runs against a stub whose `fs` is the **real** filesystem
-and a real temp directory. A simulated one would let the test agree with the implementation
-instead of catching it. It covers the ordinary revert, the checklist case (file edited after
-the turn → revert refuses → your bytes survive), unsaved editor changes, a created file
-removed, a created file edited, and a deleted file restored.
+Chains 1 and 4 are the two the changelog of v0.0.4→v0.1.1 makes the case for: the panel
+did not start until v0.1.1, and "Allow" never actually allowed until later, and a unit
+test would have been green through both. They are possible because `HarnessClient` and
+`BrowserSessionAuth` **import no `vscode`** — so `test/e2e/fake-host.ts` is a real
+`http.Server` with a hand-written WebSocket, and the two chains run in plain Node with no
+Extension Host at all. The fake Host is deliberately `0.2.0-rc.2`-shaped including its
+fences: a POST route that forgot to require the cookie would answer the wire-negotiation
+probe with `200` instead of `401`, and the test would then be measuring the wrong
+classifier.
 
-`npm run e2e-test` reports `1 of 5 chains covered, 4 not written` and exits non-zero only
+Chain 5 is the one with a hazard rather than a bug, and the only one whose subject is the
+filesystem: `ReviewMaterializer` takes the workspace API as a constructor argument, so it
+runs against a stub whose `fs` is the **real** filesystem and a real temp directory. A
+simulated one would let the test agree with the implementation instead of catching it. Its
+thirteen sections cover the ordinary revert, the checklist case (file edited after the
+turn → revert refuses → your bytes survive), unsaved editor changes, a created file
+removed, a created file edited, a deleted file restored, and — since hunk undo landed —
+undoing the second hunk then the first, undoing them in the other order, a half-undone file
+reverting whole, an edit made after a hunk undo still refusing, a double-click writing
+nothing, and a review with no captured text refusing instead of deleting the file.
+
+`npm run e2e-test` reports `3 of 5 chains covered, 2 not written` and exits non-zero only
 for a chain that ran and failed. The OS matrix (`ubuntu-latest`, `windows-latest`,
 `macos-latest`) is wired in `.github/workflows/e2e.yml` and already earns its keep: the
-protocol test parses three different OS listener-table dialects, so running it on all three
-is the only way those parsers meet their real target.
+protocol test parses three different OS listener-table dialects, so running it on all
+three is the only way those parsers meet their real target.
 
 ## Development
 
@@ -347,9 +382,9 @@ npm run build            # esbuild → dist/extension.js
 npm run watch            # rebuild on change
 npm run typecheck
 npm run check-versions   # every version surface must agree with package.json
-npm run protocol-test    # 381 protocol assertions against a fake harness
+npm run protocol-test    # 461 protocol assertions against a fake harness
 npm run protocol-probe   # report what your real dsh web exposes
-npm run package          # → harness-connector-deepseek-0.2.2.vsix
+npm run package          # → harness-connector-deepseek-0.2.3.vsix
 ```
 
 Press `F5` in VS Code to launch an Extension Development Host with the extension loaded.
@@ -425,9 +460,58 @@ What is ruled out is as much a part of the design as what is included. Registeri
   1,318,580 bytes to 35,399 on the same session. The figures are asserted, not
   asserted-to: see group I of `scripts/protocol-test.ts`.
 
+## Remote development
+
+**The Harness and the VS Code window have to be on the same machine.** That is not a
+preference and not a setting: the extension refuses any host that is not `127.0.0.1`,
+`localhost` or `::1`, and it refuses before opening a socket, in a module whose whole
+job is that decision (`src/harness/endpoint.ts`). The refusal is deliberate. DSH writes
+to disk and re-reads it on the next step, so a Harness editing one machine's files while
+you look at another machine's workspace is not a degraded setup — it is a different one.
+
+There are **two** independent fences, and both would have to move:
+
+1. **This plugin's fence.** The three accepted host strings above. A LAN address, a
+   forwarded port, `0.0.0.0`, `host.docker.internal` and `172.17.0.1` are all refused
+   before anything is sent. `0.0.0.0` fails twice over: it is not in the set, and it is
+   not a valid client-side authority to send as `Host`/`Origin` in the first place.
+2. **The Host's own binding.** `dsh web` listens on loopback only. Measured here, with a
+   Host running on `127.0.0.1:3080`: the OS listener table shows
+   `TCP 127.0.0.1:3080 … LISTENING` and nothing else on that port, and the same port on
+   this machine's LAN address (`192.168.68.221:3080`) answers `ECONNREFUSED`. A client
+   that ignored the fence would still find nothing to talk to.
+
+That leaves four arrangements, and the honest state of each:
+
+| Scenario | State | What it means |
+| --- | --- | --- |
+| **Local window** | ✅ **Measured** | The supported arrangement and the only one exercised here: **40/40** integration assertions against a live Host on `127.0.0.1:3080`, on top of the 461 protocol and 91 end-to-end assertions. |
+| **Remote-SSH** | ⚠️ **Not measured** — this machine has no SSH server (`localhost:22` refuses) | Works when the Harness runs **on the remote host**. The extension declares `extensionKind: "workspace"`, so in a remote window its extension host runs on the remote machine: it reads that machine's `$DSH_HOME`, probes that machine's listener table, and talks to that machine's loopback. A Harness on your laptop is unreachable from there — and should be, since the workspace it would edit is not the one you have open. |
+| **WSL** | ⚠️ **Not measured** — `wsl.exe` is on this sandbox's program blacklist, so it could not be launched at all | Same shape as Remote-SSH: run `dsh web` inside the distro. VS Code hands WSL over as an ordinary remote, so nothing WSL-specific is needed. |
+| **Dev container** | ⚠️ **Not measured** — `docker` is not installed here | Same shape again: run `dsh web` inside the container. The container's own `$DSH_HOME/.credentials.yaml` is what gets read, not the host's. |
+
+Three rows say *not measured*, and that is the measured answer rather than a hedge: the
+sandbox refuses to launch `wsl.exe` at all, `docker` is not installed, and there is no
+SSH server to connect to. What *was* measured is the part that decides all four rows —
+the fence and the binding — and it is identical in every scenario. The rows differ only
+in which machine the extension host and the Harness land on together.
+
+`@` mentions work everywhere, including remote windows: a remote file arrives as a
+`vscode-remote:` URI, which the mention path accepts, so **Add to Harness Chat**, the
+selection submenu and the change submenu behave the same locally and remotely. The
+scope policy is deliberately narrower than "any URI" — a `git:` URI is a view of a
+revision rather than a file on disk, and a `gitlens:` URI is a view of someone's cache,
+so neither becomes a mention.
+
+If the fence does refuse, the panel says so as a diagnosis rather than as an unknown
+failure: it names the three accepted values and, for a remote user, points back here so
+you know which side has to move.
+
 ## Limitations
 
-- Loopback only — no remote / LAN / WSL-bridged hosts.
+- **Loopback only.** The plugin talks to a Harness on the same machine, and the Host
+  itself binds loopback — see [Remote development](#remote-development) for the four
+  scenarios, including the three this machine could not exercise.
 - **Under `sessionMode: "credentials"` the extension can read a file that contains your
   API keys.** It has to, to mint the session cookie — which is why that mode is no
   longer the only one. See [How the session is obtained](#how-the-session-is-obtained).
@@ -447,17 +531,24 @@ What is ruled out is as much a part of the design as what is included. Registeri
 - Session deep-links in "Open Web UI" are intentionally not guessed — only the Harness home opens.
 - Unknown harness event types are ignored (the protocol is merge-extensible); they do not crash the client but also do not render.
 - **A revert writes the captured `before` text back — it does not use `git checkout`.** Before writing, it checks that the file on disk still matches the `after` it captured at review time, and that no editor has unsaved changes to it. If either has moved on, the revert is refused and the file is marked conflicted rather than overwritten. That guard is why the undo is safe to offer without asking, and why it can decline.
+- **Undoing one hunk re-checks the whole file, not just that hunk.** The expected content after undoing hunk *n* of a partly-undone file is "what is on disk now, plus back every hunk you had not yet undone" — so a hunk undo fails if you edited *any* part of the file in the meantime, including the parts you already reverted. That is stricter than it strictly needs to be, and it is the conservative direction to be wrong in.
+- **Per-hunk undo needs a hunk the Host can name.** A review whose hunk list came back empty (a turn record for a file tool that reported no diff) offers only the file-level revert, and a review that captured no text at all refuses with `no-diff` rather than guessing. A hunk undo also has no cross-file reach: reverting two hunks of one file does not touch a third file.
 - **A turn's changed-files card lists what the turn changed, but only a file tool's own change can be undone from it.** The undo is scoped to the reviews that turn produced, because a Host summary carries paths and line counts, not the text needed to restore anything. A turn that changed files only through shell commands will say so.
 - A changed-files summary lives for the Session's lifetime on the Host, so a card can resolve to "no changes to show" after a host restart. That renders as no card, matching the Web UI.
 
 ## Roadmap (v0.3.0+)
 
-- **The five end-to-end chains above**, for real: a real Extension Host, a fake Host
-  that can be killed and restarted mid-turn, and a matrix over Windows, macOS and
-  Linux. Chain 5 in particular — agent edits, then *you* edit, then revert — needs the
-  end-to-end shape, not just the unit-level guard.
-- **Partial revert — hunk level.** The materializer already knows how to revert a single hunk (and refuses when the file has drifted), but no UI reaches it any more: a revert is all-or-nothing per file today. Restoring it means offering per-hunk undo in the changes card and in the native diff, driven by the hunk list the Host already serves rather than by whole-file text it does not keep.
+- **The two end-to-end chains that are still unwritten** — the session-consistency chain
+  (browser sends → VS Code sees it → switch → reload → history intact) and the streaming
+  chain (long reply → tool call → drop the socket → no duplicate, loss or reorder). Both
+  need a Host that can kill one connection without dying itself; the fake Host already
+  knows how to be killed and restarted, which is what chains 1 and 4 use.
+- **The chains on macOS and Linux.** The protocol and e2e suites already run on all three
+  platforms in CI; the integration test against a live Host has only ever been run on
+  Windows.
 - Per-item state patches: a streaming push still ships the whole transcript (~52 KB per push on a 40-turn session). The renderer no longer rebuilds it, but the structured clone across `postMessage` is the remaining per-chunk cost.
+- **Per-hunk undo where you actually edit.** The changes card has it; the native diff
+  editor does not yet offer "revert this hunk" next to the hunk you are looking at.
 - Inspector: filter box / type highlight / export as JSONL
 - Search: scope to workspace, pagination, highlight rendering
 - Inline Completion

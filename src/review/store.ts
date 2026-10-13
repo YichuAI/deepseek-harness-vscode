@@ -146,7 +146,13 @@ export class ReviewStore {
         ...(f.conflictReason !== undefined ? { conflictReason: f.conflictReason } : {}),
         addedLines: countAdded(f),
         removedLines: countRemoved(f),
-        hunks: f.hunks.map(h => ({ id: h.id, state: h.state })),
+        hunks: f.hunks.map(h => ({
+          id: h.id,
+          state: h.state,
+          addedLines: lineCount(h.newText),
+          removedLines: h.oldText === null ? 0 : lineCount(h.oldText),
+          preview: hunkPreview(h),
+        })),
       })),
     }))
   }
@@ -298,6 +304,29 @@ function lineCount(s: string): number {
   const n = s.split('\n').length
   // Don't count trailing newline as an extra line
   return s.endsWith('\n') ? n - 1 : n
+}
+
+/** How much of a hunk's first line the card shows. */
+const HUNK_PREVIEW_MAX = 80
+
+/**
+ * One line that identifies a hunk.
+ *
+ * What the hunk ADDS, or — for a hunk that only removes — what it removed. The
+ * hunk's own text, never the file: this rides in the summary that is rebuilt on
+ * every review change, so it has to stay small whatever the file's size.
+ */
+function hunkPreview(h: ReviewHunk): string {
+  const line = firstNonBlankLine(h.newText) ?? firstNonBlankLine(h.oldText ?? '') ?? ''
+  return line.length > HUNK_PREVIEW_MAX ? line.slice(0, HUNK_PREVIEW_MAX - 1) + '…' : line
+}
+
+function firstNonBlankLine(text: string): string | undefined {
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed !== '') return trimmed
+  }
+  return undefined
 }
 
 // ─── small helpers ───────────────────────────────────────────────────────────

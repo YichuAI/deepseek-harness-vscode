@@ -208,9 +208,10 @@ textarea { resize: none; min-height: 60px; max-height: 200px; width: 100%; }
 .t-review .review-state.conflicted { background: var(--vscode-errorForeground, #c53149); color: #fff; }
 .t-review .review-files { display: flex; flex-direction: column; gap: 2px; }
 .t-review .review-file {
-  display: flex; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 3px;
+  display: flex; flex-direction: column; padding: 3px 4px; border-radius: 3px;
   background: var(--vscode-editor-background);
 }
+.t-review .rf-head { display: flex; align-items: center; gap: 6px; }
 .t-review .rf-path { flex: 1; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .t-review .rf-stats { font-size: 10px; font-family: var(--vscode-editor-font-family, monospace); flex: 0 0 auto; }
 .t-review .rf-stats .added { color: var(--vscode-charts-green, #2da44e); }
@@ -219,6 +220,20 @@ textarea { resize: none; min-height: 60px; max-height: 200px; width: 100%; }
 .t-review .rf-state.accepted { color: var(--vscode-charts-green, #2da44e); }
 .t-review .rf-state.rejected { color: var(--vscode-charts-red, #c53149); }
 .t-review .review-file button { padding: 2px 6px; font-size: 10px; flex: 0 0 auto; }
+/* Per-hunk rows. Indented under the file so the hierarchy reads as "these are
+   the parts of that file", and dimmer, because they are detail rather than a
+   second list of files. */
+.t-review .rf-hunks { display: flex; flex-direction: column; gap: 1px; margin: 2px 0 0 10px; }
+.t-review .rf-hunk {
+  display: flex; align-items: center; gap: 6px; padding: 1px 3px; border-radius: 3px;
+  border-left: 2px solid var(--vscode-panel-border, rgba(128,128,128,.3));
+}
+.t-review .rf-hunk.rejected { opacity: .55; }
+.t-review .rf-hunk-text {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--vscode-editor-font-family, monospace); font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+}
 .t-review .review-actions { display: flex; gap: 6px; margin-top: 6px; }
 .t-review .review-actions button { flex: 1; padding: 3px 10px; font-size: 11px; }
 

@@ -26,6 +26,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { httpOrigin, wsOrigin } from './endpoint.ts'
 import { httpRequest, httpStatus } from './http.ts'
 import { openWebSocket } from './ws.ts'
 
@@ -223,7 +224,7 @@ async function postRpc(
       headers: {
         'content-type': 'application/json',
         ...(cookie === undefined ? {} : { cookie }),
-        origin: `http://${opts.host}:${String(opts.port)}`,
+        origin: httpOrigin(opts.host, opts.port),
       },
       body,
     })
@@ -323,8 +324,8 @@ function tryWsUpgrade(opts: NegotiateOptions, path: string): Promise<boolean> {
     }
     const timer = setTimeout(() => finish(false), 3000)
     const cookie = opts.cookie()
-    const ws = openWebSocket(`ws://${opts.host}:${String(opts.port)}${path}`, {
-      origin: `http://${opts.host}:${String(opts.port)}`,
+    const ws = openWebSocket(`${wsOrigin(opts.host, opts.port)}${path}`, {
+      origin: httpOrigin(opts.host, opts.port),
       ...(cookie === undefined ? {} : { cookie }),
     }, {
       onOpen: () => finish(true),

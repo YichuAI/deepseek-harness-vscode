@@ -35,8 +35,9 @@ import type { PendingAttachmentPayload, WebviewAction } from '../view/provider.t
 import type { HarnessWebviewViewProvider } from '../view/provider.ts'
 import { CompositeDisposable } from '../disposable.ts'
 import { formatMention } from '../context/collector.ts'
+import { isOpenableScheme, quickAskInput, quickAskPrompt, type QuickAsk } from '../context/quick-task.ts'
 import { ReviewController } from '../review/controller.ts'
-import { ReviewVirtualDocumentProvider } from '../review/virtualDocument.ts'
+import { ReviewVirtualDocumentProvider, reviewFilePath } from '../review/virtualDocument.ts'
 import {
   ChangesDiffStore, ChangesVirtualDocumentProvider, hunksToSides, openChangesDiff,
 } from '../review/changesDocument.ts'
@@ -1389,7 +1390,7 @@ export class AppController {
   /** Insert an `@path` mention for one file (explorer context menu / commands).
    *  Workspace-relative, because that is what the host resolves mentions against. */
   addToChat(uri: vscode.Uri): void {
-    this.insertMention(uri)
+    this.mentionForUri(uri)
   }
 
   /** Insert an `@path:L<n>-L<m>` mention targeting the current selection. */
@@ -1399,26 +1400,83 @@ export class AppController {
       this.d.notifyError('No text selected in the active editor.')
       return
     }
-    this.insertMention(editor.document.uri, {
+    this.mentionForUri(editor.document.uri, {
       lineStart: editor.selection.start.line + 1,
       lineEnd: editor.selection.end.line + 1,
     })
   }
 
+  // ─── right-click quick tasks (selection / file / change) ───────────────────
+  //
+  // The same pre-fill channel `addToChat` uses, with the ask already written.
+  // Nothing is sent: the composer opens holding the question so the person can
+  // read, trim or rewrite it before it reaches the agent. That is the whole
+  // point — these exist to save typing, not to take a decision.
+
+  /** Pre-fill an ask about the current selection. */
+  askSelection(ask: QuickAsk): void {
+    const editor = this.d.vscodeAPI.window.activeTextEditor
+    if (!editor || editor.selection.isEmpty) {
+      this.d.notifyError('Select some code in the editor first.')
+      return
+    }
+    this.mentionForUri(editor.document.uri, {
+      lineStart: editor.selection.start.line + 1,
+      lineEnd: editor.selection.end.line + 1,
+      prefix: quickAskPrompt(ask, 'selection'),
+    })
+  }
+
+  /** Pre-fill an ask about a whole file. Falls back to the active editor so the
+   *  same command can be reached from a keybinding or the palette. */
+  askFile(uri: vscode.Uri | undefined, ask: QuickAsk): void {
+    const target = uri ?? this.d.vscodeAPI.window.activeTextEditor?.document.uri
+    if (target === undefined) {
+      this.d.notifyError('Open a file, or right-click one in the Explorer first.')
+      return
+    }
+    this.mentionForUri(target, { prefix: quickAskPrompt(ask, 'file') })
+  }
+
+  /** Pre-fill an ask about a change — a Source Control row, or a diff editor. */
+  askChange(arg: unknown, ask: QuickAsk): void {
+    const target = resolveChangeTarget(this.d.vscodeAPI.window, arg)
+    if (target === undefined) {
+      this.d.notifyError(
+        'Right-click a changed file in Source Control, or open its diff, to ask about a change.',
+      )
+      return
+    }
+    const prefix = quickAskPrompt(ask, 'change')
+    if ('relPath' in target) this.insertMention(target.relPath, { prefix })
+    else this.mentionForUri(target.uri, { prefix })
+  }
+
   /**
-   * Append a mention token to the composer input.
+   * Append a mention token for a workspace URI to the composer input.
    *
    * Quotes when the path needs it (whitespace), so the inserted text is valid
    * under the grammar the host completes against.
    */
-  private insertMention(uri: vscode.Uri, range: { lineStart?: number; lineEnd?: number } = {}): void {
-    const relPath = this.d.vscodeAPI.workspace.asRelativePath(uri)
-    const mention = formatMention(relPath, { ...range })
+  private mentionForUri(uri: vscode.Uri, opts: MentionOptions = {}): void {
+    this.insertMention(this.d.vscodeAPI.workspace.asRelativePath(uri), opts)
+  }
+
+  /**
+   * Append a mention token for an already-relative path.
+   *
+   * Split from `mentionForUri` because one caller has no URI to start from: a
+   * `dsh-review:` document is a virtual view of a change, and the path the host
+   * can open has to be parsed back out of the URI in `reviewFilePath`.
+   */
+  private insertMention(relPath: string, opts: MentionOptions = {}): void {
+    const mention = formatMention(relPath, { lineStart: opts.lineStart, lineEnd: opts.lineEnd })
     if (mention === undefined) {
       this.d.notifyError(`Cannot reference ${relPath}: the path cannot be written as an @ mention.`)
       return
     }
-    this.d.provider?.postToWebview({ kind: 'appendInput', text: `${mention} ` })
+    const text = opts.prefix === undefined ? `${mention} ` : quickAskInput(opts.prefix, mention)
+    this.d.provider?.postToWebview({ kind: 'appendInput', text })
   }
 
   // ─── `@` completion (host-served fileReferences/list) ──────────────────────
@@ -1837,8 +1895,7 @@ export class AppController {
 }
 
 /** Extract a display text from one queued inbox item (defensive). */
-function queueItemText(item: Record<string, unknown>): string {
-  const content = item.content
+function queueItemText(item: Record<string, unknown>): string {  const content = item.content
   if (Array.isArray(content)) {
     const texts: string[] = []
     for (const part of content) {
@@ -1855,5 +1912,96 @@ function queueItemText(item: Record<string, unknown>): string {
   const text = item.text
   if (typeof text === 'string' && text.length > 0) return text.length > 200 ? text.slice(0, 199) + '…' : text
   return '(queued message)'
+}
+
+// ─── quick-task target resolution ────────────────────────────────────────────
+
+/** Options for one mention insertion. */
+interface MentionOptions {
+  /** 1-indexed line or line range, appended as `:L<n>` / `:L<n>-L<m>`. */
+  lineStart?: number
+  lineEnd?: number
+  /** An instruction line to write above the mention ("quick task"). */
+  prefix?: string
+}
+
+/**
+ * A URI the Host can open, as opposed to a view of one.
+ *
+ * The scheme policy lives in `quick-task.ts` so it can be asserted directly —
+ * see `isOpenableScheme`.
+ */
+function isOpenable(uri: vscode.Uri): boolean {
+  return isOpenableScheme(uri.scheme)
+}
+
+/** A duck-typed `vscode.Uri`, for values crossing the menu boundary as `unknown`. */
+function isUri(value: unknown): value is vscode.Uri {
+  return typeof value === 'object' && value !== null
+    && typeof (value as { scheme?: unknown }).scheme === 'string'
+    && typeof (value as { path?: unknown }).path === 'string'
+}
+
+/**
+ * The URI a context menu handed over.
+ *
+ * The two menus disagree on the shape: `explorer/context` passes the target URI
+ * itself, while `scm/resourceState/context` passes a resource state — or an
+ * array of them, one per selected row — whose URI is on `resourceUri`.
+ */
+function uriFromMenuArg(arg: unknown): vscode.Uri | undefined {
+  const first: unknown = Array.isArray(arg) ? arg[0] : arg
+  if (first === null || typeof first !== 'object') return undefined
+  const resource = (first as { resourceUri?: unknown }).resourceUri
+  if (isUri(resource)) return resource
+  return isUri(first) ? first : undefined
+}
+
+/** The active diff tab's two sides, when the active tab is a diff editor. */
+function activeDiffTab(window: typeof vscode.window): { original?: vscode.Uri; modified?: vscode.Uri } | undefined {
+  const input: unknown = window.tabGroups?.activeTabGroup?.activeTab?.input
+  if (input === null || typeof input !== 'object') return undefined
+  const { original, modified } = input as { original?: unknown; modified?: unknown }
+  const pair: { original?: vscode.Uri; modified?: vscode.Uri } = {}
+  if (isUri(original)) pair.original = original
+  if (isUri(modified)) pair.modified = modified
+  return pair.original === undefined && pair.modified === undefined ? undefined : pair
+}
+
+/** Where a "change" quick task points: a real URI, or a path parsed out of one
+ *  of our own virtual review documents. */
+type ChangeTarget = { uri: vscode.Uri } | { relPath: string }
+
+/**
+ * Resolve which file a "change" quick task is about.
+ *
+ * The menu's own argument is tried first, and that order is load-bearing: a
+ * diff tab can be open while the person right-clicks a *different* row in
+ * Source Control, and the row they clicked is the one they meant. It resolves
+ * to nothing in exactly the case it should — `editor/context` inside a diff
+ * editor hands over whichever pane is focused, and for a HEAD comparison that
+ * pane is a `git:` URI with no file behind it — which is when the tab's
+ * `modified` side, the working-tree file, takes over.
+ *
+ * A `dsh-review:` URI never reaches the Host: it is parsed back to the
+ * workspace-relative path instead, which is what makes the quick tasks usable
+ * from the plugin's own review diffs.
+ */
+function resolveChangeTarget(window: typeof vscode.window, arg: unknown): ChangeTarget | undefined {
+  const candidates: vscode.Uri[] = []
+  const fromMenu = uriFromMenuArg(arg)
+  if (fromMenu !== undefined) candidates.push(fromMenu)
+  const tab = activeDiffTab(window)
+  if (tab?.modified !== undefined) candidates.push(tab.modified)
+  if (tab?.original !== undefined) candidates.push(tab.original)
+  const active = window.activeTextEditor?.document.uri
+  if (active !== undefined) candidates.push(active)
+
+  for (const uri of candidates) {
+    const relPath = reviewFilePath(uri)
+    if (relPath !== undefined) return { relPath }
+    if (isOpenable(uri)) return { uri }
+  }
+  return undefined
 }
 

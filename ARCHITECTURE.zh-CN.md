@@ -457,14 +457,43 @@ review 建立时抓到的 `after`，如果此后动过就拒绝（把该文件�
 只在恰好**一个**候选命中时才作数，因为在多个之间猜会回退错文件。某个回合若只通过 shell
 命令改了文件，它会直说，而不是假装执行。
 
-hunk 级回退在 `ReviewMaterializer` 里是存在的（`rejectHunk`，同样的漂移闸），但已经没有 UI
-能触达它——今天的回退是每文件全有或全无。恢复它就是路线图上的「部分回退」一项。
+### 逐 hunk 撤销（v0.2.3）
+
+回退单个 hunk 是一次文本编辑，而全部的难点在于*在哪里*改。有两个关于 hunk 的事实会让单次
+`indexOf` 出错：
+
+- **删除**型 hunk 在结果侧没有任何文本可以搜，**插入**型 hunk 在原始侧也没有。所以偏移量
+  必须同时从两侧恢复。
+- **重复片段**会命中它第一次出现的位置，而不是 diff 真正指的那一处——这会静静地改坏文件，
+  而不是报错。
+
+所以 `review/patch.ts` 在**每一侧**各带一个只前进的游标走一遍 hunk 列表，从原始侧定位删除、
+从结果侧定位插入；当两个 hunk 之间那段未变化的文本在两侧读起来不一致时，它直接拒绝。它是一个
+纯模块——没有文件系统、没有 `vscode`、没有 store——所以这些情形是直接断言的，而不是通过一张
+渲染出来的卡片。
+
+守卫是从 diff 推出来的，而不是从一份快照。第 *n* 个 hunk 一旦撤掉，文件就不再等于 review
+建立时抓到的 `afterText`，于是整文件比对会把后面每一个 hunk 都判为 `stale`——这正是它过去
+的行为，同时还把责任推给一次根本没发生的编辑。现在的期望内容是「盘上现在的内容，加上每一个
+还没撤的 hunk 的原文」，而中间真做过编辑仍然会被拒绝。`rejectHunk` 在 hunk 已经是 `rejected`
+时也是一个空操作，所以双击不会写任何东西。
+
+`ReviewSummary.files[].hunks` 带上了 `addedLines`、`removedLines` 和 `preview`，因为一张卡片
+没法在它叫不出名字的 hunk 之间让人做选择；`reviewSigFor` 把逐 hunk 状态折进渲染签名，因为三个
+hunk 撤掉一个之后文件是 `partial`、计数没变——没有这一项，那一下点击看起来什么都没发生。文件级
+回退在 `partial` 和 `pending` 下都会出现，含义是「撤掉剩下的全部」。
+
+还有一道守卫堵住了一条潜伏的数据丢失路径：只从工具调用参数建立起来的 review，既没有
+`beforeText` 也没有 `afterText`，而 `rejectFile` 过去会掉进「这个文件是新建的」那个分支，把
+路径删掉。现在它会以 `no-diff` 拒绝，并说明缺了什么。
 
 ### 这些是怎么被验证的
 
 两层，而且不是重复的。协议测试的 **M 组** 对着假 harness 钉住形状：两条路由是普通的带鉴权
 GET 而不是 RPC 方法、hunk 列表能重建出两侧逐行对齐的比较、id 是从 `uri.authority` 读的、
-卡片语义成立（每回合一张、重复播报替换坐标、摘要消失解析为「没有卡片」）。
+卡片语义成立（每回合一张、重复播报替换坐标、摘要消失解析为「没有卡片」）。**M2 组**则驱动
+逐 hunk 手术和提供它的那张卡片，包括乱序撤销同一个文件里的多个 hunk，以及证明签名确实动过的
+那次重绘。
 
 真机集成测试则去量两件夹具量不了的事。它让一个真实回合跑过真实模型，因为最容易悄悄坏掉的
 正是那次**交接**：播报给出的是*回合号*，摘要路由按*事件 seq* 寻址，把前者换算成后者的只有
@@ -673,6 +702,37 @@ webview 的启动请求**故意不走**这条路：面板打开时发的是 `ens
 `deepseekHarness.offline` 条件上，而那种写法恰好把它在最需要的时候藏了起来——面板还写着
 Connected、socket 其实已经死了。
 
+### 我们愿意跟哪个端点说话（回环围栏）
+
+`harness/endpoint.ts` 很小、刻意无聊，而「它在 Remote-SSH / WSL / 容器下能用吗」的答案其实就
+住在这里。另一台机器上的 Host 不是「支持但有个注意事项」的配置，而是一种**在套接字存在之前**
+就被拒绝的安排。
+
+```
+LOOPBACK_HOSTS   = { 127.0.0.1, localhost, ::1 }
+hostLiteral(h)   → h；IPv6 字面量则返回 [h]
+authorityOf(h,p) → Host 头 / cookie 名所用的 authority
+httpOrigin(h,p)  → Origin: 头
+wsOrigin(h,p)    → 套接字 URL
+```
+
+读这个集合的有三处——`connect()`、一元 `rpc()` 那条路、以及 `getRoute()`——三处都抛
+`nonLoopbackRefusal(host)`。是三处而不是一处，正是要点：`retarget()` 是存在的，所以一个原本指向
+回环的客户端之后可以被指到别处，检查必须是重新读的，而不是在连接时记住的。
+
+这四种字符串在同一个模块里，因为它们是同一个决定，也因为它们必须彼此一致。浏览器会话 cookie
+的名字是 Host 按 `sha256(authority)` 定的，所以一个把自己的 cookie 名拼得跟自己的 `Host` 头不一样
+的客户端，只会被告知它自己的 cookie 无效——这正是没加方括号的 `::1` 造成的后果：
+`http://::1:3080` 会被解析成 host 为 `::1:3080`、端口为 80，而围栏从写下那天起就接受 `::1`。
+
+`package.json` 里的 `extensionKind: ["workspace"]` 是另一半。扩展宿主必须跑在有 Harness 的那台
+机器上，因为只有在那里，它的 `$DSH_HOME`、监听表和回环才在描述同一个 Harness。这个声明本来
+就是默认值里的*首选*项；写出来是为了去掉那条悄悄退回本地的路。
+
+非回环的 host 现在有自己的一种 `ConnectionFailureKind`（`non-loopback-host`，排在规则表最前），
+而不是落进 `unknown`，因为读到它的人通常是远程用户，需要知道该动哪一头。四种场景里哪些被实测过，
+见 README 的《远程开发》矩阵。
+
 ### Host 发现（为什么端口可能是错的）
 
 `dsh web` 默认落在 `127.0.0.1:3080`，所以固定端口在大多数时候是对的。**桌面端是例外，而且是
@@ -731,16 +791,19 @@ src/
 │   ├── controller.ts         # review 生命周期（store ↔ materializer）
 │   ├── store.ts              # 逐文件、逐 hunk 抓取的 before/after
 │   ├── materializer.ts       # 唯一真正写回退的模块
+│   ├── patch.ts              # 纯函数：在两侧定位 hunk，应用一次撤销
 │   ├── virtualDocument.ts    # dsh-review:// before|after provider
 │   ├── changesDocument.ts    # dsh-changes:// provider + hunksToSides
 │   └── types.ts              # Review / ReviewFile / ReviewHunk
 ├── context/
-│   └── collector.ts          # 编辑器上下文（活动文件、选区）
+│   ├── collector.ts          # 编辑器上下文（活动文件、选区）
+│   └── quick-task.ts         # 纯函数：九条右键提问 + scheme 策略
 ├── harness/
 │   ├── protocol.ts           # 线缆类型（镜像 0.2.0-rc.2 Remote）
 │   ├── wire.ts               # 协议协商 + 能力探测
 │   ├── client.ts             # HarnessClient — 唯一网络边界
 │   ├── auth.ts               # 浏览器会话 cookie 生命周期 + 本地自签
+│   ├── endpoint.ts           # 回环围栏 + authority/origin/ws 的拼装
 │   ├── local-credentials.ts  # 读取 $DSH_HOME/.credentials.yaml（autoSession）
 │   ├── discovery.ts          # 找 Host：profile 里钉的端口 + 401 栅栏指纹
 │   ├── events.ts             # RemoteMuxSocket (WS) + EventBuffer (30ms)
@@ -758,7 +821,7 @@ media/
 ├── origin.png                # 源材料（VSIX 排除）
 └── markdown-it.umd.min.js    # VSIX 打包用（114 KB）
 scripts/
-├── protocol-test.ts          # 假 harness 协议测试，381 项断言（无需 dsh web）
+├── protocol-test.ts          # 假 harness 协议测试，461 项断言（无需 dsh web）
 ├── protocol-probe.ts         # 向真实 `dsh web` 询问它实际提供什么
 ├── check-versions.ts         # 每一个版本展示面都必须和 package.json 一致
 ├── integration-test.ts       # 针对真实 dsh 的闭环测试
@@ -767,7 +830,10 @@ test/
 ├── fixtures/                 # 脱敏协议快照
 └── e2e/                      # 用户动作链路（见 README《端到端测试》）
     ├── run.ts                # 运行器：报告覆盖情况，而不是暗示它
-    ├── chain5-revert.ts      # 真实文件系统：回退 vs. 之后的编辑
+    ├── fake-host.ts          # 真的 http.Server + 手写 WS，可被杀掉
+    ├── chain1-connect.ts     # 连接 → Host 重启 → 自动恢复（无需扩展宿主）
+    ├── chain4-approval.ts    # 允许 / 拒绝 / 超时 / Host 报错（无需扩展宿主）
+    ├── chain5-revert.ts      # 真实文件系统：回退 vs. 之后的编辑，逐 hunk
     └── vscode-stub.ts        # 给 materializer 用的最小 `vscode` 桩
 ```
 

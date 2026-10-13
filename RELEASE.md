@@ -55,10 +55,11 @@ npm run check-versions     # → all checks pass; add --online to include the
 npm run build              # → dist/extension.js
 
 # 1.4 protocol test (fake harness — no dsh web needed)
-npm run protocol-test      # → all 381 assertions ✓
+npm run protocol-test      # → all 461 assertions ✓
 
 # 1.5 end-to-end chains (real filesystem; reports its own coverage)
-npm run e2e-test           # → every written chain passes, coverage reported
+npm run e2e-test           # → 3 of 5 chains covered, 2 not written; every
+                           #   written chain passes (91 assertions today)
 
 # 1.6 integration test (writes a session — needs a host running)
 #     start one in another terminal:
@@ -67,7 +68,7 @@ npm run e2e-test           # → every written chain passes, coverage reported
 #     port is freshly assigned on every launch — read it off the listener table
 #     and pass it in:
 #       DSH_PORT=3081 npm run integration-test
-npm run integration-test   # → 39/39 checks ✓, closed loop OK
+npm run integration-test   # → 40/40 checks ✓, closed loop OK
 
 # 1.7 package the VSIX
 npm run package            # → harness-connector-deepseek-<ver>.vsix
@@ -87,16 +88,23 @@ Manual checks:
       twin. This is a standing rule, not a per-release judgement call.
 - [ ] `CHANGELOG.md` and `ARCHITECTURE.md` still quote the **current** assertion
       count from `npm run protocol-test` (it has grown 50 → 64 → 98 → 83 → 156 →
-      178 → 180 → 190 → 211 → 231 → 243 → 268 → 295 → 312 → 342 → 381 as the
-      rc.2 rewrite replaced the rc.6 fake harness and the waterfall/pending-panel
-      groups landed, and v0.2.2 added the session-mode vocabulary, the per-platform
-      install routing and the launcher's pure functions;
+      178 → 180 → 190 → 211 → 231 → 243 → 268 → 295 → 312 → 342 → 381 → 461 as
+      the rc.2 rewrite replaced the rc.6 fake harness, the waterfall/pending-panel
+      groups landed, v0.2.2 added the session-mode vocabulary, the per-platform
+      install routing and the launcher's pure functions, and v0.2.3 added the
+      per-hunk surgery, the nine right-click asks and the loopback fence;
       stale counts are the most common doc drift here — and since
       v0.2.1 `check-versions` fails the build on it rather than leaving it to
       this line).
 - [ ] `README.md`'s newest "What's new" heading is this version, and the README
       keeps **exactly one** release's notes. History goes in the CHANGELOG.
 - [ ] `LICENSE` present (MIT).
+- [ ] **Nothing new sits at the top level of the repo.** `.vscodeignore` is an
+      exclusion list, so a directory nobody thought about ships by default — the
+      v0.2.3 candidate had a local `宣传片/` storyboard folder inside it, worth
+      565 KB on a 896 KB VSIX, and the only thing that noticed was a human opening
+      the archive. Add the new path to `.vscodeignore` **and** confirm the count
+      in step 2 is still 14.
 - [ ] The expected VSIX size in step 2 was measured **after** the last edit to a
       shipped doc. `README.md` / `CHANGELOG.md` / `ARCHITECTURE.md` and their
       `*.zh-CN.md` twins live *inside* the VSIX, so editing one after packaging
@@ -121,7 +129,7 @@ Manual checks:
 unzip -l harness-connector-deepseek-<ver>.vsix
 ```
 
-Expected (v0.2.2 = 14 files, 331,706 bytes, ~324 KB):
+Expected (v0.2.3 = 14 files, 353,363 bytes in a clean checkout, ~345 KB):
 
 ```
 [Content_Types].xml
@@ -143,15 +151,30 @@ extension/media/markdown-it.umd.min.js
 If `src/`, `scripts/`, `test/`, `node_modules/`, `.workbuddy/`, or `*.map`
 appear, the `.vscodeignore` is wrong — fix it and re-package.
 
-The size above is the **clean-checkout** figure, and it is the same number CI produced for the
+The size above is the **clean-checkout** figure, and it is the number CI produces for the
 Release asset. It is not the only number this tree can produce. With `core.autocrlf = true`
 on Windows, any file git has round-tripped carries CRLF on disk while the blob it came from —
-and therefore the CI checkout — does not. At v0.2.2 exactly one file was in that state,
-`media/icon.svg`: its seven CR bytes compressed to 3 more bytes, so the local archive read
-331,709 where CI read 331,706. Compare the two archives and the other **13 entries have
-identical CRC32 and length**; only that one differs. So when a figure here disagrees with a
-fresh clone by a few bytes, check `git status` and the line endings before assuming the tree
-changed — and when recording a baseline, say which of the two you measured.
+and therefore the CI checkout — does not. `media/icon.svg` is still the one file in that
+state, and its seven CR bytes still compress to exactly 3 more bytes, so the working tree
+here packages to 353,366 where CI reads 353,363 (at v0.2.2 the same pair was 331,709 /
+331,706). Comparing the two archives, the other **13 entries have identical CRC32 and
+length**; only that one differs.
+
+To take the clean figure without a second machine, export the index with the filter off and
+package that — but note that `vsce` will not run in a directory with no `node_modules`, so
+swap the one file instead and restore it afterwards:
+
+```bash
+git -c core.autocrlf=false checkout-index -a --prefix=/c/tmp/vsclean/
+cp /c/tmp/vsclean/media/icon.svg media/icon.svg   # the only CRLF-on-disk shipped file
+npm run package                                    # → the number CI will read
+git checkout -- media/icon.svg                     # NOT checkout-index: autocrlf is
+                                                   #   what puts the CRLF one back
+```
+
+So when a figure here disagrees with a fresh clone by a few bytes, check `git status` and the
+line endings before assuming the tree changed — and when recording a baseline, say which of
+the two you measured.
 
 ---
 

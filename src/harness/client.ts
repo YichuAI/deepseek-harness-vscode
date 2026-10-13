@@ -58,6 +58,7 @@ import {
   DownlinkSocket, EventBuffer, EVENTS_ENDPOINT, SESSION_FOLLOW_ENDPOINT, muxUrl, type MuxStatus,
 } from './events.ts'
 import { HarnessAuthRequiredError, type BrowserSessionAuth } from './auth.ts'
+import { httpOrigin, isLoopbackHost, nonLoopbackRefusal } from './endpoint.ts'
 import { httpRequest } from './http.ts'
 import {
   defaultWireProfile, isMissingMethodError, isShapeRejection, negotiateWire, wireEndpoint, type WireProfile,
@@ -150,10 +151,9 @@ export interface HarnessClientOptions {
   log: (msg: string) => void
 }
 
-/** v0.0.x: only loopback hosts are accepted. */
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1'])
-
-/** How long to wait for the mux socket to open, in milliseconds. */
+/**
+ * How long to wait for the mux socket to open, in milliseconds.
+ */
 const OPEN_TIMEOUT_MS = 10_000
 /** How long to wait for the `ready` frame before proceeding anyway (non-fatal). */
 const READY_TIMEOUT_MS = 5_000
@@ -307,8 +307,8 @@ export class HarnessClient implements Disposable {
    */
   async connect(opts: { force?: boolean } = {}): Promise<void> {
     if (opts.force === true) this.disconnect()
-    if (!LOOPBACK_HOSTS.has(this.opts.host)) {
-      const msg = 'v0.0.x only supports local DeepSeek Harness instances.'
+    if (!isLoopbackHost(this.opts.host)) {
+      const msg = nonLoopbackRefusal(this.opts.host)
       this.setState({ kind: 'error', message: msg })
       throw new Error(msg)
     }
@@ -723,7 +723,7 @@ export class HarnessClient implements Disposable {
    * live against `0.2.1-alpha.2` (30 bytes in, `receiptId` back).
    */
   async uploadFile(sessionId: SessionId, name: string, bytes: Uint8Array): Promise<FileUploadValue> {
-    const url = `http://${this.opts.host}:${String(this.opts.port)}/api/session/uploadFileBinary`
+    const url = `${httpOrigin(this.opts.host, this.opts.port)}/api/session/uploadFileBinary`
       + `?sessionId=${encodeURIComponent(sessionId)}&name=${encodeURIComponent(name)}`
     const cookie = this.opts.auth.cookieHeader()
     const res = await fetch(url, {
@@ -909,7 +909,7 @@ export class HarnessClient implements Disposable {
     const follow = new DownlinkSocket<SessionFollowFrame>({
       url: () => muxUrl(this.opts.host, this.opts.port, this.profile?.muxPath ?? defaultWireProfile().muxPath),
       headers: () => {
-        const origin = `http://${this.opts.host}:${String(this.opts.port)}`
+        const origin = httpOrigin(this.opts.host, this.opts.port)
         const cookie = this.opts.auth.cookieHeader()
         const headers: Record<string, string> = { origin }
         if (cookie !== undefined) headers['cookie'] = cookie
@@ -1052,8 +1052,8 @@ export class HarnessClient implements Disposable {
    * then costs exactly one round trip.
    */
   private async rpc<V>(method: string, req: Record<string, unknown>): Promise<V> {
-    if (!LOOPBACK_HOSTS.has(this.opts.host)) {
-      throw new Error(`Refusing to talk to non-loopback host ${this.opts.host}: this plugin only drives a local DeepSeek Harness.`)
+    if (!isLoopbackHost(this.opts.host)) {
+      throw new Error(nonLoopbackRefusal(this.opts.host))
     }
     await this.opts.auth.init()
     const cookie = this.opts.auth.cookieHeader()
@@ -1092,7 +1092,7 @@ export class HarnessClient implements Disposable {
   /** POST one `{ args: inner }` envelope and decode the server-response. */
   private async postEnvelope<V>(method: string, inner: Record<string, unknown>, cookie: string | undefined): Promise<V> {
     const endpoint = this.ep(method)
-    const origin = `http://${this.opts.host}:${String(this.opts.port)}`
+    const origin = httpOrigin(this.opts.host, this.opts.port)
     const body = JSON.stringify({
       type: 'client-request',
       rpcId: randomUUID(),
@@ -1147,13 +1147,13 @@ export class HarnessClient implements Disposable {
    * state the UI renders as "no card" rather than as an error.
    */
   private async getRoute<T>(routePath: string, query: Record<string, string>): Promise<T | undefined> {
-    if (!LOOPBACK_HOSTS.has(this.opts.host)) {
-      throw new Error(`Refusing to talk to non-loopback host ${this.opts.host}: this plugin only drives a local DeepSeek Harness.`)
+    if (!isLoopbackHost(this.opts.host)) {
+      throw new Error(nonLoopbackRefusal(this.opts.host))
     }
     await this.opts.auth.init()
     const cookie = this.opts.auth.cookieHeader()
     if (cookie === undefined && (this.profile?.auth ?? 'cookie') === 'cookie') throw this.authRequired()
-    const origin = `http://${this.opts.host}:${String(this.opts.port)}`
+    const origin = httpOrigin(this.opts.host, this.opts.port)
     const search = new URLSearchParams(query).toString()
     let res
     try {
@@ -1194,15 +1194,16 @@ export class HarnessClient implements Disposable {
   private async respondToRemoteEvent(payload: RemoteEventResult): Promise<void> {
     await this.opts.auth.init()
     const cookie = this.opts.auth.cookieHeader()
-    const origin = `http://${this.opts.host}:${String(this.opts.port)}`
+    const origin = httpOrigin(this.opts.host, this.opts.port)
     const body = JSON.stringify({
       type: 'client-request',
       rpcId: randomUUID(),
       method: '$events/result',
       payload: { args: payload },
     } as ClientRequest)
+    let res
     try {
-      await httpRequest({
+      res = await httpRequest({
         host: this.opts.host,
         port: this.opts.port,
         method: 'POST',
@@ -1213,6 +1214,40 @@ export class HarnessClient implements Disposable {
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
       throw new Error(`Cannot reach dsh web at ${this.opts.host}:${String(this.opts.port)} — ${message}`)
+    }
+
+    // A 200 is not the same as "the answer was accepted", and the difference is
+    // the whole reliability of the Allow button: this POST is the only thing
+    // between a clicked approval and a tool that actually runs. The Host reports
+    // a refusal in two shapes — a non-200 status, and a 200 whose envelope
+    // carries `result.ok === false` — and this method used to inspect neither,
+    // so a refused answer was indistinguishable from an accepted one. The card
+    // was then settled while the Host had declined it: the same fail-closed
+    // outcome as a missing `outcome.value`, one layer further down.
+    if (res.status === 401) throw this.authRequired()
+    if (res.status !== 200) {
+      throw new Error(
+        `The harness refused the answer (HTTP ${String(res.status)}): ${res.body.trim().slice(0, 200)}`,
+      )
+    }
+    const text = res.body.trim()
+    if (text === '') return
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      // A non-JSON 200 is odd but not a refusal we can read, and inventing one
+      // would make a working host look broken.
+      return
+    }
+    const result = (parsed as { result?: { ok?: unknown; error?: RpcError } }).result
+    if (result !== undefined && result.ok === false) {
+      const err = result.error
+      throw new HarnessRpcError(
+        err?.code ?? 'gateway/internal',
+        err?.message ?? 'The harness declined the answer.',
+        err?.details,
+      )
     }
   }
 
@@ -1390,7 +1425,7 @@ export class HarnessClient implements Disposable {
       this.mux = new DownlinkSocket<RemoteEventFrame>({
         url: () => muxUrl(this.opts.host, this.opts.port, this.profile?.muxPath ?? defaultWireProfile().muxPath),
         headers: () => {
-          const origin = `http://${this.opts.host}:${String(this.opts.port)}`
+          const origin = httpOrigin(this.opts.host, this.opts.port)
           const cookie = this.opts.auth.cookieHeader()
           const headers: Record<string, string> = { origin }
           if (cookie !== undefined) headers['cookie'] = cookie

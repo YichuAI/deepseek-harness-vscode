@@ -41,6 +41,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { Disposable } from '../disposable.ts'
+import { wsOrigin } from './endpoint.ts'
 import { openWebSocket, WebSocketUpgradeError, type WebSocketHandle } from './ws.ts'
 import type { ReadyFrame, RemoteStreamServerMessage } from './protocol.ts'
 
@@ -228,11 +229,12 @@ export class DownlinkSocket<Frame> implements Disposable {
  * The ws:// URL for the Remote event socket on a loopback target.
  *
  * `path` comes from the negotiated WireProfile: it is `/api/remote.mux` for the
- * 0.2.0-rc.2 runtime we target.
+ * 0.2.0-rc.2 runtime we target. The host formatting lives in `endpoint.ts` so
+ * this URL and the `Origin:` header sent alongside it are built from the same
+ * string — an IPv6 literal has to be bracketed in both or in neither.
  */
 export function muxUrl(host: string, port: number, path: string): string {
-  const literal = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
-  return `ws://${literal}:${String(port)}${path}`
+  return `${wsOrigin(host, port)}${path}`
 }
 
 /**

@@ -26,6 +26,8 @@ export type ConnectionFailureKind =
   | 'wrong-port'
   /** We reached a Host that does not speak the shape we need. */
   | 'protocol-incompatible'
+  /** The configured host is not one this plugin will talk to at all. */
+  | 'non-loopback-host'
   /** Reachable and talkative, and we still do not know. */
   | 'unknown'
 
@@ -183,6 +185,11 @@ function alternatives(mode: SessionMode | undefined): string {
  * "start dsh web" is exactly the wrong advice for it.
  */
 const RULES: { kind: ConnectionFailureKind; re: RegExp }[] = [
+  // First, because it is not a failure to diagnose — it is a decision, made
+  // before a socket was opened, and its own message already says so. Matched on
+  // the refusal's own opening words so it cannot be confused with a transport
+  // error against a host that happens to be spelled the same way.
+  { kind: 'non-loopback-host', re: /Refusing to talk to "/ },
   // The Host itself told us no. Its refusal sentence is a stable fingerprint.
   { kind: 'auth-failed', re: /authentication required|dsh-auth|session cookie|credentials\.yaml|unauthoriz|\b401\b|Refused to mint/i },
   // Something answered that is not a dsh Host: the HTML/JSON it returned is not
@@ -207,6 +214,20 @@ export function classifyConnectFailure(message: string, ctx: ConnectFailureConte
       : undefined
 
   switch (kind) {
+    case 'non-loopback-host':
+      return {
+        kind,
+        title: `DeepSeek Harness is only reachable on this machine`,
+        detail,
+        fix:
+          `${where} is not a host this plugin will talk to. It only ever drives a Harness running on the ` +
+          'same machine as the VS Code window, and it checks that before opening a socket — so this is a refusal, ' +
+          'not a network problem. Set deepseekHarness.host to 127.0.0.1, localhost or ::1. If your workspace is on ' +
+          'another machine (Remote-SSH, WSL, a container), run the Harness on that machine and let the extension ' +
+          'talk to its loopback — see "Remote development" in the README.',
+        repair: { command: 'deepseekHarness.diagnostics', label: 'Diagnostics' },
+      }
+
     case 'auth-failed':
       return {
         kind,

@@ -65,6 +65,23 @@ export interface ReviewTransaction {
   createdAt: number
 }
 
+/** What the review card needs to know about one hunk — enough to name it. */
+export interface ReviewHunkSummary {
+  id: string
+  state: HunkState
+  addedLines: number
+  removedLines: number
+  /**
+   * A one-line taste of the change, so a hunk button can say WHICH hunk.
+   *
+   * Truncated on purpose: this summary crosses into the webview on every state
+   * push, and the full text is one click away in the diff editor. Without it the
+   * card could only offer "undo change 2 of 3", which is a position rather than
+   * an answer to "is this the one I want gone?".
+   */
+  preview: string
+}
+
 /** Opaque review summary for UI serialization (no large text blobs). */
 export interface ReviewSummary {
   id: string
@@ -80,7 +97,7 @@ export interface ReviewSummary {
     conflictReason?: string
     addedLines: number
     removedLines: number
-    hunks: Array<{ id: string; state: HunkState }>
+    hunks: ReviewHunkSummary[]
   }>
   state: ReviewState
   createdAt: number

@@ -391,6 +391,44 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('deepseekHarness.sendSelectionToChat', () => {
       void controller.sendSelection()
     }),
+    // ─── right-click quick tasks ──────────────────────────────────────────
+    //
+    // Nine commands, three per surface, all landing on the same pre-fill
+    // channel `addFileToChat` uses. The menu picks the surface — a selection, a
+    // whole file, a change — and each handler only resolves its own target and
+    // writes the ask; nothing is sent. Registered one at a time rather than in
+    // a loop so a rename is still findable by grep.
+    vscode.commands.registerCommand('deepseekHarness.explainSelection', () => {
+      controller.askSelection('explain')
+    }),
+    vscode.commands.registerCommand('deepseekHarness.fixSelection', () => {
+      controller.askSelection('fix')
+    }),
+    vscode.commands.registerCommand('deepseekHarness.reviewSelection', () => {
+      controller.askSelection('review')
+    }),
+    vscode.commands.registerCommand('deepseekHarness.explainFile', (uri?: vscode.Uri) => {
+      controller.askFile(uri, 'explain')
+    }),
+    vscode.commands.registerCommand('deepseekHarness.fixFile', (uri?: vscode.Uri) => {
+      controller.askFile(uri, 'fix')
+    }),
+    vscode.commands.registerCommand('deepseekHarness.reviewFile', (uri?: vscode.Uri) => {
+      controller.askFile(uri, 'review')
+    }),
+    // The argument is deliberately `unknown`: the same command is reached from
+    // `scm/resourceState/context` (a resource state, or an array of them) and
+    // from `editor/context` in a diff tab (a document URI), and asking VS Code
+    // to type that union would only move the guessing into a cast.
+    vscode.commands.registerCommand('deepseekHarness.explainChange', (arg?: unknown) => {
+      controller.askChange(arg, 'explain')
+    }),
+    vscode.commands.registerCommand('deepseekHarness.fixChange', (arg?: unknown) => {
+      controller.askChange(arg, 'fix')
+    }),
+    vscode.commands.registerCommand('deepseekHarness.reviewChange', (arg?: unknown) => {
+      controller.askChange(arg, 'review')
+    }),
     vscode.commands.registerCommand('deepseekHarness.attachFile', async () => {
       const picks = await vscode.window.showOpenDialog({
         canSelectMany: true,

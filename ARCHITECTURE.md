@@ -617,9 +617,43 @@ last two only count when exactly **one** candidate matches, since guessing among
 would revert the wrong file. A turn that changed files only through shell commands says
 so rather than pretending to act.
 
-Hunk-level revert exists in `ReviewMaterializer` (`rejectHunk`, with the same drift
-guard) but no UI reaches it any more — a revert is all-or-nothing per file. Restoring it
-is the "partial revert" item on the roadmap.
+### Per-hunk undo (v0.2.3)
+
+Reverting one hunk is a text edit, and the whole difficulty is *where*. Two facts
+about a hunk make a single `indexOf` wrong:
+
+- A **deletion** hunk has no text on the result side to search for, and an
+  **insertion** hunk has none on the original side. So the offset has to be
+  recovered from both sides at once.
+- A **repeated fragment** matches its first occurrence, not the one the diff
+  meant — which corrupts the file silently rather than failing.
+
+`review/patch.ts` therefore walks the hunk list with a forward-only cursor on
+*each* side, locating deletions from the original side and insertions from the
+result side, and it refuses outright when the unchanged text between two hunks
+does not read identically on both sides. It is a pure module — no filesystem, no
+`vscode`, no store — so those cases are asserted directly rather than through a
+rendered card.
+
+The guard is derived from the diff rather than from a snapshot. Once hunk *n* has
+been undone, the file no longer matches the `afterText` captured at review time,
+so a whole-file comparison would refuse every later hunk as `stale` — which is
+exactly what it used to do, while blaming an edit that had not happened. The
+expected content is now "what is on disk, plus back every hunk not yet undone",
+and a genuine edit made in between still refuses. `rejectHunk` is also a no-op
+when the hunk is already `rejected`, so a double-click writes nothing.
+
+`ReviewSummary.files[].hunks` carries `addedLines`, `removedLines` and a
+`preview`, because a card cannot offer a choice between hunks it cannot name; and
+`reviewSigFor` folds per-hunk state into the render signature, because undoing one
+hunk of three leaves the file `partial` with unchanged counts — without that, the
+click would look like it did nothing. A file-level revert shows for `partial` as
+well as `pending`, and means "revert whatever is left".
+
+One guard closed a latent data-loss path: a review built from a tool call's
+arguments alone has neither `beforeText` nor `afterText`, and `rejectFile` used to
+fall through to the "this file was created" branch and delete the path. It now
+refuses with `no-diff` and says what is missing.
 
 ### How this is verified
 
@@ -627,7 +661,9 @@ Two layers, and they are not redundant. The protocol test's **group M** pins the
 against a fake harness: that the two routes are plain authenticated GETs rather than RPC
 methods, that a hunk list rebuilds into two line-aligned sides, that the id comes off
 `uri.authority`, and that the card semantics hold (one card per turn, a repeat announcement
-replacing the coordinate, a gone summary resolving to no card).
+replacing the coordinate, a gone summary resolving to no card). **Group M2** drives the
+per-hunk surgery and the card that offers it, including the repeat that undoes a file out
+of order and the repaint that proves the signature moved.
 
 The live integration test then measures the two things a fixture cannot. A real turn is
 driven through the real model, because the part that can silently break is the **handoff**:
@@ -908,6 +944,46 @@ unconditionally. It used to be gated on `deepseekHarness.offline`, which hid it
 exactly in the case it was needed — a panel that still reads *Connected* over a
 dead socket.
 
+### Which endpoint we will talk to (the loopback fence)
+
+`harness/endpoint.ts` is small and deliberately boring, and it is where the answer
+to "does this work over Remote-SSH / WSL / a container?" actually lives. A Host
+on another machine is not a configuration this plugin supports with a caveat; it
+is an arrangement that is refused *before a socket exists*.
+
+```
+LOOPBACK_HOSTS   = { 127.0.0.1, localhost, ::1 }
+hostLiteral(h)   → h, or [h] for an IPv6 literal
+authorityOf(h,p) → the Host-header / cookie-name authority
+httpOrigin(h,p)  → the Origin: header
+wsOrigin(h,p)    → the socket URL
+```
+
+Three call sites read the set — `connect()`, the unary `rpc()` path, and
+`getRoute()` — and all three throw `nonLoopbackRefusal(host)`. That they are
+three and not one is the point: `retarget()` exists, so a client that was pointed
+at loopback can be pointed elsewhere afterwards, and the check has to be re-read
+rather than remembered from connect.
+
+The four strings are in one module because they are one decision, and because
+they have to agree with each other. The browser-session cookie is named
+`sha256(authority)` by the Host, so a client that formats its own cookie key
+differently from its own `Host` header is told its own cookie is invalid — which
+is what an unbracketed `::1` produced: `http://::1:3080` parses as host `::1:3080`
+on port 80, and the fence had accepted `::1` since the day it was written.
+
+`extensionKind: ["workspace"]` in `package.json` is the other half. The extension
+host has to run on the machine that has the Harness, because that is the machine
+whose `$DSH_HOME`, listener table and loopback are all describing the same
+Harness. The declaration was already the *preferred* value by default; stating it
+removes the silent fallback.
+
+A non-loopback host is a `ConnectionFailureKind` of its own (`non-loopback-host`,
+first in the rule list) rather than an `unknown` failure, because the reader is
+usually a remote user and needs to be told which side has to move. See the
+README's *Remote development* matrix for which of the four scenarios have been
+exercised.
+
 ### Host discovery (why the port can be wrong)
 
 `dsh web` defaults to `127.0.0.1:3080`, so a fixed port is right most of the
@@ -974,14 +1050,17 @@ src/
 │   ├── controller.ts         # review lifecycle (store ↔ materializer)
 │   ├── store.ts              # captured before/after per file + hunk
 │   ├── materializer.ts       # the only module that writes a revert
+│   ├── patch.ts              # pure: locate a hunk on both sides, apply one undo
 │   ├── virtualDocument.ts    # dsh-review:// before|after provider
 │   ├── changesDocument.ts    # dsh-changes:// provider + hunksToSides
 │   └── types.ts              # Review / ReviewFile / ReviewHunk
 ├── context/
-│   └── collector.ts          # editor context (active file, selection)
+│   ├── collector.ts          # editor context (active file, selection)
+│   └── quick-task.ts         # pure: the nine right-click asks + the scheme policy
 ├── harness/
 │   ├── protocol.ts           # wire types (mirror of 0.2.0-rc.2 Remote)
 │   ├── client.ts             # HarnessClient — only network edge
+│   ├── endpoint.ts           # the loopback fence + authority/origin/ws formatting
 │   ├── discovery.ts          # find the Host: pinned ports + the 401 fence fingerprint
 │   └── events.ts             # RemoteMuxSocket (WS) + EventBuffer (30ms)
 └── view/
@@ -996,7 +1075,7 @@ media/
 ├── origin.png                # source material (excluded from VSIX)
 └── markdown-it.umd.min.js    # bundled for VSIX (114 KB)
 scripts/
-├── protocol-test.ts          # fake-harness protocol test, 381 assertions (no dsh web)
+├── protocol-test.ts          # fake-harness protocol test, 461 assertions (no dsh web)
 ├── protocol-probe.ts         # asks a live `dsh web` what it actually serves
 ├── check-versions.ts         # every version surface must agree with package.json
 ├── integration-test.ts       # closed-loop test against real dsh
@@ -1005,7 +1084,10 @@ test/
 ├── fixtures/                 # sanitized protocol captures
 └── e2e/                      # user-action chains (see README → End-to-end tests)
     ├── run.ts                # runner; reports coverage rather than implying it
-    ├── chain5-revert.ts      # real filesystem: revert vs. later edits
+    ├── fake-host.ts          # a real http.Server + hand-written WS, killable
+    ├── chain1-connect.ts     # connect → Host restarts → recover (no Extension Host)
+    ├── chain4-approval.ts    # allow / reject / time out / Host error (no Extension Host)
+    ├── chain5-revert.ts      # real filesystem: revert vs. later edits, per hunk
     └── vscode-stub.ts        # minimal `vscode` stub for the materializer
 ```
 

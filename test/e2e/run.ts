@@ -18,6 +18,8 @@
  */
 
 import { appendFileSync } from 'node:fs'
+import { runChain1 } from './chain1-connect.ts'
+import { runChain4 } from './chain4-approval.ts'
 import { runChain5, type ChainResult } from './chain5-revert.ts'
 
 interface Chain {
@@ -32,7 +34,8 @@ const CHAINS: Chain[] = [
   {
     n: 1,
     name: 'Connect and auth — Host up → VS Code connects → Host restarts → recovers',
-    note: 'needs a Host that can be killed and restarted between two connects',
+    note: '',
+    run: runChain1,
   },
   {
     n: 2,
@@ -42,12 +45,13 @@ const CHAINS: Chain[] = [
   {
     n: 3,
     name: 'Streaming — long reply → tool call → drop the socket → no duplicate, loss or reorder',
-    note: 'needs a Host that can kill one connection without dying itself',
+    note: 'needs the fake Host to script a mid-turn socket drop',
   },
   {
     n: 4,
     name: 'Approvals — allow, reject, time out, Host error → every card reaches a terminal state',
-    note: 'needs a real Extension Host to click in',
+    note: '',
+    run: runChain4,
   },
   {
     n: 5,

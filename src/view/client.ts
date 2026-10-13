@@ -1185,8 +1185,14 @@ export const CLIENT_SCRIPT = /* js */ `
         // The reason is part of the signature, not just the state: a file that
         // is refused twice with two different reasons keeps state 'conflicted',
         // and a sig that ignores it would leave the first reason on screen.
+        //
+        // Each hunk's state is in here too. Undoing one hunk of three leaves the
+        // file 'partial' and every count unchanged, so a signature built from
+        // the file alone would keep drawing the undone hunk as if it were still
+        // pending — the row would look like the click did nothing.
         s += ';' + f.path + ',' + f.state + ',' + f.addedLines + ',' + f.removedLines
-          + ',' + ((f.hunks || []).length) + ',' + (f.conflictReason || '');
+          + ',' + (f.conflictReason || '') + ','
+          + (f.hunks || []).map((h) => h.id + ':' + h.state).join(',');
       }
       return s;
     }
@@ -1515,8 +1521,12 @@ export const CLIENT_SCRIPT = /* js */ `
     const filesDiv = document.createElement('div');
     filesDiv.className = 'review-files';
     for (const f of rv.files) {
+      // The file is a column now, not a row: the head identifies the file, and
+      // the hunk rows underneath are what makes the undo granular.
       const fileRow = document.createElement('div');
       fileRow.className = 'review-file ' + f.state;
+      const fileHead = document.createElement('div');
+      fileHead.className = 'rf-head';
 
       const path = document.createElement('span');
       path.className = 'rf-path';
@@ -1536,23 +1546,18 @@ export const CLIENT_SCRIPT = /* js */ `
         post({ type: 'reviewOpenDiff', reviewId: rv.id, filePath: f.path });
       });
 
-      fileRow.appendChild(path);
-      fileRow.appendChild(stats);
-      fileRow.appendChild(openBtn);
+      fileHead.appendChild(path);
+      fileHead.appendChild(stats);
+      fileHead.appendChild(openBtn);
 
       // Undo only. There is no "keep" button because keeping is what already
       // happened — the card cannot un-apply a change that is on disk.
-      if (f.state === 'pending') {
-        const revertBtn = document.createElement('button');
-        revertBtn.className = 'secondary icon';
-        revertBtn.textContent = '\u21A9';
-        revertBtn.title = 'Revert this file';
-        revertBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          post({ type: 'reviewRejectFile', reviewId: rv.id, filePath: f.path });
-        });
-        fileRow.appendChild(revertBtn);
-      } else {
+      //
+      // 'partial' keeps the button: some hunks are back, some are not, and
+      // "undo the rest of this file" is the obvious next move. Dropping it on
+      // the first hunk-level undo would strand the file half-reverted.
+      const revertable = f.state === 'pending' || f.state === 'partial';
+      if (!revertable) {
         const stateLabel = document.createElement('span');
         stateLabel.className = 'rf-state ' + f.state;
         // 'conflicted' is not a neutral state: it means the undo was offered,
@@ -1566,17 +1571,78 @@ export const CLIENT_SCRIPT = /* js */ `
           stateLabel.title = f.conflictReason;
           // The reason is the actionable part, so the row carries it too — the
           // label alone is easy to hover past.
-          fileRow.title = f.conflictReason;
+          fileHead.title = f.conflictReason;
         }
-        fileRow.appendChild(stateLabel);
+        fileHead.appendChild(stateLabel);
+      } else {
+        const revertBtn = document.createElement('button');
+        revertBtn.className = 'secondary icon';
+        revertBtn.textContent = '\u21A9';
+        revertBtn.title = f.state === 'partial'
+          ? 'Revert the rest of this file'
+          : 'Revert this file';
+        revertBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          post({ type: 'reviewRejectFile', reviewId: rv.id, filePath: f.path });
+        });
+        fileHead.appendChild(revertBtn);
+      }
+
+      fileRow.appendChild(fileHead);
+
+      // Per-hunk rows, only when there is more than one: with a single hunk the
+      // file row above already IS the hunk, and a duplicate button would offer
+      // two names for one action.
+      const hunks = f.hunks || [];
+      if (hunks.length > 1) {
+        const hunkList = document.createElement('div');
+        hunkList.className = 'rf-hunks';
+        for (const h of hunks) {
+          const hunkRow = document.createElement('div');
+          hunkRow.className = 'rf-hunk ' + h.state;
+
+          const preview = document.createElement('span');
+          preview.className = 'rf-hunk-text';
+          preview.textContent = h.preview || '(change ' + h.id + ')';
+          preview.title = h.preview || '';
+
+          const hunkStats = document.createElement('span');
+          hunkStats.className = 'rf-stats';
+          hunkStats.innerHTML = '<span class="added">+' + h.addedLines + '</span> <span class="removed">-' + h.removedLines + '</span>';
+
+          hunkRow.appendChild(preview);
+          hunkRow.appendChild(hunkStats);
+
+          if (h.state === 'pending') {
+            const undo = document.createElement('button');
+            undo.className = 'secondary icon';
+            undo.textContent = '\u21A9';
+            undo.title = 'Undo just this change';
+            undo.addEventListener('click', (e) => {
+              e.stopPropagation();
+              post({ type: 'reviewRejectHunk', reviewId: rv.id, filePath: f.path, hunkId: h.id });
+            });
+            hunkRow.appendChild(undo);
+          } else {
+            const hunkState = document.createElement('span');
+            hunkState.className = 'rf-state ' + h.state;
+            hunkState.textContent = h.state === 'rejected' ? '✕' : '✓';
+            hunkState.title = h.state === 'rejected' ? 'Undone' : 'Kept';
+            hunkRow.appendChild(hunkState);
+          }
+
+          hunkList.appendChild(hunkRow);
+        }
+        fileRow.appendChild(hunkList);
       }
 
       filesDiv.appendChild(fileRow);
     }
     card.appendChild(filesDiv);
 
-    // Accept all / Reject all buttons
-    if (rv.state === 'pending') {
+    // Revert-all stays available while anything is left to undo — including the
+    // 'partial' the first hunk-level undo produces.
+    if (rv.state === 'pending' || rv.state === 'partial') {
       const actions = document.createElement('div');
       actions.className = 'review-actions';
       const revertAllBtn = document.createElement('button');

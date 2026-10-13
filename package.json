@@ -2,7 +2,7 @@
   "name": "harness-connector-deepseek",
   "displayName": "DeepSeek Harness Connector",
   "description": "Native VS Code client for DeepSeek Harness. Connect to your existing local Harness instance and continue the same workspaces and sessions directly inside VS Code.",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "publisher": "lucasliang",
   "license": "MIT",
   "repository": {
@@ -31,6 +31,9 @@
     "onStartupFinished"
   ],
   "main": "./dist/extension.js",
+  "extensionKind": [
+    "workspace"
+  ],
   "icon": "media/icon.png",
   "contributes": {
     "viewsContainers": {
@@ -121,6 +124,51 @@
         "category": "DeepSeek Harness"
       },
       {
+        "command": "deepseekHarness.explainSelection",
+        "title": "Explain Selection",
+        "category": "DeepSeek Harness"
+      },
+      {
+        "command": "deepseekHarness.fixSelection",
+        "title": "Fix Selection",
+        "category": "DeepSeek Harness"
+      },
+      {
+        "command": "deepseekHarness.reviewSelection",
+        "title": "Review Selection",
+        "category": "DeepSeek Harness"
+      },
+      {
+        "command": "deepseekHarness.explainFile",
+        "title": "Explain File",
+        "category": "DeepSeek Harness"
+      },
+      {
+        "command": "deepseekHarness.fixFile",
+        "title": "Fix File",
+        "category": "DeepSeek Harness"
+      },
+      {
+        "command": "deepseekHarness.reviewFile",
+        "title": "Review File",
+        "category": "DeepSeek Harness"
+      },
+      {
+        "command": "deepseekHarness.explainChange",
+        "title": "Explain Change",
+        "category": "DeepSeek Harness"
+      },
+      {
+        "command": "deepseekHarness.fixChange",
+        "title": "Fix Change",
+        "category": "DeepSeek Harness"
+      },
+      {
+        "command": "deepseekHarness.reviewChange",
+        "title": "Review Change",
+        "category": "DeepSeek Harness"
+      },
+      {
         "command": "deepseekHarness.togglePlanMode",
         "title": "DeepSeek Harness: Toggle Plan Mode",
         "category": "DeepSeek Harness"
@@ -156,6 +204,20 @@
         "category": "DeepSeek Harness"
       }
     ],
+    "submenus": [
+      {
+        "id": "deepseekHarness.askSelection",
+        "label": "DeepSeek Harness"
+      },
+      {
+        "id": "deepseekHarness.askFile",
+        "label": "DeepSeek Harness"
+      },
+      {
+        "id": "deepseekHarness.askChange",
+        "label": "DeepSeek Harness"
+      }
+    ],
     "menus": {
       "view/title": [
         {
@@ -164,18 +226,64 @@
           "group": "navigation@1"
         }
       ],
+      "commandPalette": [
+        { "command": "deepseekHarness.explainSelection", "when": "false" },
+        { "command": "deepseekHarness.fixSelection", "when": "false" },
+        { "command": "deepseekHarness.reviewSelection", "when": "false" },
+        { "command": "deepseekHarness.explainFile", "when": "false" },
+        { "command": "deepseekHarness.fixFile", "when": "false" },
+        { "command": "deepseekHarness.reviewFile", "when": "false" },
+        { "command": "deepseekHarness.explainChange", "when": "false" },
+        { "command": "deepseekHarness.fixChange", "when": "false" },
+        { "command": "deepseekHarness.reviewChange", "when": "false" }
+      ],
       "explorer/context": [
         {
+          "submenu": "deepseekHarness.askFile",
+          "group": "deepseek-harness@1"
+        },
+        {
           "command": "deepseekHarness.addFileToChat",
-          "group": "deepseek-harness"
+          "group": "deepseek-harness@2"
         }
       ],
       "editor/context": [
         {
+          "submenu": "deepseekHarness.askSelection",
+          "when": "editorHasSelection && !isInDiffEditor",
+          "group": "deepseek-harness@1"
+        },
+        {
+          "submenu": "deepseekHarness.askChange",
+          "when": "isInDiffEditor",
+          "group": "deepseek-harness@1"
+        },
+        {
           "command": "deepseekHarness.sendSelectionToChat",
           "when": "editorHasSelection",
-          "group": "deepseek-harness"
+          "group": "deepseek-harness@2"
         }
+      ],
+      "scm/resourceState/context": [
+        {
+          "submenu": "deepseekHarness.askChange",
+          "group": "deepseek-harness@1"
+        }
+      ],
+      "deepseekHarness.askSelection": [
+        { "command": "deepseekHarness.explainSelection", "group": "ask@1" },
+        { "command": "deepseekHarness.fixSelection", "group": "ask@2" },
+        { "command": "deepseekHarness.reviewSelection", "group": "ask@3" }
+      ],
+      "deepseekHarness.askFile": [
+        { "command": "deepseekHarness.explainFile", "group": "ask@1" },
+        { "command": "deepseekHarness.fixFile", "group": "ask@2" },
+        { "command": "deepseekHarness.reviewFile", "group": "ask@3" }
+      ],
+      "deepseekHarness.askChange": [
+        { "command": "deepseekHarness.explainChange", "group": "ask@1" },
+        { "command": "deepseekHarness.fixChange", "group": "ask@2" },
+        { "command": "deepseekHarness.reviewChange", "group": "ask@3" }
       ]
     },
     "configuration": {
@@ -184,7 +292,7 @@
         "deepseekHarness.host": {
           "type": "string",
           "default": "127.0.0.1",
-          "markdownDescription": "DeepSeek Harness host. **v0.0.x only allows `127.0.0.1` or `localhost` (security boundary).** Any other value is refused."
+          "markdownDescription": "DeepSeek Harness host. Exactly three values are accepted — `127.0.0.1`, `localhost`, `::1`. Any other value is refused before a socket is opened, because the plugin only ever drives a Harness on the machine its extension host is running on. See *Remote development* in the README for what that means for Remote-SSH, WSL and containers."
         },
         "deepseekHarness.port": {
           "type": "number",

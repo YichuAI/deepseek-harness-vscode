@@ -14,20 +14,21 @@
  * test agree with the implementation instead of catching it.
  */
 
+import type { RevertWorkspace } from '../../src/review/materializer.ts'
+
 export interface StubTextDocument {
   fileName: string
   isDirty: boolean
 }
 
-/** The slice of `vscode.workspace` that `ReviewMaterializer` actually touches. */
-export interface StubWorkspace {
-  textDocuments: StubTextDocument[]
-  fs: {
-    readFile(uri: { fsPath: string }): Promise<Uint8Array>
-    writeFile(uri: { fsPath: string }, content: Uint8Array): Promise<void>
-    delete(uri: { fsPath: string }, options?: unknown): Promise<void>
-  }
-}
+/**
+ * The slice of `vscode.workspace` a revert touches.
+ *
+ * Taken from the materializer itself rather than restated here: a second copy
+ * would drift, and the drift would show up as a test that mocks something the
+ * production code stopped calling.
+ */
+export type StubWorkspace = RevertWorkspace
 
 export async function loadMaterializer(): Promise<typeof import('../../src/review/materializer.ts')> {
   const moduleApi = await import('node:module')

@@ -358,6 +358,31 @@ export class BrowserSessionAuth {
     this.opts.port = port
   }
 
+  /**
+   * The web-UI URL a browser can actually authenticate with, when we hold one.
+   *
+   * The harness gates its web UI per process: a plain `http://host:port/` gets
+   * `401 unauthorized`, and only the launch URL — `…/?token=<per-process
+   * secret>` — trades that token for the cookie a browser then carries. So
+   * "open the web UI" is not a link we can compose; it is a link we have to
+   * have been given.
+   *
+   * There is exactly one case in which we have it: the user pasted it. Every
+   * other route either never sees a token (minting a cookie from
+   * `$DSH_HOME/.credentials.yaml` skips the exchange entirely) or holds it
+   * somewhere that already knows about it (managed launch owns the child's
+   * console, and asks the launcher instead of asking here).
+   *
+   * Gated on {@link cookieHeader} so this can never hand back a URL for a Host
+   * we are not authenticated against: a stale token opens a page that says
+   * "unauthorized", which reads like a bug in the extension rather than like a
+   * restarted Host.
+   */
+  browserUrl(): string | undefined {
+    if (this.cookieHeader() === undefined) return undefined
+    return this.adoptedLaunchUrl
+  }
+
   /** Toggle the auto-mint behaviour at runtime to match `sessionMode: "credentials"`. */
   setAllowLocalMint(value: boolean): void {
     this.opts.allowLocalMint = value

@@ -166,8 +166,69 @@ export const DEFAULT_LAUNCH_COMMAND = 'dsh web --port 0'
  * fix is to update it, and silently launching a *different* build instead would
  * hide that — which is why this is a `not-found`-only fallback rather than a
  * general "retry with npx".
+ *
+ * This is also the whole remote story for the common case. Under Remote-SSH the
+ * extension host — and therefore this spawn — runs on the *remote* machine, so
+ * `npx` fetches the CLI there and starts the Host there. Nothing is installed
+ * globally, nothing has to be on the remote's `PATH`, and the loopback address
+ * the Host binds is the remote's own loopback, which is the only address this
+ * plugin will talk to anyway.
  */
 export const NPX_FALLBACK_COMMAND = 'npx -y @deepseek-ai/dsh@latest web --port 0'
+
+/** How long the first attempt gets. A local `dsh` boots in seconds. */
+export const DEFAULT_LAUNCH_TIMEOUT_MS = 120_000
+
+/**
+ * How long `npx` gets, which has to be longer.
+ *
+ * `npx -y` downloads and unpacks the package before it can print anything, and
+ * on a remote host over a slow link that is the slowest part of the whole
+ * operation. Reusing the local timeout would make a cold cache look like a
+ * broken install.
+ */
+export const NPX_LAUNCH_TIMEOUT_MS = 300_000
+
+/** Which of the two commands a plan step is. */
+export type LaunchRoute = 'configured' | 'npx-fallback'
+
+/** One command managed launch may run, and how long it may take. */
+export interface LaunchStep {
+  command: string
+  route: LaunchRoute
+  timeoutMs: number
+}
+
+/** Does this command already go through `npx`? Then the fallback would be a no-op. */
+export function usesNpx(command: string): boolean {
+  return /(^|[\s;&|("'`])npx([\s"')`]|$)/u.test(command)
+}
+
+/**
+ * The ordered commands managed launch will try for one connect.
+ *
+ * Two decisions, both about not lying to the user:
+ *
+ *  · **The fallback only follows `not-found`.** A Host that started and then
+ *    died on a port conflict has nothing to gain from a second, slower command.
+ *  · **The fallback only follows the default command.** If somebody set
+ *    `deepseekHarness.launchCommand` to their own wrapper, `dsh` not being found
+ *    is information about *their* setup — and quietly running a different build
+ *    over the top of it would hide the one thing they need to see. An explicit
+ *    choice gets an explicit failure.
+ */
+export function launchPlan(command: string): LaunchStep[] {
+  const configured: LaunchStep = {
+    command,
+    route: 'configured',
+    timeoutMs: DEFAULT_LAUNCH_TIMEOUT_MS,
+  }
+  if (command.trim() !== DEFAULT_LAUNCH_COMMAND || usesNpx(command)) return [configured]
+  return [
+    configured,
+    { command: NPX_FALLBACK_COMMAND, route: 'npx-fallback', timeoutMs: NPX_LAUNCH_TIMEOUT_MS },
+  ]
+}
 
 /**
  * Where a desktop install would be, per platform.

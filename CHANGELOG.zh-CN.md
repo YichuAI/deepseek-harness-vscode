@@ -5,6 +5,82 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.4] — 2026-10-13
+
+版本定位：**测试一天翻出三件事：别人的对话的卡片、没装 `dsh` 的远程机，以及丢了 token 的启动
+URL。**
+
+### 新增
+
+- **`DeepSeek Harness: Install Host`**——而且它是在扩展宿主里装的，在一段远程连接上，扩展宿主
+  *就是*那台远程。只给建议的版本会以一种没人会注意的方式失败：用户在自己面前那台笔记本上装好了
+  `dsh`，重连到一个仍然没有的远程，面板把同一句话说第二遍。`src/harness/install.ts` 里没有一丝
+  「远程」的概念，这正是设计——它 spawn 进 `process` 自己的上下文，而 VS Code 早已把那个上下文
+  放在了连接的正确的这一侧。它从不提权：系统自有的 `npm` prefix 以 `EACCES` 失败，失败本身加上
+  npm 自己的输出，就是说清哪个 prefix 不可写的那个东西。
+
+- **`src/harness/waterfall.ts`**——一条规则：一个被转发的 waterfall 属于它的帧点名的那个会话，
+  不属别的。一个导出函数，纯的，穷举断言过，包括这个字段真实的几种空形态（模板字符串给出的
+  `''`、非字符串、键不存在）。它为什么必须存在，见下面的归属修复。
+
+- **`waterfallSession`、`launchPlan` 和远程安装这条路都直接被断言。** 每一个都是一个很小的判断，
+  而答错仍然看着挺像对的——这正是测试不该隔着三层 UI 去够的那种代码。
+
+### 变更
+
+- **缺 `dsh` 现在有一个自动的答案，而且跑在正确的机器上。** `launchPlan(command)` 返回托管启动会
+  依次尝试的命令：配置的那条，外加——只对**默认**命令、且只在 `not-found` 失败之后——
+  `npx -y @deepseek-ai/dsh@latest web --port 0`。在 Remote-SSH 下，这会把 CLI 取到远程上，并在
+  那里启动 Host，既不全局安装任何东西，也不要求远程的 `PATH` 上有任何东西。两条刻意的边界：
+  非 `not-found` 的失败（超时、提前退出、URL 被拒）说的是 Host 的问题，而不是哪条命令启动了它，
+  所以不再给第二次机会；而用户自己设的 `launchCommand` 永远不会被顶替，因为偷偷跑一个别的构建，
+  正是一个真问题被藏起来的方式。`npx` 那一步还拿到了更长的超时（300s vs 120s），因为取包是最慢
+  的一段，冷缓存否则会被读成装坏了。
+
+- **安装建议跟着连接走，不跟着平台走。** `installGuidanceFor` 原来收 `(platform, arch)`，现在多
+  收第三个输入 `vscode.env.remoteName`。`platform` 仍然正确地描述目标机——这恰恰就是那个 bug：
+  一台 **Windows 远程机**被告知去下载桌面版 `.exe`，那个东西它跑不了，而且在一个用户的鼠标够
+  不到的屏幕上。远程窗口现在一律走 npm 这条路，不给下载链接。「找不到」的修复文案和「Harness
+  没在跑」的建议出于同样的理由也做了远程感知：「打开桌面端」是给一台你正坐着的机器的建议。
+
+- **「Open Web UI」会把它手上的 token 加上。** harness 按进程守着它的 web UI——裸的
+  `http://host:port/` 会答 `401`——所以这个命令过去只打印一句话，让你自己去终端里找启动 URL。
+  三条会话路线里有两条会让扩展手上留着一条，所以它直接打开：`managed` 下是 launcher 的 URL，
+  `paste` 下是 `auth.browserUrl()`——也就是那个被采纳的会话当初粘贴进来的 URL。它是每进程可
+  复用的密钥，不是一次性的授权，所以之后再点这个命令它照样有效。`browserUrl()` 以
+  `cookieHeader()` 为门，所以它永远不会给出一个插件并未通过认证的 Host 的 URL；一个过期的
+  token 打开的是一个写着「unauthorized」的页面，那读起来像扩展的 bug，而不是 Host 重启过。
+  `credentials` 模式下从来就没有 token（cookie 是从签名密钥直接铸出来的，中间没有任何交换），
+  现在的文案把这一点说清楚，而不是把用户指回一个这种模式存在的意义就是为了避开它的文件。
+
+- **面板里的「open web UI」链接和命令是同一个函数。** 它原来是第二条更短的、自带一份同样推理的
+  提示；现在它调 `openWebUi`。
+
+### 修复
+
+- **别的会话里提出的问题，被渲染成了屏幕上这段对话里的一张卡片。** `$events` 是宿主级的——每个
+  会话的审批和提问都从这同一根 socket 下来——而 `emitQuestionRequested` 读的是
+  `request.sessionId` 来判断它们是谁的。审批的 `request` 确实带一个。**提问的不带**：这个事件
+  是在 Agent 作用域的 waterfall 上投递的，wire 请求里根本没有「会话」这种东西。于是那次读取
+  什么也没读到，代码就退回到*面板碰巧正在显示的那个会话*。浏览器标签页里的一个提问，因此出现
+  在 VS Code 里，成了一张可以回答、但说的是另一次运行的卡片。
+
+  说清它属于哪个会话的那个字段，一直在 `agentId` 里，没人读。这不是从命名上推断的：随包发布的
+  Host 把 wire codec 注册成
+  `lookups.register('agent', { wire: 'agentId', wireTypeSymbol:
+  '@deepseek-ai/dsh-session/types#SessionId', resolve: (sessionId) => this.get(sessionId) })`
+  ——`agentId` 声明的 wire 类型*就是* `SessionId`，在帧被转发之前就已经校验过。两个 waterfall
+  现在都从这里取会话，`request.sessionId` 只作为「宿主没给」时审批的兜底，而**退回当前活动会话
+  的那条路已经删了**。一个没点名任何会话的帧不产生卡片，只记日志；`respondQuestion` 对一个
+  客户端从未采纳过的帧本来就会抛，所以两边都没有第二条路。猜，就是这个 bug 的成因，所以猜不是
+  兜底。
+
+- **端到端假 Host 现在能把来自另一个会话的 waterfall 放上线了。** `emitApproval` /
+  `emitQuestion` 把帧的作用域当参数收，`null` 表示「不给 `agentId`」——这是不用手写帧就能练到
+  「宁可丢弃也不猜」这条规则的唯一办法。第 4 条链路因此多了五条断言，实机集成测试多了一条，
+  从一个真实的 `user-questions/request` 上读出被归属的会话——那是这个事实唯一能被测量、而不是
+  被推理出来的地方。
+
 ## [0.2.3] — 2026-10-13
 
 版本定位：**可以只撤销一处改动的一部分了；远程工作区拿到的是一份写下来的回答，而不是一句拒绝。**

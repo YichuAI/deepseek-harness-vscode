@@ -5,6 +5,100 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),  
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] — 2026-10-13
+
+Tagline: **three things a day of testing turned up: a card from someone else's conversation, a remote
+with no `dsh` on it, and a launch URL that had lost its token.**
+Tagline (ZH): **测试一天翻出三件事：别人的对话的卡片、没装 `dsh` 的远程机，以及丢了 token 的启动 URL。**
+
+### Added
+
+- **`DeepSeek Harness: Install Host`** — and it installs in the extension host, which on a
+  remote connection *is* the remote. The advice-only version of this feature fails in a way
+  nobody notices: the user installs `dsh` on the laptop in front of them, reconnects to a
+  remote that still has none, and the panel says the same thing again. `src/harness/install.ts`
+  has no notion of "remote" in it at all, and that is the design — it spawns into `process`'s
+  own context, which VS Code has already put on the correct side of the connection. It never
+  elevates: a system-owned `npm` prefix fails with `EACCES` and the refusal plus npm's own
+  output is what names the unwritable prefix.
+
+- **`src/harness/waterfall.ts`** — the rule that a forwarded waterfall belongs to the session
+  its frame names, and to nothing else. One exported function, pure, asserted exhaustively
+  including the field's actual empty shapes (`''` from a template literal, a non-string, an
+  absent key). See the attribution fix below for why it needs to exist at all.
+
+- **`waterfallSession`, `launchPlan` and the remote install route are all asserted directly.**
+  Each is one small decision where the wrong answer still looks plausible, which is exactly the
+  kind of code a test should not reach through three layers of UI.
+
+### Changed
+
+- **A missing `dsh` has an automatic answer now, and it runs on the right machine.**
+  `launchPlan(command)` returns the ordered commands managed launch will try: the configured
+  one, plus — only for the **default** command, and only after a `not-found` failure —
+  `npx -y @deepseek-ai/dsh@latest web --port 0`. Under Remote-SSH that fetches the CLI on the
+  remote and starts the Host there, with nothing installed globally and nothing needed on the
+  remote's `PATH`. Two deliberate limits: a non-`not-found` failure (timeout, early exit,
+  refused URL) says something about the Host rather than about which command started it, so it
+  gets no second attempt; and a `launchCommand` the user set is never substituted, because
+  silently running a different build is how a real setup problem gets hidden. The `npx` step
+  also gets a longer timeout (300s vs 120s), since fetching the package is the slowest part and
+  a cold cache would otherwise read as a broken install.
+
+- **The install advice follows the connection, not the platform.** `installGuidanceFor` took
+  `(platform, arch)` and now takes a third input, `vscode.env.remoteName`. `platform` still
+  describes the target correctly, which is precisely the bug: a **Windows remote** host was
+  told to download a desktop `.exe` — something that machine cannot run, on a screen the user's
+  mouse cannot reach. A remote window now always gets the npm route, with no download link.
+  The not-found fix text and the "Harness is not running" advice are remote-aware for the same
+  reason: "open the desktop app" is advice for a machine you are sitting at.
+
+- **"Open Web UI" adds the token it has.** The harness gates its web UI per process — a bare
+  `http://host:port/` answers `401` — so the command used to print a message telling the user
+  to go and find the launch URL in a terminal. Two of the three session routes leave the
+  extension holding one, so it opens it: the launcher's URL under `managed`, and
+  `auth.browserUrl()` — the URL a pasted session was adopted from — under `paste`. It is a
+  reusable per-process secret rather than a single-use grant, so it is still good when the
+  command is used later. `browserUrl()` is gated on `cookieHeader()`, so it can never offer a
+  URL for a Host the plugin is not authenticated against; a stale token opens a page saying
+  "unauthorized", which reads like an extension bug rather than a restarted Host. Under
+  `credentials` there was never a token (the cookie is minted from the signing secret without
+  any exchange), and the message now says exactly that instead of pointing at a file the mode
+  exists to avoid.
+
+- **The panel's "open web UI" link is the same function as the command.** It was a second,
+  shorter message with its own copy of the reasoning; it now calls `openWebUi`.
+
+### Fixed
+
+- **A question raised in another session was rendered as a card in the conversation on
+  screen.** `$events` is host-wide — every session's approvals and questions arrive down the
+  one socket — and `emitQuestionRequested` read `request.sessionId` to find out whose they
+  were. An approval's `request` does carry one. A **question's does not**: the event is
+  delivered on an Agent-scoped waterfall and the wire request contains no session of any kind.
+  So the read found nothing, and the code fell back to *whatever session the panel happened to
+  be showing*. A browser tab's question therefore appeared in VS Code as an answerable card
+  about a different run.
+
+  The field that says which session it is had been in `agentId` the whole time, unread. That
+  is not an inference from naming: the shipped Host registers the wire codec as
+  `lookups.register('agent', { wire: 'agentId', wireTypeSymbol:
+  '@deepseek-ai/dsh-session/types#SessionId', resolve: (sessionId) => this.get(sessionId) })`
+  — the declared wire type of `agentId` *is* `SessionId`, validated before the frame is
+  forwarded. Both waterfalls now take their session from it, with `request.sessionId` as the
+  fallback for an approval on a host that omits it, and **the fallback to the active session is
+  gone**. A frame that names no session produces no card and is logged; `respondQuestion`
+  already throws for a frame the client never adopted, so there is no second path in either.
+  Guessing is how this bug happened, so guessing is not the fallback.
+
+- **The end-to-end fake Host can now put a waterfall from another session on the wire.**
+  `emitApproval` / `emitQuestion` take the frame's scope as an argument, with `null` meaning
+  "omit `agentId`" — which is the only way to exercise the decline-rather-than-guess rule
+  without hand-writing a frame. Chain 4 gained five assertions from it, and the live
+  integration test gained one that reads the attributed session off a real
+  `user-questions/request`, which is the only place that fact can be measured rather than
+  reasoned about.
+
 ## [0.2.3] — 2026-10-13
 
 Tagline: **undo part of a change, and get a written answer about remote workspaces instead of a refusal.**

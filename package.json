@@ -2,7 +2,7 @@
   "name": "harness-connector-deepseek",
   "displayName": "DeepSeek Harness Connector",
   "description": "Native VS Code client for DeepSeek Harness. Connect to your existing local Harness instance and continue the same workspaces and sessions directly inside VS Code.",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "publisher": "lucasliang",
   "license": "MIT",
   "repository": {
@@ -81,6 +81,11 @@
       {
         "command": "deepseekHarness.useLaunchUrl",
         "title": "DeepSeek Harness: Use Launch URL",
+        "category": "DeepSeek Harness"
+      },
+      {
+        "command": "deepseekHarness.installHost",
+        "title": "DeepSeek Harness: Install Host",
         "category": "DeepSeek Harness"
       },
       {
@@ -327,7 +332,7 @@
         "deepseekHarness.launchCommand": {
           "type": "string",
           "default": "dsh web --port 0",
-          "markdownDescription": "The command `sessionMode: \"managed\"` runs to start a Host. The default binds an OS-assigned port, because managed launch reads the real port off the launch URL and pinning one only adds a way to fail. Whatever you put here runs through a shell, so wrappers and `npx` work. Only read when a Host is started — changing it does not disturb a Host that is already running."
+          "markdownDescription": "The command `sessionMode: \"managed\"` runs to start a Host. The default binds an OS-assigned port, because managed launch reads the real port off the launch URL and pinning one only adds a way to fail. Whatever you put here runs through a shell, so wrappers and `npx` work. If the **default** command is not found (`dsh` is not on `PATH`), managed launch retries once with `npx -y @deepseek-ai/dsh@latest web --port 0` — on a remote connection that fetches `dsh` on the remote and starts the Host there. A command you set yourself is never substituted. Only read when a Host is started — changing it does not disturb a Host that is already running."
         },
         "deepseekHarness.autoDiscover": {
           "type": "boolean",

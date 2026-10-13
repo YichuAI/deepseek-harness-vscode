@@ -1022,11 +1022,27 @@ profile; a plain HTTP listener on the same scan is *not* adopted.
 
 ## Security boundary
 
-`HarnessClient.connect()` rejects any host not in `{127.0.0.1, localhost, ::1}` with:
+The hosts this plugin will talk to, and how an accepted `{host, port}` becomes a URL or a
+cookie authority, are one decision and live in `harness/endpoint.ts`. Three call sites read
+it — `connect()`, unary `rpc()` and `getRoute()` — and all three throw
+`nonLoopbackRefusal(host)`:
 
-> v0.0.x only supports local DeepSeek Harness instances.
+> Refusing to talk to "…": this plugin only drives a local DeepSeek Harness. Use 127.0.0.1,
+> localhost or ::1. For a remote workspace, run the Harness on that machine — see "Remote
+> development" in the README.
+
+Three sites rather than one is the point: `retarget()` exists, so a client that was pointed
+at loopback can be pointed elsewhere afterwards, and the fence is re-read rather than
+remembered from connect time. The refusal is its own `ConnectionFailureKind`
+(`non-loopback-host`, first in the rule table) because the person reading it is usually a
+remote user who needs to know which side has to move.
 
 `approval/request` frames are answered from the sidebar's pending panel via `POST /api/$events/result` (see above). A request whose stated reason declares full/unrestricted access withholds inline Allow and offers a **Answer in Web UI** hand-off instead; the gate reads the reason, not a tool-name allowlist. Nothing here calls `/api/respond`.
+
+A waterfall is attributed to the session its frame names, and never to whichever session is
+on screen — `harness/waterfall.ts` owns that rule and refuses rather than guesses. It matters
+here rather than in the UI layer because answering a waterfall *is* a write: a card drawn
+against the wrong conversation is a decision made about somebody else's run.
 
 ## Directory
 
@@ -1037,6 +1053,7 @@ src/
 ├── app/
 │   ├── controller.ts         # AppController — orchestration
 │   ├── state.ts              # UiState shape + mapping helpers
+│   ├── session-mode.ts       # pure: the credentials/managed/paste traits
 │   └── diagnosis.ts          # pure: classify a failure, build the redacted report
 ├── conversation/
 │   ├── model.ts              # ConversationModel fold
@@ -1061,6 +1078,14 @@ src/
 │   ├── protocol.ts           # wire types (mirror of 0.2.0-rc.2 Remote)
 │   ├── client.ts             # HarnessClient — only network edge
 │   ├── endpoint.ts           # the loopback fence + authority/origin/ws formatting
+│   ├── waterfall.ts          # pure: which session an answerable waterfall belongs to
+│   ├── auth.ts               # browser-session cookie lifecycle + local mint
+│   ├── local-credentials.ts  # reading the signing secret (with its caveats)
+│   ├── http.ts               # httpRequest / firstHeader
+│   ├── ws.ts                 # hand-written WebSocket client
+│   ├── wire.ts               # endpoint-style negotiation + error classification
+│   ├── launcher.ts           # managed launch: the command plan, the child, the URL
+│   ├── install.ts            # run an install in the extension host (i.e. on a remote)
 │   ├── discovery.ts          # find the Host: pinned ports + the 401 fence fingerprint
 │   └── events.ts             # RemoteMuxSocket (WS) + EventBuffer (30ms)
 └── view/
@@ -1075,7 +1100,7 @@ media/
 ├── origin.png                # source material (excluded from VSIX)
 └── markdown-it.umd.min.js    # bundled for VSIX (114 KB)
 scripts/
-├── protocol-test.ts          # fake-harness protocol test, 461 assertions (no dsh web)
+├── protocol-test.ts          # fake-harness protocol test, 493 assertions (no dsh web)
 ├── protocol-probe.ts         # asks a live `dsh web` what it actually serves
 ├── check-versions.ts         # every version surface must agree with package.json
 ├── integration-test.ts       # closed-loop test against real dsh

@@ -30,7 +30,7 @@ import { connectionToUi, sessionsToUi, workspaceToUi } from './state.ts'
 import { classifyConnectFailure } from './diagnosis.ts'
 import type { ConnectionHint, InstallGuidance, ManagedLaunchOutcome } from './diagnosis.ts'
 import type { SessionMode } from './session-mode.ts'
-import { DEFAULT_LAUNCH_COMMAND, LaunchError, type ManagedLauncher } from '../harness/launcher.ts'
+import { DEFAULT_LAUNCH_COMMAND, LaunchError, launchPlan, type LaunchAttempt, type ManagedLauncher } from '../harness/launcher.ts'
 import type { PendingAttachmentPayload, WebviewAction } from '../view/provider.ts'
 import type { HarnessWebviewViewProvider } from '../view/provider.ts'
 import { CompositeDisposable } from '../disposable.ts'
@@ -85,6 +85,14 @@ export interface ControllerDeps {
   /** `process.platform` / `process.arch`, for install guidance. */
   platform?: string
   arch?: string
+  /**
+   * `vscode.env.remoteName`, absent for a local window.
+   *
+   * Read by the failure classifier: on a remote connection the Host has to run
+   * over there, the desktop installer is not something the user can use, and
+   * "run `dsh web` in a terminal" means a terminal on *that* machine.
+   */
+  remoteName?: string
   /** Reveal a URL to the user (the desktop download page). */
   openExternal?: (url: string) => Promise<void>
   /** Put text on the clipboard (the Linux/macOS install commands). */
@@ -521,6 +529,10 @@ export class AppController {
         sessionMode: this.d.sessionMode(),
         platform: this.d.platform,
         arch: this.d.arch,
+        // `'ssh-remote'` / `'wsl'` / `'dev-container'` when the extension host is
+        // not the machine in front of the user. It changes which install is
+        // installable at all, so it is an input rather than a footnote.
+        remote: this.d.remoteName,
         desktopInstalled: this.d.desktopInstall?.(),
         // Only meaningful in the mode that mints: in the other two, the absence
         // of a mint gap is not evidence that a credential exists.
@@ -551,13 +563,58 @@ export class AppController {
     const adopt = this.d.adoptLaunchUrl
     if (launcher === undefined || adopt === undefined) return false
 
-    const command = this.d.launchCommand?.() ?? DEFAULT_LAUNCH_COMMAND
-    this.d.log.info(`connect: nothing on loopback and managed launch is enabled — starting \`${command}\``)
+    const configured = this.d.launchCommand?.() ?? DEFAULT_LAUNCH_COMMAND
+    // One or two commands, and the second only exists for `not-found` — see
+    // `launchPlan`. Under Remote-SSH this runs on the remote, so the plan is
+    // "the remote's own dsh, or fetches one on the remote".
+    const plan = launchPlan(configured)
+    this.d.log.info(`connect: nothing on loopback and managed launch is enabled — plan: ${
+      plan.map((s) => `${s.route}=\`${s.command}\``).join(' then ')}`)
+
+    let attempt: LaunchAttempt | undefined
+    let failed: LaunchError | undefined
+    for (const step of plan) {
+      try {
+        attempt = await launcher.start({
+          command: step.command,
+          timeoutMs: step.timeoutMs,
+          log: (m) => { this.d.log.info(m) },
+        })
+        if (step.route === 'npx-fallback') {
+          this.d.log.info('managed launch: no `dsh` on PATH, so the Host was started through npx')
+          this.d.notifyInfo(
+            'DeepSeek Harness: no `dsh` command was on PATH, so `npx` fetched one and started the Host. '
+            + 'Nothing was installed globally — install `dsh` if you would rather not pay the fetch each time.',
+          )
+        }
+        break
+      } catch (e) {
+        // Anything that is not a LaunchError is our own bug (the token exchange
+        // throwing, say) and is reported as-is rather than folded into a launch
+        // story it does not belong to.
+        if (!(e instanceof LaunchError)) throw e
+        failed = e
+        this.d.log.error(`managed launch failed (${step.route}, ${e.kind}): ${e.message}`)
+        // Only a missing command has an alternative route. A timeout, an early
+        // exit or a refused URL says something about the Host, not about which
+        // command started it.
+        if (e.kind !== 'not-found') break
+      }
+    }
+
+    if (attempt === undefined) {
+      if (failed !== undefined) {
+        this.lastLaunchOutcome = failed.kind
+        const output = launcher.outputTail()
+        if (output !== '') {
+          this.d.log.error('managed launch output (redacted):')
+          for (const line of output.split('\n')) this.d.log.error(`  ${line}`)
+        }
+      }
+      return false
+    }
+
     try {
-      const attempt = await launcher.start({
-        command,
-        log: (m) => { this.d.log.info(m) },
-      })
       const { host, port } = await adopt(attempt.url)
       this.d.client.retarget(host, port)
       await this.d.client.connect({ force: true })
@@ -568,16 +625,7 @@ export class AppController {
       )
       return true
     } catch (e) {
-      // `kind` is what the classifier turns into advice. Anything that is not a
-      // LaunchError is our own bug (the token exchange throwing, say) and is
-      // reported as-is rather than folded into a launch story it does not belong to.
-      if (e instanceof LaunchError) this.lastLaunchOutcome = e.kind
-      this.d.log.error(`managed launch failed: ${e instanceof Error ? e.message : String(e)}`)
-      const output = launcher.outputTail()
-      if (output !== '') {
-        this.d.log.error('managed launch output (redacted):')
-        for (const line of output.split('\n')) this.d.log.error(`  ${line}`)
-      }
+      this.d.log.error(`managed launch: adopting the Host it started failed — ${e instanceof Error ? e.message : String(e)}`)
       return false
     }
   }

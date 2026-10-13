@@ -52,6 +52,16 @@ export interface RecordedEventResult {
   envelope: Record<string, unknown>
 }
 
+/**
+ * A waterfall frame's declared scope.
+ *
+ * A string is the session the frame belongs to. `null` omits `agentId`
+ * altogether, which is what a frame that names no session looks like on the
+ * wire — the shape a pre-0.2 Host sends, and the only way to exercise the
+ * "decline rather than guess" rule without hand-writing a frame.
+ */
+export type WaterfallScope = string | null
+
 export interface FakeHarnessHost {
   readonly host: string
   readonly port: number
@@ -74,9 +84,9 @@ export interface FakeHarnessHost {
    */
   declineEventResults: boolean
   /** Push an approval waterfall to every connected mux client. */
-  emitApproval(eventId: string, request?: Record<string, unknown>): number
+  emitApproval(eventId: string, request?: Record<string, unknown>, scope?: WaterfallScope): number
   /** Push a `user-questions/request` waterfall. */
-  emitQuestion(eventId: string, request?: Record<string, unknown>): number
+  emitQuestion(eventId: string, request?: Record<string, unknown>, scope?: WaterfallScope): number
   /**
    * Tell clients the Host withdrew a waterfall.
    *
@@ -325,11 +335,11 @@ export async function startFakeHarness(): Promise<FakeHarnessHost> {
         set failEventResults(v: boolean) { state.failEventResults = v },
         get declineEventResults() { return state.declineEventResults },
         set declineEventResults(v: boolean) { state.declineEventResults = v },
-        emitApproval(eventId, request = { toolName: 'bash', reason: 'needs to run a command' }) {
-          return emitWaterfall('approval/request', eventId, request)
+        emitApproval(eventId, request = { toolName: 'bash', reason: 'needs to run a command' }, scope) {
+          return emitWaterfall('approval/request', eventId, request, scope)
         },
-        emitQuestion(eventId, request = { questions: [{ id: 'q1', header: 'Q', question: 'Pick one', options: [{ label: 'A' }, { label: 'B' }] }] }) {
-          return emitWaterfall('user-questions/request', eventId, request)
+        emitQuestion(eventId, request = { questions: [{ id: 'q1', header: 'Q', question: 'Pick one', options: [{ label: 'A' }, { label: 'B' }] }] }, scope) {
+          return emitWaterfall('user-questions/request', eventId, request, scope)
         },
         withdrawWaterfall(eventId) {
           for (const m of muxSockets) {
@@ -349,14 +359,28 @@ export async function startFakeHarness(): Promise<FakeHarnessHost> {
     })
   })
 
-  function emitWaterfall(event: string, eventId: string, request: Record<string, unknown>): number {
+  /**
+   * Push one forwarded waterfall to every connected mux client.
+   *
+   * `agentId` defaults to a fixed value so shapes stay comparable across runs,
+   * and `null` omits it entirely — which is what a frame that names no session
+   * looks like on the wire, and the only way to exercise the "decline rather
+   * than guess" rule without hand-writing a frame.
+   */
+  function emitWaterfall(
+    event: string,
+    eventId: string,
+    request: Record<string, unknown>,
+    agentId: WaterfallScope = 'agent-1',
+  ): number {
+    const scope = agentId === null ? {} : { agentId }
     let sent = 0
     for (const m of muxSockets) {
       if (m.streamId === undefined || m.socket.destroyed) continue
       m.socket.write(encodeFrame(0x1, Buffer.from(JSON.stringify({
         type: 'item',
         streamId: m.streamId,
-        value: { type: 'waterfall', event, eventId, agentId: 'agent-1', request },
+        value: { type: 'waterfall', event, eventId, ...scope, request },
       }), 'utf8')))
       sent++
     }

@@ -252,6 +252,45 @@ export async function runChain4(): Promise<ChainResult> {
         Array.isArray(selected) && selected.length === 1 && selected[0] === 'Beta',
         JSON.stringify(selected))
     }
+
+    // ── 9. whose conversation is this? ──────────────────────────────────────
+    //
+    // `$events` is host-wide: every session's approvals and questions come down
+    // the one socket, so a card is only correct if the frame says which session
+    // it came from. A question carries no session inside `request` at all —
+    // `agentId` is the field that names it — and reading it is what stops a
+    // question raised in a browser tab from rendering as a card in the VS Code
+    // conversation.
+    {
+      const scoped = new Promise<{ type: string; sessionId?: string }>((resolve, reject) => {
+        const timer = setTimeout(() => { sub.dispose(); reject(new Error('timed out')) }, 3000)
+        const sub = client!.onApprovalFrame((f) => {
+          clearTimeout(timer); sub.dispose()
+          resolve(f as unknown as { type: string; sessionId?: string })
+        })
+      })
+      host.emitQuestion('evt-elsewhere', { questions: [{ id: 'q9', question: 'Which env?' }] }, 'session-other')
+      const frame = await scoped
+      check('a question from another session is attributed to that session',
+        frame.sessionId === 'session-other', String(frame.sessionId))
+      check('...not to whichever session happens to be on screen',
+        frame.sessionId !== 'agent-1', String(frame.sessionId))
+
+      // No scope at all: the client declines rather than guessing. A card the
+      // user cannot explain is worse than a missing one, and answering it would
+      // settle a waterfall belonging to somebody else's run.
+      let leaked = false
+      const leakWatch = client!.onApprovalFrame(() => { leaked = true })
+      host.emitQuestion('evt-nosession', { questions: [{ id: 'qx', question: 'Anybody home?' }] }, null)
+      await new Promise((r) => setTimeout(r, 300))
+      leakWatch.dispose()
+      check('a waterfall that names no session is not turned into a card', !leaked)
+      let unattributableThrew = false
+      try { await client!.respondQuestion('evt-nosession', { answers: [] }) } catch { unattributableThrew = true }
+      check('...and cannot be answered from here', unattributableThrew)
+      check('...so nothing was posted for it',
+        host.eventResults.every((r) => r.eventId !== 'evt-nosession'))
+    }
   } catch (e) {
     failed++
     details.push(`chain threw: ${e instanceof Error ? e.message : String(e)}`)

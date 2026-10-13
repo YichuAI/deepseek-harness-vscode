@@ -762,11 +762,23 @@ wsOrigin(h,p)    → 套接字 URL
 
 ## 安全边界
 
-`HarnessClient.connect()` 拒绝任何不在 `{127.0.0.1, localhost, ::1}` 中的主机，提示：
+这个插件愿意跟哪些主机说话、一个被接受的 `{host, port}` 又如何变成 URL 或 cookie authority，
+是同一个决定，住在 `harness/endpoint.ts`。读它的一共有三处——`connect()`、一元 `rpc()` 和
+`getRoute()`——三处都抛 `nonLoopbackRefusal(host)`：
 
-> v0.0.x only supports local DeepSeek Harness instances.
+> Refusing to talk to "…": this plugin only drives a local DeepSeek Harness. Use 127.0.0.1,
+> localhost or ::1. For a remote workspace, run the Harness on that machine — see "Remote
+> development" in the README.
+
+三处而不是一处正是要点：`retarget()` 是存在的，所以一个原本指向回环的客户端之后可以被指到
+别处，围栏必须是重新读的，而不是在连接时记住的。这条拒绝有自己的 `ConnectionFailureKind`
+（`non-loopback-host`，排在规则表最前），因为读到它的人通常是远程用户，需要知道该动哪一头。
 
 `approval/request` 帧从侧边栏的待答面板经 `POST /api/$events/result` 应答（见上文）。理由中声明了 full/unrestricted access 的请求不给内联 Allow，改为提供 **Answer in Web UI** 交回入口；门槛读的是理由，不是工具名允许列表。这里没有任何东西调用 `/api/respond`。
+
+一条瀑布只归属于它的帧所声明的那个会话，绝不归属于屏幕上恰好在显示的那个——这条规则住在
+`harness/waterfall.ts`，它宁可拒绝也不猜。它属于这一节而不属于 UI 层，是因为回答瀑布**就是**
+一次写入：一张画错会话的卡片，就是替别人的运行做的决定。
 
 ## 目录结构
 
@@ -777,6 +789,7 @@ src/
 ├── app/
 │   ├── controller.ts         # AppController — 编排
 │   ├── state.ts              # UiState 形状 + 映射辅助
+│   ├── session-mode.ts       # 纯函数：credentials/managed/paste 三种模式的性状
 │   └── diagnosis.ts          # 纯函数：失败分类 + 脱敏诊断报告
 ├── conversation/
 │   ├── model.ts              # ConversationModel 折叠（"它说了什么"）
@@ -804,7 +817,10 @@ src/
 │   ├── client.ts             # HarnessClient — 唯一网络边界
 │   ├── auth.ts               # 浏览器会话 cookie 生命周期 + 本地自签
 │   ├── endpoint.ts           # 回环围栏 + authority/origin/ws 的拼装
+│   ├── waterfall.ts          # 纯函数：一条可答瀑布属于哪个会话
 │   ├── local-credentials.ts  # 读取 $DSH_HOME/.credentials.yaml（autoSession）
+│   ├── launcher.ts           # 托管启动：命令计划、子进程、启动 URL
+│   ├── install.ts            # 在扩展宿主里跑安装（在远程就是装在远程）
 │   ├── discovery.ts          # 找 Host：profile 里钉的端口 + 401 栅栏指纹
 │   ├── events.ts             # RemoteMuxSocket (WS) + EventBuffer (30ms)
 │   ├── http.ts               # 最小 http 客户端（无 fetch 时的回退）
@@ -821,7 +837,7 @@ media/
 ├── origin.png                # 源材料（VSIX 排除）
 └── markdown-it.umd.min.js    # VSIX 打包用（114 KB）
 scripts/
-├── protocol-test.ts          # 假 harness 协议测试，461 项断言（无需 dsh web）
+├── protocol-test.ts          # 假 harness 协议测试，493 项断言（无需 dsh web）
 ├── protocol-probe.ts         # 向真实 `dsh web` 询问它实际提供什么
 ├── check-versions.ts         # 每一个版本展示面都必须和 package.json 一致
 ├── integration-test.ts       # 针对真实 dsh 的闭环测试

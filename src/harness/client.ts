@@ -60,6 +60,7 @@ import {
 import { HarnessAuthRequiredError, type BrowserSessionAuth } from './auth.ts'
 import { httpOrigin, isLoopbackHost, nonLoopbackRefusal } from './endpoint.ts'
 import { httpRequest } from './http.ts'
+import { waterfallSession } from './waterfall.ts'
 import {
   defaultWireProfile, isMissingMethodError, isShapeRejection, negotiateWire, wireEndpoint, type WireProfile,
 } from './wire.ts'
@@ -1288,12 +1289,16 @@ export class HarnessClient implements Disposable {
         const event = String(f.event ?? '')
         const eventId = String(f.eventId ?? '')
         const req = (f.request ?? {}) as Record<string, unknown>
+        // `agentId` is the waterfall's declared scope and is what names the
+        // session — see `waterfall.ts`, including why the question path could
+        // not have found it anywhere else.
+        const agentId = f.agentId
         if (event === 'approval/request') {
-          this.emitApprovalRequested(eventId, req)
+          this.emitApprovalRequested(eventId, req, agentId)
           return
         }
         if (event === 'user-questions/request') {
-          this.emitQuestionRequested(eventId, req)
+          this.emitQuestionRequested(eventId, req, agentId)
           return
         }
         this.opts.log(`$events: unhandled waterfall "${event}"`)
@@ -1326,12 +1331,25 @@ export class HarnessClient implements Disposable {
         return
       }
       // ── pre-0.2 compatibility: the same waterfall delivered unwrapped ──
+      //
+      // No `agentId` here, because the shape predates it. `waterfallSession`
+      // reads whatever the request itself carries and otherwise declines —
+      // these two paths deliberately do NOT pass an active-session fallback,
+      // so a foreign waterfall arrives as no card instead of as a wrong one.
       case 'approval/request': {
-        this.emitApprovalRequested(String(f.eventId ?? ''), (f.request ?? {}) as Record<string, unknown>)
+        this.emitApprovalRequested(
+          String(f.eventId ?? ''),
+          (f.request ?? {}) as Record<string, unknown>,
+          undefined,
+        )
         return
       }
       case 'user-questions/request': {
-        this.emitQuestionRequested(String(f.eventId ?? ''), (f.request ?? {}) as Record<string, unknown>)
+        this.emitQuestionRequested(
+          String(f.eventId ?? ''),
+          (f.request ?? {}) as Record<string, unknown>,
+          undefined,
+        )
         return
       }
     }
@@ -1339,16 +1357,27 @@ export class HarnessClient implements Disposable {
   }
 
   /** Translate one wire `approval/request` into the internal requested frame. */
-  private emitApprovalRequested(eventId: string, req: Record<string, unknown>): void {
+  private emitApprovalRequested(eventId: string, req: Record<string, unknown>, agentId: unknown): void {
+    const sessionId = waterfallSession({
+      agentId,
+      requestSessionId: req['sessionId'],
+    })
+    if (sessionId === undefined) {
+      // Refusing rather than guessing: see `waterfall.ts`. The card would be
+      // rendered against whichever conversation is on screen, and answering it
+      // would settle a waterfall belonging to somebody else's run.
+      this.opts.log(`$events: approval ${eventId} names no session — dropped rather than misattributed`)
+      return
+    }
     const internal = {
       type: 'approval/requested',
-      sessionId: typeof req.sessionId === 'string' ? req.sessionId : (this.activeSessionId ?? ''),
+      sessionId,
       approvalId: eventId,
-      toolName: typeof req.toolName === 'string' ? req.toolName : undefined,
-      callId: typeof req.callId === 'string' ? req.callId : undefined,
-      reason: typeof req.reason === 'string' ? req.reason : undefined,
+      toolName: typeof req['toolName'] === 'string' ? req['toolName'] : undefined,
+      callId: typeof req['callId'] === 'string' ? req['callId'] : undefined,
+      reason: typeof req['reason'] === 'string' ? req['reason'] : undefined,
     } as MuxFrame
-    this.approvalFrames.set(eventId, { eventId, sessionId: (internal as { sessionId: string }).sessionId })
+    this.approvalFrames.set(eventId, { eventId, sessionId })
     this.notifyApproval(internal, eventId)
   }
 
@@ -1356,21 +1385,30 @@ export class HarnessClient implements Disposable {
    * Translate one wire `user-questions/request` into the internal requested
    * frame.
    *
-   * `sessionId` is the one field the wire request does not carry: the event is
-   * delivered on an Agent-scoped waterfall, so the session identity is the scope
-   * subject's. `wait.callId` is the tool call the card belongs to and is what
-   * lets the answer be tied back to an `ask_user_question` row; it is absent for
-   * an indefinite wait, which is still answerable, just unattached.
+   * The wire request carries no session of any kind — the event is delivered on
+   * an Agent-scoped waterfall, so the scope subject *is* the session identity,
+   * and that is `agentId` on the frame. `wait.callId` is the tool call the card
+   * belongs to and is what lets the answer be tied back to an
+   * `ask_user_question` row; it is absent for an indefinite wait, which is
+   * still answerable, just unattached.
    */
-  private emitQuestionRequested(eventId: string, req: Record<string, unknown>): void {
-    const wait = (req.wait ?? {}) as Record<string, unknown>
+  private emitQuestionRequested(eventId: string, req: Record<string, unknown>, agentId: unknown): void {
+    const wait = (req['wait'] ?? {}) as Record<string, unknown>
+    const sessionId = waterfallSession({
+      agentId,
+      requestSessionId: req['sessionId'],
+    })
+    if (sessionId === undefined) {
+      this.opts.log(`$events: question ${eventId} names no session — dropped rather than misattributed`)
+      return
+    }
     const internal = {
       type: 'question/requested',
-      sessionId: typeof req.sessionId === 'string' ? req.sessionId : (this.activeSessionId ?? ''),
-      questions: Array.isArray(req.questions) ? req.questions : [],
-      callId: typeof wait.callId === 'string' ? wait.callId : undefined,
+      sessionId,
+      questions: Array.isArray(req['questions']) ? req['questions'] : [],
+      callId: typeof wait['callId'] === 'string' ? wait['callId'] : undefined,
     } as MuxFrame
-    this.questionFrames.set(eventId, { eventId, sessionId: (internal as { sessionId: string }).sessionId })
+    this.questionFrames.set(eventId, { eventId, sessionId })
     this.notifyApproval(internal, eventId)
   }
 

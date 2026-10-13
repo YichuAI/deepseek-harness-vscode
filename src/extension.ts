@@ -19,8 +19,9 @@ import { readFileSync } from 'node:fs'
 import { HarnessClient } from './harness/client.ts'
 import { BrowserSessionAuth, type AuthStore } from './harness/auth.ts'
 import { DEFAULT_LAUNCH_COMMAND, ManagedLauncher, detectDesktopInstall } from './harness/launcher.ts'
+import { installCli } from './harness/install.ts'
 import { AppController, attachmentKindFor } from './app/controller.ts'
-import { buildDiagnosticsReport } from './app/diagnosis.ts'
+import { buildDiagnosticsReport, NPM_INSTALL_COMMAND } from './app/diagnosis.ts'
 import { parseSessionMode, traitsOf, USE_LAUNCH_URL_COMMAND, type SessionMode } from './app/session-mode.ts'
 import { DSH_REVIEW_SCHEME } from './review/virtualDocument.ts'
 import type { PendingAttachmentPayload, WebviewAction } from './view/provider.ts'
@@ -172,14 +173,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     desktopInstall: () => desktopInstall,
     platform: process.platform,
     arch: process.arch,
+    // `'ssh-remote'` / `'wsl'` / `'dev-container'` / `'attached-container'`, or
+    // absent. Read by the failure classifier, which has to tell a user sitting
+    // at a machine apart from a user connected to one.
+    remoteName: vscode.env.remoteName,
     openExternal: async (url: string) => { await vscode.env.openExternal(vscode.Uri.parse(url)) },
     copyToClipboard: async (text: string) => { await vscode.env.clipboard.writeText(text) },
-    openHarnessHome: () => {
-      void vscode.window.showInformationMessage(
-        'Open the DeepSeek Harness web UI with the URL printed by `dsh web` — '
-        + 'it carries the per-process token the harness now requires.',
-      )
-    },
+    // The panel's "open web UI" link is the same operation as the command, so
+    // it is the same function rather than a second copy of the reasoning. It is
+    // resolved at click time, which is why referring to a `const` declared
+    // further down this function is correct rather than a mistake.
+    openHarnessHome: () => { void openWebUi() },
     moveToSecondarySideBar: async () => {
       try {
         await vscode.commands.executeCommand('workbench.action.moveViews', {
@@ -240,13 +244,75 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
 
   /**
-   * Hand the harness web UI to the browser.
+   * Install the `dsh` CLI *here* — and on a remote connection, "here" is the remote.
    *
-   * This used to be a message saying it could not be done: the harness
-   * authenticates its web UI per process, only the token-bearing launch URL
-   * works, and a Host started by somebody else never shows us that URL. A Host
-   * *we* started is a different story — we own its console, so we have the URL —
-   * which is the one case where this command can simply do what it says.
+   * The extension host is what spawns this, so it inherits whatever side of the
+   * connection VS Code put the extension on. That is the entire trick: on a
+   * Remote-SSH window the install lands on the machine that has to run the Host,
+   * which is the machine the user's own terminal is *not* on.
+   *
+   * Confirmed first rather than run on a click that looked like a link: this
+   * writes to the machine's package prefix. It does not elevate, so the honest
+   * failure on a system-owned `npm` is an `EACCES` the user can read.
+   */
+  const installHost = async (): Promise<void> => {
+    const remote = vscode.env.remoteName
+    const where = remote === undefined ? 'this machine' : `the remote ("${remote}")`
+    const proceed = await vscode.window.showWarningMessage(
+      `Install the DeepSeek Harness CLI on ${where}?`,
+      {
+        modal: true,
+        detail:
+          `Runs \`${NPM_INSTALL_COMMAND}\` in the extension host, which is ${where}. `
+          + 'Nothing is elevated and nothing is written outside that machine\'s package prefix.',
+      },
+      'Install',
+    )
+    if (proceed !== 'Install') return
+
+    log.info(`install: requested by the user for ${where}`)
+    const outcome = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'DeepSeek Harness: installing the dsh CLI',
+        cancellable: false,
+      },
+      async () => await installCli({ log: (m) => log.info(m) }),
+    )
+    // Always to the log, pass or fail: npm's own output is the only thing that
+    // says *which* prefix was not writable, and a summary cannot carry that.
+    for (const line of outcome.output.split('\n')) log.info(`  ${line}`)
+
+    if (!outcome.ok) {
+      const why = outcome.error ?? `exit ${String(outcome.code)}`
+      log.error(`install: \`${outcome.command}\` failed — ${why}`)
+      const pick = await vscode.window.showErrorMessage(
+        `DeepSeek Harness: installing \`dsh\` failed (${why}).`,
+        'Show Log',
+      )
+      if (pick === 'Show Log') log.show()
+      return
+    }
+    log.info('install: succeeded — reconnecting')
+    void vscode.window.showInformationMessage('DeepSeek Harness: `dsh` installed. Reconnecting.')
+    await controller.doConnect()
+  }
+
+  /**
+   * Hand the harness web UI to the browser, token and all.
+   *
+   * This used to be a message saying it could not be done, on the grounds that
+   * only the token-bearing launch URL authenticates and a Host started by
+   * somebody else never shows us that URL. That reasoning is still right, but
+   * it was answering the wrong question: the URL is not always somebody else's
+   * to hold. Two of the three routes leave us with one.
+   *
+   *   1. Managed launch — we own the child's console, so we read the URL off it.
+   *   2. Paste — the user handed us the URL, and it is a *reusable* per-process
+   *      secret, not a single-use grant, so it is still good when we need it.
+   *   3. Credentials — there was never a token: the cookie is minted from the
+   *      signing secret without any exchange. Nothing to add, and saying so is
+   *      better than opening a page that answers `401`.
    */
   const openWebUi = async (): Promise<void> => {
     const launched = launcherForMode()?.launchUrl()
@@ -254,11 +320,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await vscode.env.openExternal(vscode.Uri.parse(launched))
       return
     }
+    // `auth.browserUrl()` is the pasted route, and it declines unless it is
+    // still authenticated for the Host we are pointed at.
+    const pasted = auth.browserUrl()
+    if (pasted !== undefined) {
+      log.info('openWebUI: reopening the launch URL this session was adopted from')
+      await vscode.env.openExternal(vscode.Uri.parse(pasted))
+      return
+    }
+    // No launch URL exists on this route — the exchange was skipped, not failed.
+    const minted = auth.localMintEnabled() && auth.isReady()
     void vscode.window.showInformationMessage(
-      'Open the web UI with the URL `dsh web` printed to its console — it carries the '
-      + 'per-process token the browser needs. The extension authenticates on its own; set '
-      + 'deepseekHarness.sessionMode to "managed" and it will start the Host itself, which also '
-      + 'lets this command open the web UI for you.',
+      minted
+        ? 'This session was minted from $DSH_HOME/.credentials.yaml, which does no token exchange, so '
+          + 'there is no token for this command to add. The terminal running `dsh web` printed one. '
+          + 'Alternatively, switch deepseekHarness.sessionMode to "managed" and this command opens the web UI itself.'
+        : 'Open the web UI with the URL `dsh web` printed to its console — it carries the '
+          + 'per-process token the browser needs. The extension authenticates on its own; set '
+          + 'deepseekHarness.sessionMode to "managed" and it will start the Host itself, which also '
+          + 'lets this command open the web UI for you.',
     )
   }
 
@@ -363,6 +443,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('deepseekHarness.disconnect', wireAction('disconnect')),
     vscode.commands.registerCommand('deepseekHarness.clearSessionToken', clearSessionToken),
     vscode.commands.registerCommand(USE_LAUNCH_URL_COMMAND, useLaunchUrl),
+    // Installs on whichever machine the extension host is on — see `installHost`.
+    vscode.commands.registerCommand('deepseekHarness.installHost', installHost),
     vscode.commands.registerCommand('deepseekHarness.openWebUI', openWebUi),
     vscode.commands.registerCommand('deepseekHarness.showLogs', () => log.show()),
     vscode.commands.registerCommand('deepseekHarness.diagnostics', diagnostics),

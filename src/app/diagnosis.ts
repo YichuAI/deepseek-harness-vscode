@@ -86,6 +86,19 @@ export interface InstallGuidance {
 export const DESKTOP_DOWNLOAD_URL = 'https://download.deepseek.com/dsh-desk/'
 export const SOURCE_REPO_URL = 'https://github.com/deepseek-ai/deepseek-harness'
 
+/**
+ * The one install that works everywhere this extension runs.
+ *
+ * A desktop installer is a thing a person double-clicks, which makes it the
+ * wrong answer for a machine they are only connected to — a Remote-SSH host, a
+ * dev container, a WSL distro. The npm package is the same product as a CLI, it
+ * installs into the extension host (so it lands on the remote), and it needs
+ * nothing on the machine except a `node` that `dsh` would have needed anyway.
+ *
+ * It is also what `deepseekHarness.installHost` runs.
+ */
+export const NPM_INSTALL_COMMAND = 'npm i -g @deepseek-ai/dsh'
+
 const NPX_COMMAND = 'npx @deepseek-ai/dsh web'
 const SOURCE_COMMAND =
   'git clone https://github.com/deepseek-ai/deepseek-harness.git && ' +
@@ -96,8 +109,26 @@ const SOURCE_COMMAND =
  *
  * `arch` matters on one point only: the desktop build is Apple Silicon, so an
  * Intel Mac has to fall through to the npm package.
+ *
+ * `remote` is the third input, and it overrides the other two. `vscode.env.remoteName`
+ * is `'ssh-remote'` / `'wsl'` / `'dev-container'` / `'attached-container'` when the
+ * extension host is not the machine in front of the user. There, `platform` still
+ * describes the *target* correctly — which is exactly why the desktop route has to
+ * be ruled out: a Windows remote host offered a `.exe` download would be told to
+ * install something it cannot run, on a screen whose mouse cannot reach it.
  */
-export function installGuidanceFor(platform: string, arch: string): InstallGuidance {
+export function installGuidanceFor(platform: string, arch: string, remote?: string): InstallGuidance {
+  if (remote !== undefined && remote !== '') {
+    return {
+      route: 'npx',
+      label: 'Copy install command',
+      detail:
+        `This window is connected to a remote ("${remote}"), so the Host has to run there. Copies the npm `
+        + 'install that lands in the extension host — i.e. on the remote — or run "DeepSeek Harness: Install Host" '
+        + 'and this extension runs it for you.',
+      command: NPM_INSTALL_COMMAND,
+    }
+  }
   if (platform === 'win32') {
     return {
       route: 'desktop',
@@ -155,6 +186,12 @@ export interface ConnectFailureContext {
   managedAttempted?: ManagedLaunchOutcome
   /** The active `deepseekHarness.sessionMode`, when known. */
   sessionMode?: SessionMode
+  /**
+   * `vscode.env.remoteName` — `'ssh-remote'`, `'wsl'`, `'dev-container'`, … —
+   * or absent for a local window. Changes which install is even installable,
+   * so it is an input to the advice rather than a decoration on it.
+   */
+  remote?: string
 }
 
 /**
@@ -210,7 +247,7 @@ export function classifyConnectFailure(message: string, ctx: ConnectFailureConte
   // outcome where the command itself was missing.
   const install =
     ctx.platform !== undefined && ctx.desktopInstalled === undefined
-      ? installGuidanceFor(ctx.platform, ctx.arch ?? '')
+      ? installGuidanceFor(ctx.platform, ctx.arch ?? '', ctx.remote)
       : undefined
 
   switch (kind) {
@@ -292,8 +329,14 @@ export function classifyConnectFailure(message: string, ctx: ConnectFailureConte
               kind,
               title: '`dsh` is not on PATH',
               detail,
-              fix: `Managed launch could not find a \`dsh\` command to run. Install the route below, then reconnect. ${alternatives(ctx.sessionMode)}`,
-              repair: { command: 'deepseekHarness.connect', label: 'Retry' },
+              fix:
+                'Managed launch tried `dsh` and then `npx`, and neither could run — so this machine has no '
+                + 'usable `dsh` and no working `npx`. Run "DeepSeek Harness: Install Host" to install it here'
+                + (ctx.remote !== undefined && ctx.remote !== ''
+                  ? ` (in the extension host, which on this "${ctx.remote}" connection is the remote machine)`
+                  : '')
+                + `, or run \`${NPM_INSTALL_COMMAND}\` yourself. ${alternatives(ctx.sessionMode)}`,
+              repair: { command: 'deepseekHarness.installHost', label: 'Install Host' },
               ...(install !== undefined ? { install } : {}),
             }
           case 'timeout':
@@ -330,13 +373,20 @@ export function classifyConnectFailure(message: string, ctx: ConnectFailureConte
       const paste = ctx.sessionMode === 'paste'
         ? ' This is "paste" mode: start the Host yourself and then run "DeepSeek Harness: Use Launch URL".'
         : ''
+      // "Open the desktop app" is advice for a machine the user is sitting at.
+      // On a remote connection the Host has to run over there, and the desktop
+      // build is not installed on a headless box in the first place.
+      const howToStart = ctx.remote !== undefined && ctx.remote !== ''
+        ? `Start the Host on that machine — a terminal there running "dsh web" — or set `
+          + 'deepseekHarness.sessionMode to "managed" and this extension starts it on the remote for you.'
+        : 'Open the desktop app, or run "dsh web" in a terminal.'
       return {
         kind,
         title: 'Harness is not running',
         detail,
         fix:
           `Nothing is listening on ${where}.${credentials}${paste} ` +
-          `Open the desktop app, or run "dsh web" in a terminal. ${alternatives(ctx.sessionMode)}`,
+          `${howToStart} ${alternatives(ctx.sessionMode)}`,
         repair: { command: 'deepseekHarness.connect', label: 'Retry' },
         ...(install !== undefined ? { install } : {}),
       }

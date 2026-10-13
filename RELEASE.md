@@ -55,11 +55,11 @@ npm run check-versions     # → all checks pass; add --online to include the
 npm run build              # → dist/extension.js
 
 # 1.4 protocol test (fake harness — no dsh web needed)
-npm run protocol-test      # → all 461 assertions ✓
+npm run protocol-test      # → all 493 assertions ✓
 
 # 1.5 end-to-end chains (real filesystem; reports its own coverage)
 npm run e2e-test           # → 3 of 5 chains covered, 2 not written; every
-                           #   written chain passes (91 assertions today)
+                           #   written chain passes (96 assertions today)
 
 # 1.6 integration test (writes a session — needs a host running)
 #     start one in another terminal:
@@ -68,7 +68,7 @@ npm run e2e-test           # → 3 of 5 chains covered, 2 not written; every
 #     port is freshly assigned on every launch — read it off the listener table
 #     and pass it in:
 #       DSH_PORT=3081 npm run integration-test
-npm run integration-test   # → 40/40 checks ✓, closed loop OK
+npm run integration-test   # → 41/41 checks ✓, closed loop OK
 
 # 1.7 package the VSIX
 npm run package            # → harness-connector-deepseek-<ver>.vsix
@@ -88,11 +88,13 @@ Manual checks:
       twin. This is a standing rule, not a per-release judgement call.
 - [ ] `CHANGELOG.md` and `ARCHITECTURE.md` still quote the **current** assertion
       count from `npm run protocol-test` (it has grown 50 → 64 → 98 → 83 → 156 →
-      178 → 180 → 190 → 211 → 231 → 243 → 268 → 295 → 312 → 342 → 381 → 461 as
+      178 → 180 → 190 → 211 → 231 → 243 → 268 → 295 → 312 → 342 → 381 → 461 → 493 as
       the rc.2 rewrite replaced the rc.6 fake harness, the waterfall/pending-panel
       groups landed, v0.2.2 added the session-mode vocabulary, the per-platform
       install routing and the launcher's pure functions, and v0.2.3 added the
-      per-hunk surgery, the nine right-click asks and the loopback fence;
+      per-hunk surgery, the nine right-click asks and the loopback fence, and
+      v0.2.4 added the waterfall attribution rule, the launch plan and the
+      remote install route;
       stale counts are the most common doc drift here — and since
       v0.2.1 `check-versions` fails the build on it rather than leaving it to
       this line).
@@ -129,7 +131,7 @@ Manual checks:
 unzip -l harness-connector-deepseek-<ver>.vsix
 ```
 
-Expected (v0.2.3 = 14 files, 353,363 bytes in a clean checkout, ~345 KB):
+Expected (v0.2.4 = 14 files, 363,963 bytes in a clean checkout, ~356 KB):
 
 ```
 [Content_Types].xml
@@ -156,7 +158,7 @@ Release asset. It is not the only number this tree can produce. With `core.autoc
 on Windows, any file git has round-tripped carries CRLF on disk while the blob it came from —
 and therefore the CI checkout — does not. `media/icon.svg` is still the one file in that
 state, and its seven CR bytes still compress to exactly 3 more bytes, so the working tree
-here packages to 353,366 where CI reads 353,363 (at v0.2.2 the same pair was 331,709 /
+here packages to 363,966 where CI reads 363,963 (at v0.2.2 the same pair was 331,709 /
 331,706). Comparing the two archives, the other **13 entries have identical CRC32 and
 length**; only that one differs.
 
@@ -438,15 +440,16 @@ Marketplace, the bytes in the Release asset and the sha256 printed in the log ar
   `readme.md`/`changelog.md`, and the `*.zh-CN.md` twins ship verbatim. So every baseline
   below belongs to one particular tree, and editing a shipped doc afterwards invalidates it.
   Re-measure; do not carry the old figure forward. Shipped bytes, as `gh release view --json
-  assets` reports them — i.e. what a user actually downloads: `v0.2.2` = 331,706;
+  assets` reports them — i.e. what a user actually downloads: `v0.2.3` = 353,363; `v0.2.2` = 331,706;
   `v0.2.1` = 313,426; `v0.2.0` = 312,853 at `581ba27`; `v0.1.9` = 309,620;
   `v0.1.7` = 288,750.
   The v0.2.1 *local* figure moved three times while that release was being prepared — 312,063,
   then 312,745, then 313,441 — each time because a doc inside the VSIX was edited after the
   last measurement. Those intermediate reads were not wrong; they were readings of a different
   tree. Re-measure, never carry a number forward, and never adjust one by eye.
-  Two local figures disagree with the released assets by a few bytes: v0.2.1 by 15 (313,441
-  against 313,426), v0.2.2 by 3 (331,709 against 331,706). The v0.2.2 gap was run down to
+  Four local figures disagree with the released assets by a few bytes: v0.2.1 by 15 (313,441
+  against 313,426), and v0.2.2 / v0.2.3 / v0.2.4 by 3 each (331,709 / 353,366 / 363,966
+  against 331,706 / 353,363 / 363,963). The gaps from v0.2.2 on were run down to
   `media/icon.svg`'s line endings — step 2 says how to check it. The v0.2.1 gap of 15 bytes was
   never run down, and is left named rather than smoothed over. v0.2.0 agreed exactly.
   `RELEASE.md` is on the `.vscodeignore` list, so editing *this* file cannot move the number

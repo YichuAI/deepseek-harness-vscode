@@ -20,13 +20,14 @@
 ## What it does
 
 - **Continues the session you already have.** Workspaces and sessions are read from the running Host. Refresh that session in a browser and you see exactly what VS Code sent.
-- **Answers approvals and agent questions from VS Code.** Both waterfalls are settled by this plugin, so a run is never blocked on a browser tab you have closed.
+- **Answers approvals and agent questions from VS Code — for the conversation you are looking at.** Both waterfalls are settled by this plugin, so a run is never blocked on a browser tab you have closed. The Host forwards every session's waterfalls down one socket, so a card is only drawn when the frame names *your* session; a question raised in a browser tab on another session is not rendered here, and switching to that session brings it back.
 - **Reports what each turn changed, and can undo it — one hunk at a time.** Fed by the Host's own turn record, so it covers a file a shell command edited — not only what a file tool reported. The card lists each hunk with its own undo, and the file-level undo reverts whatever is left. Both check the file's current bytes first and refuse rather than overwriting you.
 - **Right-click to ask about things.** Select code, a file in the explorer, or a change in the diff editor and the context menu offers *Explain / Fix / Review* — pre-filled with a prompt and the right `@` mention, including the line range for a selection.
 - **Opens VS Code's own editor for anything that is code.** A diff is a real diff editor; a path opens the file. Nothing is reimplemented in the webview.
 - **Finds the Host by itself**, including the desktop app, which starts its Host on an OS-assigned port that changes on every launch.
 - **Three ways to obtain a session, and you choose which.** Mint one from the harness's own credential store (zero configuration, but it means reading a file that also holds your API keys), let the extension start `dsh web` and take the launch URL it prints, or paste a launch URL yourself. See [How the session is obtained](#how-the-session-is-obtained).
 - **Starts no process unless you ask it to.** The default attaches to the Host you already have running.
+- **Can install its own Host, on whichever machine that means.** `DeepSeek Harness: Install Host` runs the install in the extension host — on a Remote-SSH window, that is the remote — so you never end up with `dsh` on your laptop and a remote that still has none. Managed launch also retries through `npx` by itself when `dsh` is not on `PATH`, which needs no install at all.
 
 ## How it connects
 
@@ -54,18 +55,17 @@ VS Code reads the workspaces and sessions the browser already has, and continues
 
 ![The Harness browser UI on its own](https://raw.githubusercontent.com/YichuAI/deepseek-harness-vscode/main/docs/screenshots/02-browser-web-ui.png)
 
-## What's new in v0.2.3
+## What's new in v0.2.4
 
-**The two things the last release left on the table: undoing *part* of a change, and an honest answer about remote workspaces.**
+**Three things a day of testing turned up: a card from someone else’s conversation, a remote with no `dsh` on it, and a launch URL that had lost its token.**
 
-- **Per-hunk undo.** The changed-files card now lists each hunk inside a file with its own ↩, next to a preview line and its own `+`/`−` counts. The file-level button stays, and reverts whatever is left — so undoing two hunks of three and then giving up on the third is two clicks, not a decision you have to make up front. The Host has always served the hunk list; what it never had was a wire path from the card to the materializer, and the materializer's own whole-file guard refused every hunk after the first. Both are fixed, and the guard is now *derived from the diff* — the expected text is "the current file minus the hunks you already undid" — which is why the second undo works and a genuine edit made in between still does not.
-- **Right-click a selection, a file, or a change and ask about it.** Three submenus — on the editor, the explorer, and a source-control row — offering **Explain / Fix / Review** against the thing you right-clicked. It inserts a prompt plus the matching `@` mention, with the line range when you had a selection; nothing about your file's contents goes anywhere. A diff editor is the interesting case: "this change" resolves to the file's working-tree side, not to whichever pane happened to be focused.
-- **A click on a review that had captured no text used to delete the file.** A review built from a tool call's arguments alone has no `before` *and* no `after`; the revert walked into the "this was a creation" branch and removed the path. It now refuses with `no-diff` and says what is missing. Found while writing the per-hunk tests, not by a user — which is the only good way to find it.
-- **Remote development is now a written-down answer instead of a one-line refusal.** The README has a matrix for local / Remote-SSH / WSL / containers, the extension declares `extensionKind: "workspace"`, and the loopback fence moved into a single module that also owns the URL and cookie-authority formatting — which surfaced that `::1` was accepted by the fence and unusable past it. A non-loopback host is also a first-class diagnosis now: the panel says which three values it accepts and, for a remote user, which side has to move.
+- **A card for somebody else's conversation is no longer drawn.** `$events` is host-wide: every session's approvals and questions arrive down the one socket, and the question path used to read `request.sessionId`, find nothing (a question's wire request carries no session at all), and fall back to *the session the panel happened to be showing*. A question raised in a browser tab on another session therefore rendered as a card in the VS Code conversation — answerable, and about a different run. The field that says which session it is was in `agentId` the whole time, unread. It is read now, and a frame that names no session produces no card at all: guessing is how the bug happened, so it is not the fallback.
+- **On a remote, the Host is the remote's.** Managed launch retries once through `npx -y @deepseek-ai/dsh@latest` when `dsh` is not on `PATH` — which, under Remote-SSH, fetches it *on the remote* and starts the Host there, with nothing installed globally. When even that is not enough, `DeepSeek Harness: Install Host` runs the install inside the extension host, which is the machine the user's own terminal is not on. The install guidance is remote-aware too: a remote window is never told to download a desktop app it cannot click.
+- **"Open Web UI" now carries the token.** The harness gates its web UI per process — a bare `http://host:port/` answers `401` — so the command used to tell you to go and find the URL yourself. It opens it now, using the launch URL the extension already holds. It declines rather than guessing: a session minted from `$DSH_HOME/.credentials.yaml` never involved a token, and the message says that instead of opening a page that fails.
 
-Verification: **461 assertions** (was 381), and the end-to-end chains went from **15 to 91**. Chains 1 and 4 — the two whose absence the changelog of v0.0.4→v0.1.1 justified fixing, because the panel did not start and "Allow" never actually allowed — now run for real against a fake Host that can be killed and restarted, with no VS Code Extension Host needed. Chain 5 grew from 6 sections to 13 as hunk-level undo landed. Coverage is now **3 of 5 chains written**, and the suite still prints the other two as unwritten rather than quietly omitting them.
+Verification: **493 assertions** (was 381), and the end-to-end chains went from **15 to 96**. Chains 1 and 4 — the two whose absence the changelog of v0.0.4→v0.1.1 justified fixing, because the panel did not start and "Allow" never actually allowed — now run for real against a fake Host that can be killed and restarted, with no VS Code Extension Host needed. Chain 5 grew from 6 sections to 13 as hunk-level undo landed. Coverage is now **3 of 5 chains written**, and the suite still prints the other two as unwritten rather than quietly omitting them. Against a live Host, **41/41** — including one new assertion that reads the session a question was attributed to off a real `user-questions/request`, which is the only place that fact can be measured rather than reasoned about.
 
-See [CHANGELOG.md](./CHANGELOG.md) for the full diff, and for the notes of every earlier release.
+The version before this one — v0.2.3 — has its own two features (per-hunk undo, and *Explain / Fix / Review* on a right-click) in this same build, but it was never published to the Marketplace or to Open VSX, so they are new to anyone installing from either. Its notes, and every earlier release's, are in [CHANGELOG.md](./CHANGELOG.md).
 
 ## Requirements
 
@@ -105,7 +105,7 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full diff, and for the notes of every
    Or install the VSIX from [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases):
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.2.3.vsix
+   code --install-extension harness-connector-deepseek-0.2.4.vsix
    ```
 
 3. Nothing to configure. In the default `sessionMode: "credentials"` the extension
@@ -198,7 +198,7 @@ authority that minted it).
 | `deepseekHarness.port` | `3080` | The default `dsh web` port. Override if you started `dsh web --port <n>`. |
 | `deepseekHarness.showSystemMessages` | `false` | Show plugin-injected system messages (runtime context, approval notices). Hidden by default; toggle live with the `SYS` button in the webview header. |
 | `deepseekHarness.sessionMode` | `credentials` | How a session is obtained. `credentials` mints the cookie locally from `$DSH_HOME/.credentials.yaml`; `managed` starts `dsh web` and takes its launch URL; `paste` waits for you to supply one. See [How the session is obtained](#how-the-session-is-obtained). |
-| `deepseekHarness.launchCommand` | `dsh web --port 0` | The command `sessionMode: "managed"` runs. The default binds an OS-assigned port, because managed launch reads the real port off the launch URL and pinning one only adds a way to fail. Run through a shell, so wrappers and `npx` work. Read only when a Host is started; changing it does not disturb a running one. |
+| `deepseekHarness.launchCommand` | `dsh web --port 0` | The command `sessionMode: "managed"` runs. The default binds an OS-assigned port, because managed launch reads the real port off the launch URL and pinning one only adds a way to fail. Run through a shell, so wrappers and `npx` work. If the **default** command is not found, managed launch retries once through `npx` — which on a remote fetches and starts the Host there; a command you set yourself is never substituted. Read only when a Host is started; changing it does not disturb a running one. |
 | `deepseekHarness.autoApproveApprovals` | `false` | Automatically answer incoming approval requests with `allowed-once`. Off by default — enabling it means tools run without per-call confirmation. |
 | `deepseekHarness.autoDiscover` | `true` | When the configured port answers nothing, look for a dsh Host elsewhere on loopback (pinned `webserver.port` first, then the OS listener table, confirmed by the Host's own refusal text). Needed by the desktop app, which starts its Host on an OS-assigned port. The discovered port is session-local and never written to your settings. |
 
@@ -218,7 +218,8 @@ authority that minted it).
 - `DeepSeek Harness: Rename Session` — pin a title (stops automatic regeneration)
 - `DeepSeek Harness: Archive Session` — archive it out of the active workspace list
 - `DeepSeek Harness: Attach File to Session` — stage local images/files for the next prompt (images ride `session/prompt` as inline parts; other files upload to `POST /api/session/uploadFileBinary` and are referenced by receipt) — also available via the 📎 button and by pasting or dropping into the composer
-- `DeepSeek Harness: Open Web UI` — opens the token-bearing launch URL in your browser. Under `sessionMode: "managed"` the extension started that Host, so it has the URL and this command just works; otherwise it tells you where to find the line
+- `DeepSeek Harness: Install Host` — install the `dsh` CLI **in the extension host**, which on a remote connection is the remote machine. Confirms first and names that machine; runs `npm i -g @deepseek-ai/dsh`; never elevates, so a system-owned `npm` prefix reports its own `EACCES` instead of escalating
+- `DeepSeek Harness: Open Web UI` — opens the token-bearing launch URL in your browser. Whichever route left the extension holding a URL — managed launch, or a launch URL you pasted — it uses it; `credentials` mode has no token to add and says so
 - `DeepSeek Harness: Show Logs` (the `DeepSeek Harness` output channel)
 
 The same six controls also live in the sidebar's **Controls** panel, which
@@ -273,7 +274,7 @@ that implements the `0.2.1-alpha.2` server half exactly — so no `dsh web` is
 needed:
 
 ```bash
-npm run protocol-test    # 461 assertions: the two-stream transport split
+npm run protocol-test    # 493 assertions: the two-stream transport split
                          # ($events allowlist vs session/follow), wire negotiation
                          # (dot/slash, cookie gating, event socket), auth and cookie
                          # derivation, {args} payloads (wrapped vs bare), the approval
@@ -302,8 +303,14 @@ npm run protocol-test    # 461 assertions: the two-stream transport split
                          # disagree), the nine right-click asks driven through the
                          # real `@` grammar so a prompt that would not chip fails
                          # here rather than in the agent's lap, the loopback fence
-                         # and the three strings built from an accepted host, and
-                         # the webview script's integrity
+                         # and the three strings built from an accepted host,
+                         # waterfall attribution (agentId over request.sessionId,
+                         # and no card at all when a frame names neither), the
+                         # launch plan that turns an absent `dsh` into one `npx`
+                         # retry and never substitutes a command the user set, the
+                         # install route a remote window gets instead of a desktop
+                         # installer, the token a browser URL may carry, and the
+                         # webview script's integrity
 ```
 
 What the protocol test deliberately does **not** cover is the whole product. It
@@ -344,7 +351,7 @@ one that passes.
 | 1 | Connect and auth — Host up → VS Code connects → Host restarts → recovers | ✅ **23 assertions passing**, against a fake Host that is killed and restarted between two connects |
 | 2 | Session consistency — browser sends → VS Code sees it → switch → reload → history intact | ⬜ not written — needs a real Extension Host |
 | 3 | Streaming — long reply → tool call → drop the socket → no duplicate, loss or reorder | ⬜ not written — needs a Host that can kill one connection without dying itself |
-| 4 | Approvals — allow, reject, time out, Host error → every card reaches a terminal state | ✅ **31 assertions passing**, against a fake Host that drives all four endings |
+| 4 | Approvals — allow, reject, time out, Host error → every card reaches a terminal state | ✅ **36 assertions passing**, against a fake Host that drives all four endings |
 | 5 | File changes — agent edits → user re-edits → revert must not clobber the user | ✅ **37 assertions passing**, on a real filesystem |
 
 Chains 1 and 4 are the two the changelog of v0.0.4→v0.1.1 makes the case for: the panel
@@ -355,7 +362,9 @@ test would have been green through both. They are possible because `HarnessClien
 Extension Host at all. The fake Host is deliberately `0.2.0-rc.2`-shaped including its
 fences: a POST route that forgot to require the cookie would answer the wire-negotiation
 probe with `200` instead of `401`, and the test would then be measuring the wrong
-classifier.
+classifier. Its waterfall emitter takes the frame's scope as an argument, so chain 4 can
+put a question from *another* session on the wire and check that it lands on that session
+— and that a frame naming no session produces no card at all.
 
 Chain 5 is the one with a hazard rather than a bug, and the only one whose subject is the
 filesystem: `ReviewMaterializer` takes the workspace API as a constructor argument, so it
@@ -384,7 +393,7 @@ npm run typecheck
 npm run check-versions   # every version surface must agree with package.json
 npm run protocol-test    # 461 protocol assertions against a fake harness
 npm run protocol-probe   # report what your real dsh web exposes
-npm run package          # → harness-connector-deepseek-0.2.3.vsix
+npm run package          # → harness-connector-deepseek-0.2.4.vsix
 ```
 
 Press `F5` in VS Code to launch an Extension Development Host with the extension loaded.
@@ -485,7 +494,7 @@ That leaves four arrangements, and the honest state of each:
 
 | Scenario | State | What it means |
 | --- | --- | --- |
-| **Local window** | ✅ **Measured** | The supported arrangement and the only one exercised here: **40/40** integration assertions against a live Host on `127.0.0.1:3080`, on top of the 461 protocol and 91 end-to-end assertions. |
+| **Local window** | ✅ **Measured** | The supported arrangement and the only one exercised here: **41/41** integration assertions against a live Host on `127.0.0.1:3080`, on top of the 493 protocol and 96 end-to-end assertions. |
 | **Remote-SSH** | ⚠️ **Not measured** — this machine has no SSH server (`localhost:22` refuses) | Works when the Harness runs **on the remote host**. The extension declares `extensionKind: "workspace"`, so in a remote window its extension host runs on the remote machine: it reads that machine's `$DSH_HOME`, probes that machine's listener table, and talks to that machine's loopback. A Harness on your laptop is unreachable from there — and should be, since the workspace it would edit is not the one you have open. |
 | **WSL** | ⚠️ **Not measured** — `wsl.exe` is on this sandbox's program blacklist, so it could not be launched at all | Same shape as Remote-SSH: run `dsh web` inside the distro. VS Code hands WSL over as an ordinary remote, so nothing WSL-specific is needed. |
 | **Dev container** | ⚠️ **Not measured** — `docker` is not installed here | Same shape again: run `dsh web` inside the container. The container's own `$DSH_HOME/.credentials.yaml` is what gets read, not the host's. |
@@ -495,6 +504,26 @@ sandbox refuses to launch `wsl.exe` at all, `docker` is not installed, and there
 SSH server to connect to. What *was* measured is the part that decides all four rows —
 the fence and the binding — and it is identical in every scenario. The rows differ only
 in which machine the extension host and the Harness land on together.
+
+### Getting a `dsh` onto the remote
+
+The remote needs its own `dsh`, and the two ways to get one both run on the remote
+without you having to reproduce the setup there by hand:
+
+- **Managed launch falls back to `npx`.** When the configured command is the default and
+  `dsh` is not on `PATH`, managed launch retries once with
+  `npx -y @deepseek-ai/dsh@latest web --port 0`. Because the spawn happens in the
+  extension host, on a remote window that fetches the CLI **on the remote** and starts the
+  Host there. Nothing is installed globally and nothing has to be on the remote's `PATH`.
+- **`DeepSeek Harness: Install Host`** runs `npm i -g @deepseek-ai/dsh` in the extension
+  host for the case where `npx` is not enough — and the confirmation dialog names the
+  machine it will write to, which on a remote is the remote. It does not elevate: a
+  system-owned `npm` prefix fails with `EACCES`, and the refusal plus npm's own output is
+  what tells you which prefix was not writable.
+
+The install guidance follows the same rule rather than the platform: a remote window is
+never offered a desktop installer, because the machine that can run it is not the machine
+the click happens on.
 
 `@` mentions work everywhere, including remote windows: a remote file arrives as a
 `vscode-remote:` URI, which the mention path accepts, so **Add to Harness Chat**, the
@@ -524,10 +553,17 @@ you know which side has to move.
 - **Managed launch needs a `dsh` that can actually boot.** An out-of-date global `dsh` can
   be too old for the credential file the desktop app wrote, and it will exit on startup —
   the panel's advice in that case is to open the log, because the reason is always in the
-  child's own last lines. Updating it fixes it.
+  child's own last lines. Updating it fixes it. A `dsh` that is *missing* is a different
+  ending: managed launch retries through `npx` first, and only if that also fails does it
+  offer to install one for you.
 - **Images depend on the model.** Whether a model accepts images is not published in `session/modelCatalog`, so the plugin can only pass the host's verdict through: a non-vision model fails the prompt with `MODEL_DOES_NOT_SUPPORT_IMAGES`, and the panel tells you to switch models in Controls. Your staged attachments are kept for the retry.
 - **Staged files are process-bound.** An upload receipt is tied to the session *and* the running `dsh web` process, so a file staged across a host restart must be re-picked.
 - History loads the last ~50 messages; "load older" is a future feature.
+- **"Open Web UI" can only add a token the extension was given.** Two of the three session
+  routes leave it holding a launch URL, and it opens that. `credentials` mode does not: the
+  cookie is minted from the signing secret without any token exchange, so there is no token
+  to put in a URL — the command says so rather than opening a page that answers `401`. The
+  terminal running `dsh web` has the URL in that case.
 - Session deep-links in "Open Web UI" are intentionally not guessed — only the Harness home opens.
 - Unknown harness event types are ignored (the protocol is merge-extensible); they do not crash the client but also do not render.
 - **A revert writes the captured `before` text back — it does not use `git checkout`.** Before writing, it checks that the file on disk still matches the `after` it captured at review time, and that no editor has unsaved changes to it. If either has moved on, the revert is refused and the file is marked conflicted rather than overwritten. That guard is why the undo is safe to offer without asking, and why it can decline.

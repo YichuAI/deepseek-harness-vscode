@@ -327,10 +327,10 @@ async function main(): Promise<void> {
   //          silently denied and still wrote a plausible-looking audit entry.
   //      The protocol test pins the envelopes; this measures that a real Host
   //      accepts them and the model gets the answer back.
-  const waterfalls: { type: string; eventId: string; callId?: string }[] = []
+  const waterfalls: { type: string; eventId: string; callId?: string; sessionId?: string }[] = []
   const wfSub = client.onApprovalFrame((frame, eventId) => {
-    const f = frame as { type?: string; callId?: string }
-    waterfalls.push({ type: String(f.type), eventId, callId: f.callId })
+    const f = frame as { type?: string; callId?: string; sessionId?: string }
+    waterfalls.push({ type: String(f.type), eventId, callId: f.callId, sessionId: f.sessionId })
   })
 
   async function waitForWaterfall(type: string, ms: number): Promise<string | undefined> {
@@ -368,6 +368,14 @@ async function main(): Promise<void> {
   } else {
     check('the live host delivers user-questions/request to a mux client', true,
       `eventId=${questionEventId.slice(0, 8)}…`)
+    // Attribution, measured rather than assumed. A question's wire request
+    // carries no session of any kind, so the ONLY way this can name the session
+    // that asked is by reading the frame's `agentId` — and if the Host ever
+    // stopped sending one, the client would now drop the frame instead of
+    // guessing, which would show up here as no frame at all.
+    const asked = waterfalls.find((w) => w.eventId === questionEventId)
+    check('...and it is attributed to the session that asked it, from the frame scope alone',
+      asked?.sessionId === sessionId, `sessionId=${String(asked?.sessionId)}`)
     await client.respondQuestion(questionEventId, { answers: [{ id: 'q1', selected: ['green'] }] })
     const answered = await journalMentions('"selected":["green"]', 30_000)
     check('the answer reaches the blocked tool call', answered,

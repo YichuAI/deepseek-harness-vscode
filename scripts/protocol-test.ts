@@ -63,11 +63,13 @@ import {
   parseProcNetListeners, parseWebserverPort, probeHost,
 } from '../src/harness/discovery.ts'
 import { findHarnessWorkspace } from '../src/workspace/binding.ts'
-import { buildDiagnosticsReport, classifyConnectFailure, installGuidanceFor, redact } from '../src/app/diagnosis.ts'
+import { buildDiagnosticsReport, NPM_INSTALL_COMMAND, classifyConnectFailure, installGuidanceFor, redact } from '../src/app/diagnosis.ts'
 import { SESSION_MODES, parseSessionMode, traitsOf } from '../src/app/session-mode.ts'
 import {
-  desktopInstallCandidates, envWithAugmentedPath, findLaunchUrl, redactLaunchUrl,
+  DEFAULT_LAUNCH_COMMAND, NPX_FALLBACK_COMMAND, desktopInstallCandidates, envWithAugmentedPath,
+  findLaunchUrl, launchPlan, redactLaunchUrl, usesNpx,
 } from '../src/harness/launcher.ts'
+import { waterfallSession } from '../src/harness/waterfall.ts'
 import { ReviewStore } from '../src/review/store.ts'
 import type { HunkState } from '../src/review/types.ts'
 import { applyUndo, rebuild } from '../src/review/patch.ts'
@@ -1031,6 +1033,70 @@ async function main(): Promise<void> {
   try { await client.respondQuestion('evt-never-seen', { answers: [] }) } catch { unknownRejected = true }
   check('answering a question the client never observed throws', unknownRejected)
 
+  // 08g. `$events` is host-wide, so a card is only correct if the frame says
+  //      which session it came from — and the panel must show only the
+  //      conversation it is following.
+  //
+  //      Questions carry no session anywhere inside `request`: the event is
+  //      delivered on an Agent-scoped waterfall, and `agentId` is the field that
+  //      names the scope. The Host's own codec declares its wire type as
+  //      `SessionId` (`lookups.register('agent', { wire: 'agentId',
+  //      wireTypeSymbol: '…dsh-session/types#SessionId' })`), so reading it is
+  //      not a heuristic.
+  //
+  //      The code used to read `request.sessionId`, find nothing for a question,
+  //      and fall back to whichever session the panel was showing. A question
+  //      raised in a browser tab therefore rendered as a card in the VS Code
+  //      conversation — answerable, and about somebody else's run.
+  harness.pushEvent({
+    type: 'waterfall', event: 'user-questions/request', eventId: 'evt-q-elsewhere',
+    agentId: 'session-9',
+    request: { questions: [{ id: 'q9', question: 'Which env?' }], wait: { callId: 'call-9' } },
+  })
+  await wait(80)
+  const elsewhere = approvals.find((a) => a.eventId === 'evt-q-elsewhere')
+  check('a question from another session is still delivered to the client',
+    elsewhere?.frame.type === 'question/requested')
+  eq('...attributed to the session its agentId names, not to the active one',
+    (elsewhere?.frame as { sessionId?: string } | undefined)?.sessionId, 'session-9')
+
+  // The store is what the panel renders from, and it filters on exactly this
+  // field — so the attribution above is the whole distance between "a card for
+  // the wrong conversation" and no card.
+  const scoped = new ApprovalStore()
+  scoped.upsertQuestion({
+    rpcId: 'r-9', sessionId: 'session-9',
+    questions: [{ id: 'q9', question: 'Which env?' }],
+  })
+  eq('the panel following session-1 renders no card for it', scoped.questionSummaries('session-1'), [])
+  eq('...and the session it belongs to does get one', scoped.questionSummaries('session-9').length, 1)
+
+  // A frame that names no session at all is dropped rather than guessed onto the
+  // active session. A card the user cannot explain is worse than a missing one,
+  // and the two failure modes are not symmetric.
+  const beforeUnattributable = approvals.length
+  harness.pushEvent({
+    type: 'waterfall', event: 'user-questions/request', eventId: 'evt-q-nosession',
+    request: { questions: [{ id: 'qx', question: 'Anybody home?' }] },
+  })
+  await wait(80)
+  eq('a waterfall that names no session produces no card at all',
+    approvals.length, beforeUnattributable)
+  let unattributableRejected = false
+  try { await client.respondQuestion('evt-q-nosession', { answers: [] }) } catch { unattributableRejected = true }
+  check('...and cannot be answered, because the client never adopted it', unattributableRejected)
+
+  // When the two fields disagree, the scope the frame was *delivered* under wins:
+  // it is what the Host routed on.
+  harness.pushEvent({
+    type: 'waterfall', event: 'approval/request', eventId: 'evt-a-scoped', agentId: 'session-9',
+    request: { sessionId: 'session-1', toolName: 'write', callId: 'call-s' },
+  })
+  await wait(80)
+  eq('an approval follows agentId over a disagreeing request.sessionId',
+    (approvals.find((a) => a.eventId === 'evt-a-scoped')?.frame as { sessionId?: string } | undefined)?.sessionId,
+    'session-9')
+
   // 08f. `cancel` is the ONLY resolution signal a mux client gets on
   //      0.2.1-alpha.2 — there is no forwarded approval/resolved or
   //      question/resolved. Without surfacing it, a card answered in the Web UI
@@ -1510,6 +1576,22 @@ async function main(): Promise<void> {
     eq('the cookie name matches upstream derivation', auth.cookieHeader()?.split('=')[0], cookieNameForAuthority(authority))
     check('the cookie is persisted', typeof persisted === 'string' && persisted.includes('dsh-auth-'))
     check('the auth reports itself ready', auth.isReady())
+
+    // E3b. "Open Web UI" is a link we have to have been given, not one we can
+    //      compose: the harness gates its UI on the per-process token, and a bare
+    //      `http://host:port/` answers 401. The one route that leaves us holding
+    //      the URL is this one, so this is where the token comes from when the
+    //      command is used instead of a message telling the user to go and find it.
+    eq('the adopted launch URL is what the browser should be opened with',
+      auth.browserUrl(), `http://127.0.0.1:${String(gatedPort)}/?token=${LAUNCH_TOKEN}`)
+    // A URL for a Host we are not authenticated against would open a page saying
+    // "unauthorized" — which reads like a bug in the extension, not a restart.
+    auth.retarget('127.0.0.1', gatedPort + 1)
+    eq('...and nothing is offered for an authority this session does not belong to',
+      auth.browserUrl(), undefined)
+    auth.retarget('127.0.0.1', gatedPort)
+    eq('...which comes back when it belongs again',
+      auth.browserUrl(), `http://127.0.0.1:${String(gatedPort)}/?token=${LAUNCH_TOKEN}`)
 
     // E4. Connect now succeeds (cookie accepted) and learns the host identity from the `ready` frame.
     await gatedClient.connect()
@@ -3241,6 +3323,82 @@ async function main(): Promise<void> {
       const after = store.summaries('session-o').find((r) => r.id === reviewId)?.files.find((f) => f.path === 'src/app.ts')
       eq('a later successful revert drops the stale reason', after?.conflictReason, undefined)
     }
+  }
+
+  // ─── P. remote: whose dsh, and which conversation ──────────────────────────
+  //
+  // Three separate one-line rules, each asserted directly because each one is
+  // the whole distance between a plausible-looking answer and the right one.
+  {
+    // 1. A waterfall's session is `agentId`. Exhausted here rather than sampled,
+    //    because "which field wins" is exactly the kind of ordering that gets
+    //    reordered by a later refactor with nothing to notice.
+    eq('agentId alone names the session', waterfallSession({ agentId: 's-1' }), 's-1')
+    eq('request.sessionId is the fallback for hosts that omit agentId',
+      waterfallSession({ requestSessionId: 's-2' }), 's-2')
+    eq('agentId wins when the two disagree', waterfallSession({ agentId: 's-1', requestSessionId: 's-2' }), 's-1')
+    eq('a frame naming no session is not attributed to anything',
+      waterfallSession({}), undefined)
+    // The shapes a missing field actually arrives in: an empty string from a
+    // template literal, and `undefined` from an absent key. Neither may be
+    // allowed to look like a session id.
+    eq('an empty agentId is not a session', waterfallSession({ agentId: '' }), undefined)
+    eq('an empty request.sessionId is not a session either',
+      waterfallSession({ agentId: '', requestSessionId: '' }), undefined)
+    eq('a non-string agentId is not a session', waterfallSession({ agentId: 42 }), undefined)
+
+    // 2. A missing `dsh` has exactly one automatic alternative, and only for the
+    //    default command — see `launchPlan`.
+    eq('the default command plans a second, npx step',
+      launchPlan(DEFAULT_LAUNCH_COMMAND).map((s) => s.route), ['configured', 'npx-fallback'])
+    eq('...and the fallback is the npx one',
+      launchPlan(DEFAULT_LAUNCH_COMMAND)[1]?.command, NPX_FALLBACK_COMMAND)
+    check('a command the user set is never silently substituted for a different build',
+      launchPlan('my-own-wrapper web').length === 1
+      && launchPlan('my-own-wrapper web')[0]?.route === 'configured')
+    check('a command that already goes through npx gets no second step',
+      launchPlan('npx -y @deepseek-ai/dsh web --port 0').length === 1)
+    check('the npx step is given longer than a local boot, because it has to fetch first',
+      launchPlan(DEFAULT_LAUNCH_COMMAND)[1]!.timeoutMs > launchPlan(DEFAULT_LAUNCH_COMMAND)[0]!.timeoutMs)
+    // `usesNpx` must not fire on a name that merely contains the letters.
+    check('usesNpx recognises npx as a command, not as a substring',
+      usesNpx('npx -y pkg') && usesNpx('pnpm run x && npx y')
+      && !usesNpx('npxcli web') && !usesNpx('dsh web --port 0'))
+
+    // 3. On a remote connection the Host has to run over there, so the desktop
+    //    installer is not advice anyone can act on. `installGuidanceFor` used to
+    //    answer from `platform` alone, which on a Windows remote meant "download
+    //    this .exe" — for a machine whose screen the user cannot reach.
+    eq('a remote window is never told to download a desktop app',
+      installGuidanceFor('win32', 'x64', 'ssh-remote').route, 'npx')
+    eq('...on any remote flavour', installGuidanceFor('darwin', 'arm64', 'dev-container').route, 'npx')
+    eq('...and the command it copies is the one that lands on the remote',
+      installGuidanceFor('win32', 'x64', 'ssh-remote').command, NPM_INSTALL_COMMAND)
+    check('...with no download link, since the button would open it on the wrong machine',
+      installGuidanceFor('win32', 'x64', 'ssh-remote').url === undefined)
+    // An empty `remoteName` is how "no remote" arrives if it is passed through
+    // unmodified, and it must not be mistaken for one.
+    eq('an absent remote changes nothing', installGuidanceFor('win32', 'x64').route, 'desktop')
+    eq('an empty remote name is not a remote', installGuidanceFor('win32', 'x64', '').route, 'desktop')
+
+    // The classifier is what actually renders, so the same rule is checked
+    // through it: the fix text has to say where the install goes.
+    const remoteFail = classifyConnectFailure('fetch failed', {
+      host: '127.0.0.1', port: 3080, platform: 'linux', arch: 'x64', remote: 'ssh-remote',
+      sessionMode: 'managed', managedAttempted: 'not-found', desktopInstalled: undefined,
+    })
+    check('a remote failure names the remote in its fix',
+      /remote/.test(remoteFail.fix) && remoteFail.fix.includes(NPM_INSTALL_COMMAND))
+    check('...and offers the install command rather than a Retry when there is nothing to retry',
+      remoteFail.repair?.command === 'deepseekHarness.installHost')
+    const localFail = classifyConnectFailure('fetch failed', {
+      host: '127.0.0.1', port: 3080, platform: 'win32', arch: 'x64',
+      sessionMode: 'managed', managedAttempted: 'not-found', desktopInstalled: undefined,
+    })
+    check('a local failure keeps the desktop advice it always had',
+      /desktop app|npm/i.test(localFail.fix) && localFail.install?.route === 'desktop')
+
+    // 4. The web UI URL belongs to group E, where a real token exchange happens.
   }
 
   console.log(`\n${failures === 0 ? 'all checks passed' : `${String(failures)} CHECK(S) FAILED`} (${String(step)} total)\n`)

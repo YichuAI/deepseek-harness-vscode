@@ -7,6 +7,7 @@ node_modules/
 .DS_Store
 Thumbs.db
 .trae/
+宣传片/
 
 # Local agent workspace (memory logs) — never shipped, never committed
 .workbuddy/

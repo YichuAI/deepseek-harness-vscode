@@ -19,6 +19,8 @@ pr_body.md
 readmefor_human.md
 .workbuddy/**
 RELEASE.zh-CN.md
+STORY.md
+STORY.zh-CN.md
 docs/**
 # Local promo/storyboard material (the marketplace-page and trailer sources).
 # Untracked, never shipped — caught here because it cost 565 KB of a 896 KB VSIX

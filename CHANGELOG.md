@@ -5,6 +5,58 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),  
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] — 2026-10-14
+
+Tagline: **a documentation release that had to be a version, because the README ships inside the
+package.**
+Tagline (ZH): **一次必须算作版本的文档发布，因为 README 就在安装包里。**
+
+### Added
+
+- **`STORY.md`, with its `STORY.zh-CN.md` twin** — how the extension got built, told straight:
+  58 days and 24 tagged versions, of which eleven days actually contain code; the change that
+  mattered most was *deleting* the Accept button; the won't-do list that is longer than the
+  feature list; and the three bugs a model could not have caught (a connection that said
+  "connected" and then went silent, a green test that was green by accident, and 331,709
+  against 331,706). Both READMEs link to it. It sits on the `.vscodeignore` list next to
+  `RELEASE*.md`: the story is repository content, not extension content, and keeping it out is
+  what holds the package at fourteen files.
+
+- **A 30-second trailer, at the top of both READMEs.** `docs/media/promo-preview.webp` is an
+  8-second silent loop cut from the film — 80 frames at 10 fps, under 900 KB — and it links to
+  `docs/media/promo-1080p.mp4` (7.8 MB); `docs/media/promo-cover.jpg` is the poster the
+  development story opens with. Why an animated image rather than a `<video>` tag is worth
+  writing down: GitHub's renderer strips `<video>` out of a README entirely (checked by
+  rendering the tag through the Markdown API — it comes back as an empty paragraph),
+  `raw.githubusercontent.com` serves `.mp4` as `application/octet-stream` with
+  `X-Content-Type-Options: nosniff`, and a bare `.mp4` link renders as nothing but a link. An
+  animated WebP is the only form that moves in a README, and it survives the Marketplace's
+  image pipeline too.
+
+- **The screenshots are redacted.** `docs/screenshots/01-shared-session.png` and
+  `03-editor-sidebar.png` were replaced with captures that do not carry the author's home
+  directory or workspace path in the panel's status row.
+
+### Changed
+
+- **Both READMEs were reworked for someone skimming.** An "At a glance" table and a jump list at
+  the top; the long paragraphs in *Design* and *Verified against* broken up or turned into
+  tables; and *What's new* rebuilt around a table of what someone installing from the
+  Marketplace is actually getting. No technical claim changed, and the mirror stays exact — the
+  two READMEs are still one document in two languages.
+
+- **The README now says what this release is.** Its current-release section opens by naming it:
+  the first build to reach the Marketplace since 0.2.0.
+
+### Notes
+
+- **No runtime change.** 0.2.5 is 0.2.4's behaviour byte for byte, in a package whose shipped
+  documentation is different. It carries a version number because `README.md` and
+  `CHANGELOG.md` are two of the fourteen files inside the VSIX: editing them edits the
+  artifact, and a version number names the artifact.
+- Gates on this tree: `tsc --noEmit` clean, protocol-test **493**, e2e **96** (3 of 5 chains),
+  live integration **41/41**, `check-versions` green.
+
 ## [0.2.4] — 2026-10-13
 
 Tagline: **three things a day of testing turned up: a card from someone else's conversation, a remote

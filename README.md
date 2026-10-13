@@ -13,15 +13,26 @@
 
 **Same Harness. Same Workspace. Same Session. VS Code Client.**
 
-![The browser Web UI and the VS Code panel showing the same session at the same turn](https://raw.githubusercontent.com/YichuAI/deepseek-harness-vscode/main/docs/screenshots/01-shared-session.png)
+[![The trailer: it finds your Host by itself, and one session answers in two windows](https://raw.githubusercontent.com/YichuAI/deepseek-harness-vscode/main/docs/media/promo-preview.webp)](./docs/media/promo-1080p.mp4)
 
-*Same session, two windows. Browser on the left, VS Code on the right — nothing imported, mirrored or forked.*
+*The 30-second trailer, cut down to its two product beats. The silence is deliberate — there is no narration, the film says it in type. [Play it](./docs/media/promo-1080p.mp4) · [How it got built](./STORY.md) (中文版: [STORY.zh-CN.md](./STORY.zh-CN.md))*
+
+## At a glance
+
+| | |
+| --- | --- |
+| **What it is** | A client for a `dsh web` you already have running. It attaches to that Harness and continues *its* workspaces and sessions inside VS Code. |
+| **What it is not** | An agent, a model provider, or a replacement for either. None of the orchestration is reimplemented here — it stays in the Harness. |
+| **What it needs** | VS Code ≥ 1.85, and a Harness on the **same machine** as the window. That is the one hard constraint; see [Remote development](#remote-development). |
+| **Install** | `code --install-extension lucasliang.harness-connector-deepseek` |
+
+**Jump to:** [What it does](#what-it-does) · [What's new](#whats-new-in-v025) · [Quick start](#quick-start) · [Configuration](#configuration) · [Commands](#commands) · [Remote development](#remote-development) · [Limitations](#limitations) · [Development](#development) · [Design](#design-dsh-owns-the-write-the-plugin-observes-and-tells)
 
 ## What it does
 
 - **Continues the session you already have.** Workspaces and sessions are read from the running Host. Refresh that session in a browser and you see exactly what VS Code sent.
-- **Answers approvals and agent questions from VS Code — for the conversation you are looking at.** Both waterfalls are settled by this plugin, so a run is never blocked on a browser tab you have closed. The Host forwards every session's waterfalls down one socket, so a card is only drawn when the frame names *your* session; a question raised in a browser tab on another session is not rendered here, and switching to that session brings it back.
-- **Reports what each turn changed, and can undo it — one hunk at a time.** Fed by the Host's own turn record, so it covers a file a shell command edited — not only what a file tool reported. The card lists each hunk with its own undo, and the file-level undo reverts whatever is left. Both check the file's current bytes first and refuse rather than overwriting you.
+- **Answers approvals and agent questions — for the conversation you are looking at.** Both waterfalls are settled by this plugin, so a run is never blocked on a browser tab you have closed. The Host forwards every session's waterfalls down one socket, so a card is drawn only when the frame names *your* session; a question raised in a browser tab on another session is not rendered here, and switching to that session brings it back.
+- **Reports what each turn changed, and can undo it — one hunk at a time.** Fed by the Host's own turn record, so it covers a file a shell command edited, not only what a file tool reported. Each hunk has its own undo; the file-level undo reverts whatever is left. Both check the file's current bytes first and refuse rather than overwriting you.
 - **Right-click to ask about things.** Select code, a file in the explorer, or a change in the diff editor and the context menu offers *Explain / Fix / Review* — pre-filled with a prompt and the right `@` mention, including the line range for a selection.
 - **Opens VS Code's own editor for anything that is code.** A diff is a real diff editor; a path opens the file. Nothing is reimplemented in the webview.
 - **Finds the Host by itself**, including the desktop app, which starts its Host on an OS-assigned port that changes on every launch.
@@ -49,23 +60,40 @@ VS Code reads the workspaces and sessions the browser already has, and continues
 
 | | |
 | --- | --- |
-| ![The VS Code sidebar showing a conversation](https://raw.githubusercontent.com/YichuAI/deepseek-harness-vscode/main/docs/screenshots/03-editor-sidebar.png) | ![A native VS Code diff of a file the agent changed](https://raw.githubusercontent.com/YichuAI/deepseek-harness-vscode/main/docs/screenshots/04-native-diff.png) |
+| ![One session in two surfaces: the DSH Web UI in the browser on the left, the DSH Connector panel in VS Code on the right](https://raw.githubusercontent.com/YichuAI/deepseek-harness-vscode/main/docs/screenshots/01-shared-session.png) | ![A native VS Code diff of a file the agent changed](https://raw.githubusercontent.com/YichuAI/deepseek-harness-vscode/main/docs/screenshots/04-native-diff.png) |
+| ![The DeepSeek Harness sidebar in VS Code: connected host, an agent question with the option that was chosen, and the turn's changed-files card](https://raw.githubusercontent.com/YichuAI/deepseek-harness-vscode/main/docs/screenshots/03-editor-sidebar.png) | ![The DSH Web UI on its own](https://raw.githubusercontent.com/YichuAI/deepseek-harness-vscode/main/docs/screenshots/02-browser-web-ui.png) |
 
-*Left: the conversation lives in the sidebar, tool rows and changed-files card included. Right: "Diff" is VS Code's own diff editor, not a webview imitation.*
+*Top left: the same session at the same moment in two clients — nothing imported, mirrored or forked. Top right: "Diff" is VS Code's own diff editor, not a webview imitation — the left side is the text the plugin captured before the change. Bottom left: the conversation lives in the sidebar, tool rows and changed-files card included. Bottom right: the browser side, untouched.*
 
-![The Harness browser UI on its own](https://raw.githubusercontent.com/YichuAI/deepseek-harness-vscode/main/docs/screenshots/02-browser-web-ui.png)
+## What's new in v0.2.5
 
-## What's new in v0.2.4
+**The first build to reach the Marketplace since 0.2.0 — and a documentation round, because the README ships inside the package.**
 
-**Three things a day of testing turned up: a card from someone else’s conversation, a remote with no `dsh` on it, and a launch URL that had lost its token.**
+Both halves of that are true and they belong together. The runtime is unchanged from v0.2.4; what changed is everything a new reader meets first. It is also why a documentation change got a version number at all: `README.md` and `CHANGELOG.md` are two of the fourteen files inside the VSIX, so **changing the docs changes the artifact**, and the number follows the artifact.
 
-- **A card for somebody else's conversation is no longer drawn.** `$events` is host-wide: every session's approvals and questions arrive down the one socket, and the question path used to read `request.sessionId`, find nothing (a question's wire request carries no session at all), and fall back to *the session the panel happened to be showing*. A question raised in a browser tab on another session therefore rendered as a card in the VS Code conversation — answerable, and about a different run. The field that says which session it is was in `agentId` the whole time, unread. It is read now, and a frame that names no session produces no card at all: guessing is how the bug happened, so it is not the fallback.
-- **On a remote, the Host is the remote's.** Managed launch retries once through `npx -y @deepseek-ai/dsh@latest` when `dsh` is not on `PATH` — which, under Remote-SSH, fetches it *on the remote* and starts the Host there, with nothing installed globally. When even that is not enough, `DeepSeek Harness: Install Host` runs the install inside the extension host, which is the machine the user's own terminal is not on. The install guidance is remote-aware too: a remote window is never told to download a desktop app it cannot click.
-- **"Open Web UI" now carries the token.** The harness gates its web UI per process — a bare `http://host:port/` answers `401` — so the command used to tell you to go and find the URL yourself. It opens it now, using the launch URL the extension already holds. It declines rather than guessing: a session minted from `$DSH_HOME/.credentials.yaml` never involved a token, and the message says that instead of opening a page that fails.
+**Installing from the Marketplace? Four releases of behaviour are new to you.** v0.2.1 through v0.2.4 went to GitHub Releases only, so the Marketplace has been serving 0.2.0. What you get now:
 
-Verification: **493 assertions** (was 381), and the end-to-end chains went from **15 to 96**. Chains 1 and 4 — the two whose absence the changelog of v0.0.4→v0.1.1 justified fixing, because the panel did not start and "Allow" never actually allowed — now run for real against a fake Host that can be killed and restarted, with no VS Code Extension Host needed. Chain 5 grew from 6 sections to 13 as hunk-level undo landed. Coverage is now **3 of 5 chains written**, and the suite still prints the other two as unwritten rather than quietly omitting them. Against a live Host, **41/41** — including one new assertion that reads the session a question was attributed to off a real `user-questions/request`, which is the only place that fact can be measured rather than reasoned about.
+| | |
+| --- | --- |
+| **Undo one hunk** | The changed-files card lists each hunk with its own revert; the file-level revert takes whatever is left. Both re-check the file's bytes and refuse rather than overwrite you. |
+| **Explain / Fix / Review on a right-click** | From the editor, the explorer, the diff editor or a source-control row — prompt written, `@` mention and line range included. |
+| **Cards belong to a conversation** | Every session's waterfalls arrive down one socket. A card is drawn only when the frame names the session you are looking at, so a question from a browser tab on another session no longer appears here, answerable and about a different run. |
+| **A remote that can get its own `dsh`** | Managed launch retries through `npx` when `dsh` is not on `PATH` — fetching it *on the remote* — and `Install Host` runs the install in the extension host, which on a remote window is the remote. |
+| **"Open Web UI" carries its token** | The Harness gates its web UI per process, so a bare `host:port` answers `401`. The command opens the launch URL the extension already holds, and says so when there is no token to add. |
 
-The version before this one — v0.2.3 — has its own two features (per-hunk undo, and *Explain / Fix / Review* on a right-click) in this same build, but it was never published to the Marketplace or to Open VSX, so they are new to anyone installing from either. Its notes, and every earlier release's, are in [CHANGELOG.md](./CHANGELOG.md).
+**New to read this time:** the trailer above, and [the development story](./STORY.md) — 58 days, 24 versions, and why the most valuable change in the project was deleting a button.
+
+Verification:
+
+| Gate | Result |
+| --- | --- |
+| Protocol assertions (fake Harness, no `dsh` needed) | **493 assertions** — 461 in v0.2.3, 381 before that |
+| End-to-end chains | **96** across 3 of 5 chains; the other two still print as unwritten rather than being quietly omitted |
+| Live Host (`0.2.0-rc.2`, `127.0.0.1:3080`) | **41/41** |
+
+Chains 1 and 4 — the two whose absence the changelog of v0.0.4→v0.1.1 justifies fixing, because the panel did not start and "Allow" never actually allowed — now run for real against a fake Host that can be killed and restarted, with no VS Code Extension Host needed. Chain 5 grew from 6 sections to 13 as hunk-level undo landed. The live run includes one assertion that reads which session a question was attributed to off a real `user-questions/request`, because that is the only place the fact can be measured rather than reasoned about.
+
+The version before this one — v0.2.4 — carries the three fixes a day of testing turned up (a card from someone else's conversation, a remote with no `dsh` on it, a launch URL that had lost its token); v0.2.3 brought per-hunk undo and *Explain / Fix / Review*. Neither was ever published to the Marketplace or to Open VSX, so both are new to anyone installing from either. Their notes, and every earlier release's, are in [CHANGELOG.md](./CHANGELOG.md).
 
 ## Requirements
 
@@ -105,7 +133,7 @@ The version before this one — v0.2.3 — has its own two features (per-hunk un
    Or install the VSIX from [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases):
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.2.4.vsix
+   code --install-extension harness-connector-deepseek-0.2.5.vsix
    ```
 
 3. Nothing to configure. In the default `sessionMode: "credentials"` the extension
@@ -180,7 +208,7 @@ silent fallback.
 | --- | --- |
 | `$DSH_HOME` points elsewhere and the env var is not set | set `DSH_HOME` for the VS Code process, or start `dsh web` with the default home |
 | `dsh web` has never run in this harness home | run it once — the `client-connection/browser-session` record is created then, or switch to `sessionMode: "managed"` |
-| No `dsh` command on `PATH` under `managed` | the panel offers the install route for your platform; on Windows and macOS the desktop app also registers `dsh` for you |
+| No `dsh` command on `PATH` under `managed` | managed launch retries through `npx` first; if that fails too, the panel offers **Install Host**; on Windows and macOS the desktop app also registers `dsh` for you |
 | `managed` ran but `dsh` exited immediately | usually the port is already taken — the log carries the child's own last lines |
 | You are in `paste` mode and have not pasted yet | run **DeepSeek Harness: Use Launch URL** |
 
@@ -257,7 +285,7 @@ insert text and stop there.
 
 ## Architecture
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for the one-page design and the protocol contract. (中文版: [ARCHITECTURE.zh-CN.md](./ARCHITECTURE.zh-CN.md))
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for the one-page design and the protocol contract. (中文版: [ARCHITECTURE.zh-CN.md](./ARCHITECTURE.zh-CN.md)) The reasoning behind the product — what was ruled out and why — is in [the development story](./STORY.md).
 
 ## Protocol fixtures
 
@@ -391,9 +419,9 @@ npm run build            # esbuild → dist/extension.js
 npm run watch            # rebuild on change
 npm run typecheck
 npm run check-versions   # every version surface must agree with package.json
-npm run protocol-test    # 461 protocol assertions against a fake harness
+npm run protocol-test    # 493 protocol assertions against a fake harness
 npm run protocol-probe   # report what your real dsh web exposes
-npm run package          # → harness-connector-deepseek-0.2.4.vsix
+npm run package          # → harness-connector-deepseek-0.2.5.vsix
 ```
 
 Press `F5` in VS Code to launch an Extension Development Host with the extension loaded.
@@ -412,7 +440,9 @@ Two habits this repo now enforces rather than requests:
 
 Two facts about how DSH works decide almost everything else here.
 
-**DSH writes to disk and reads it back on the next step.** That ordering is not an implementation detail you can route around — it is what each step is built on. A file tool reports its change, and the following step opens the file as it now is. So the tempting move, intercepting the write — buffering it, proxying it, turning it into a `WorkspaceEdit` for VS Code to apply — buys a tidier-looking review flow at the price of breaking step-to-step consistency. And it breaks late and sideways: a wrong result several steps on, with no visible thread back to the interception. This plugin does not intercept writes. **DSH is the only writer.**
+**DSH writes to disk and reads it back on the next step.** That ordering is not an implementation detail you can route around — it is what each step is built on. A file tool reports its change, and the following step opens the file as it now is.
+
+So the tempting move — intercepting the write, buffering it, proxying it, turning it into a `WorkspaceEdit` for VS Code to apply — buys a tidier-looking review flow at the price of breaking step-to-step consistency. And it breaks late and sideways: a wrong result several steps on, with no visible thread back to the interception. This plugin does not intercept writes. **DSH is the only writer.**
 
 **The plugin is an observer, not a gatekeeper.** By the time you see a change, it is already on disk. That made "Accept" a button that did nothing except imply the change had been waiting for permission, so it is gone. What is left is a report: here is what changed, here is the diff, here is the undo. This is the same relationship two people have on one repository — you do not ask permission to save a file, you look at what the other person did.
 
@@ -422,7 +452,13 @@ Three consequences, all deliberate:
 - **There is no reflow mechanism, and none is needed.** DSH re-reads the file every step, so it is never working from a stale copy of something you edited underneath it. If you want the AI to know about your edit, you say so in the conversation, or it reads git history. Nothing has to be pushed at it.
 - **What the browser can show, VS Code shows natively.** Where the plugin has something to present — a diff, a file the AI pointed at — it opens VS Code's own editor instead of reimplementing a viewer in the webview. The webview is for the conversation; the editor is for the code.
 
-What is ruled out is as much a part of the design as what is included. Registering DSH as a **Copilot language model provider** would put a dropdown entry in the picker and put *something else's* agent loop behind it — no tool calling, no approvals, no context management, none of the orchestration that is the actual product. Trading the harness for a model entry is a bad trade. Driving DSH over **ACP** instead of the web transport is the same shape of mistake in miniature: the `acp` profile is a stdio JSON-RPC server that describes itself as automation-only, and it carries neither elicitation nor the DSH display cards — so it would lose the approval/question waterfall and the changed-files record that the HTTP+WS transport already delivers.
+What is ruled out is as much a part of the design as what is included:
+
+| Ruled out | Why |
+| --- | --- |
+| Registering DSH as a **Copilot language model provider** | It would put a dropdown entry in the picker and put *something else's* agent loop behind it — no tool calling, no approvals, no context management, none of the orchestration that is the actual product. Trading the harness for a model entry is a bad trade. |
+| Driving DSH over **ACP** instead of the web transport | The same shape of mistake in miniature: the `acp` profile is a stdio JSON-RPC server that describes itself as automation-only, and it carries neither elicitation nor the DSH display cards — so it would lose the approval/question waterfall and the changed-files record that the HTTP+WS transport already delivers. |
+| **Intercepting writes** to review them first | See above: it breaks the step-to-step contract, quietly and several steps later. |
 
 **Starting no process remains the default.** The one place this design was softened is managed launch, and it is softened in the same spirit: it is opt-in, the extension only ever starts the Host it was asked to start, and it stops that Host on the way out. The default still attaches to what you already have.
 
@@ -459,6 +495,10 @@ What is ruled out is as much a part of the design as what is included. Registeri
   `deepseekHarness.autoDiscover` uses, after first reading any `webserver.port`
   pinned in a profile's user patch layer. Measured on this machine: 46 loopback
   listeners probed, one Host found, attributed to the pinned `desktop` profile.
+- **The three ways to get a session each end somewhere different.** `credentials` opens a
+  file that also holds API keys; `managed` spawns a process it owns and stops it; `paste`
+  touches neither. The panel says which one is in play rather than presenting them as
+  equivalent, and `Open Web UI` can only add a token in the two routes that exchanged one.
 - **A state push is expensive, so there are as few of them as there are changes.**
   The webview used to answer an accepted push by tearing down `#messages` and
   rebuilding every item, so anything that published had to have something to

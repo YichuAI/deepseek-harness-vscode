@@ -94,7 +94,8 @@ Manual checks:
       install routing and the launcher's pure functions, and v0.2.3 added the
       per-hunk surgery, the nine right-click asks and the loopback fence, and
       v0.2.4 added the waterfall attribution rule, the launch plan and the
-      remote install route;
+      remote install route, and v0.2.5 touched shipped documentation only and
+      added no new assertions;
       stale counts are the most common doc drift here — and since
       v0.2.1 `check-versions` fails the build on it rather than leaving it to
       this line).
@@ -131,7 +132,7 @@ Manual checks:
 unzip -l harness-connector-deepseek-<ver>.vsix
 ```
 
-Expected (v0.2.4 = 14 files, 363,809 bytes in a clean checkout, ~355 KB):
+Expected (v0.2.5 = 14 files, 368,277 bytes in a clean checkout, ~360 KB):
 
 ```
 [Content_Types].xml
@@ -156,31 +157,29 @@ appear, the `.vscodeignore` is wrong — fix it and re-package.
 The size above is the **clean-checkout** figure, and it is the number CI produces for the
 Release asset. It is not the only number this tree can produce. With `core.autocrlf = true`
 on Windows, any file git has round-tripped carries CRLF on disk while the blob it came from —
-and therefore the CI checkout — does not. At v0.2.4 **two** shipped files were in that state
-here, not one: `media/icon.svg` (seven CR bytes, 3 more compressed bytes) and `CHANGELOG.md`
-(1,675 CR bytes, 154 more), so the working tree packaged to 363,966 where CI read 363,809 —
-a 157-byte gap (at v0.2.2 the same pair was 331,709 / 331,706). Comparing the two archives,
-the other **12 entries have identical CRC32 and length**; the two that differ are exactly
+and therefore the CI checkout — does not. Two shipped files are exposed to it here,
+`media/icon.svg` and `CHANGELOG.md`. At v0.2.4 both were CRLF on disk in this working tree, so
+it packaged to 363,966 where CI read 363,809 — a 157-byte gap (the same pair was
+331,709 / 331,706 at v0.2.2 and 353,366 / 353,363 at v0.2.3). Comparing the two archives, the
+other **12 entries have identical CRC32 and length**; the two that differ are exactly
 `extension/changelog.md` and `extension/media/icon.svg`, which is how the second one was
-found — nothing about the size alone would have said which file had moved. In this tree
-`CHANGELOG.md` was CRLF on disk because it had been restored with `git checkout --` earlier
-in the same session; the blobs are LF either way, so a clean checkout is unaffected.
+found — nothing about the size alone would have said which file had moved.
 
-To take the clean figure without a second machine, export the index with the filter off and
-package that — but note that `vsce` will not run in a directory with no `node_modules`, so
-swap the one file instead and restore it afterwards:
-
-```bash
-git -c core.autocrlf=false checkout-index -a --prefix=/c/tmp/vsclean/
-cp /c/tmp/vsclean/media/icon.svg media/icon.svg   # the only CRLF-on-disk shipped file
-npm run package                                    # → the number CI will read
-git checkout -- media/icon.svg                     # NOT checkout-index: autocrlf is
-                                                   #   what puts the CRLF one back
-```
+At v0.2.5 that gap is **zero**, deliberately. Both files were rewritten from their index blobs
+(`git cat-file blob :CHANGELOG.md` into `writeFileSync`) so the working tree holds the same
+bytes git will check out, and this tree packages to 368,277 locally and ships as 368,277.
+`git status` may still label them modified until git's stat cache is refreshed, but
+`git diff --stat` is empty and `git cat-file blob :<path> | tr -cd '\r' | wc -c` reads 0 — the
+worktree content genuinely is the blob. Note that `git checkout-index` cannot produce this:
+it obeys `core.eol`, which defaults to native, so even
+`-c core.autocrlf=false checkout-index -f` still writes CRLF. Exporting the blob bytes by hand
+is the route that worked; do not hand-copy the old `checkout-index` recipe.
 
 So when a figure here disagrees with a fresh clone by a few bytes, check `git status` and the
-line endings before assuming the tree changed — and when recording a baseline, say which of
-the two you measured.
+line endings before assuming the tree changed — and when recording a baseline, say which of the
+two you measured. For v0.2.5 there is nothing to reconcile: the 368,277 above was measured on
+a worktree whose two exposed files had already been normalised to LF, so it is already the
+clean figure.
 
 ---
 
@@ -444,7 +443,7 @@ Marketplace, the bytes in the Release asset and the sha256 printed in the log ar
   `readme.md`/`changelog.md`, and the `*.zh-CN.md` twins ship verbatim. So every baseline
   below belongs to one particular tree, and editing a shipped doc afterwards invalidates it.
   Re-measure; do not carry the old figure forward. Shipped bytes, as `gh release view --json
-  assets` reports them — i.e. what a user actually downloads: `v0.2.4` = 363,809; `v0.2.3` = 353,363; `v0.2.2` = 331,706;
+  assets` reports them — i.e. what a user actually downloads: `v0.2.5` = 368,277; `v0.2.4` = 363,809; `v0.2.3` = 353,363; `v0.2.2` = 331,706;
   `v0.2.1` = 313,426; `v0.2.0` = 312,853 at `581ba27`; `v0.1.9` = 309,620;
   `v0.1.7` = 288,750.
   The v0.2.1 *local* figure moved three times while that release was being prepared — 312,063,
@@ -455,7 +454,9 @@ Marketplace, the bytes in the Release asset and the sha256 printed in the log ar
   disk in the working tree: v0.2.2 and v0.2.3 by 3 each (331,709 / 353,366 against 331,706 /
   353,363) and v0.2.4 by 157 (363,966 against 363,809), all run down in step 2. v0.2.1 was
   off by 15 (313,441 against 313,426), never run down and left named rather than smoothed
-  over — the same shape of cause, but the file was not identified. v0.2.0 agreed exactly.
+  over — the same shape of cause, but the file was not identified. v0.2.0 and v0.2.5 agreed
+  exactly, and v0.2.5 agreed on purpose: the exposed files were normalised to LF before the
+  measurement rather than after.
   `RELEASE.md` is on the `.vscodeignore` list, so editing *this* file cannot move the number
   written one paragraph above it. That is the whole reason a baseline is safe to record here
   and then keep writing in the same document; it is not true of any of the other files.

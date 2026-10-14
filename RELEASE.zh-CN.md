@@ -475,6 +475,74 @@ Actions → **Release** → *Run workflow* → 填 `tag: v0.2.1`。它会检出�
   发生变化。基线之所以能记在这里、然后继续在同一个文档里写字，唯一的原因就是这个；换成本文件
   之外的任何一个文件都不成立。
 
+## 附录 — 依赖基线
+
+2026-10-14 用 `npm outdated --registry=https://registry.npmmirror.com` 盘点。registry 必须写明：
+公司代理把 `registry.npmjs.org` 整个挡掉了，而镜像也没有实现 `npm audit` 的端点
+（`NOT_IMPLEMENTED /-/npm/v1/security/*`），所以这个仓库**没有漏洞扫描**——没有就是没有，别写得
+像跑过一样。
+
+**运行时依赖只有一个，而且是最新的。** `dependencies` 里只有 `yaml`，版本 `2.9.1`，就是官方最新。
+它不是以包的形式随包发出的：`esbuild.mjs` 里 `bundle: true`、`external: ['vscode']`，所以 `yaml`
+被内联进了 `dist/extension.js`。动手之前先知道这件事：**升 `yaml` 会改变用户下载到的字节**，
+因此它和任何随包改动一样，要搭一个版本号。
+
+**纯开发依赖，完全不进 VSIX**（`scripts/**` 与 `test/**` 都在 `.vscodeignore` 的排除表里，
+`--no-dependencies` 也不会去走 `node_modules`）：`tsx`、`typescript`、`@vscode/vsce`、
+`markdown-it`、`@types/markdown-it`、`sharp`、`potrace`、`@types/potrace`、`@types/node`、
+`@types/vscode`。其中有两个不算完全免费：
+
+- `esbuild` 产出的是 `dist/extension.js`，那个是随包的。升它可能改变压缩结果，进而改变产物字节，
+  尽管这个依赖本身从不进包。
+- `sharp` 和 `potrace` 生成 `media/icon.png` / `media/icon.svg`，那两个也随包——但它们已经提交在
+  仓库里了，所以只有重新生成图标时升它们才有影响。
+
+**真正让其余更新变便宜的那条规则：**改 `package.json` 里的版本**字符串**就是对随包文件的改动，
+必须搭版本号；只动 `package-lock.json`、范围字符串原样不动的升级，一个字节都不会改变 VSIX。所以
+范围内的更新、只要不是构建输入，随时可以拿；其余的等一个版本。
+
+| 包 | 声明 | 实装 | 最新 | 为什么停在这里 |
+| --- | --- | --- | --- | --- |
+| `yaml` | `^2.9.1` | 2.9.1 | 2.9.1 | 运行时，被内联。**已最新。** |
+| `potrace` | `^2.1.8` | 2.1.8 | 2.1.8 | 生成图标用。**已最新。** |
+| `@types/potrace` | `^2.1.5` | 2.1.5 | 2.1.5 | **已最新。** |
+| `markdown-it` | `^15.0.0` | 15.0.0 | 15.0.2 | 只作测试夹具；随包的 `media/markdown-it.umd.min.js` 是提交进仓库的成品，不是这里构建的。可只动 lockfile。 |
+| `sharp` | `^0.35.3` | 0.35.3 | 0.35.5 | 同上。 |
+| `tsx` | `^4.19.0` | 4.23.12 | 4.23.15 | 测试运行器。可只动 lockfile。 |
+| `@types/markdown-it` | `^14.1.2` | 14.1.2 | 14.2.0 | 类型。可只动 lockfile。 |
+| `@vscode/vsce` | `^3.2.0` | 3.9.2 | 4.0.0 | 刻意钉住。`4.0.0` 根本做不了 OIDC，而 `latest` 正指着它；能用的那个在 `next` 这个 dist-tag 上。**打包**留 `3.9.2`，**发布**用 `npx` 拿 `4.0.1-3`。见 Marketplace 一节。 |
+| `@types/node` | `^20.11.0` | 20.19.43 | 26.6.5 | 刻意留在 Node 20 线上：扩展宿主是 Node 18/20/22，`esbuild` 的 target 是 `node18`。类型比运行时新，教给你的是一堆运行时不存在的全局对象。 |
+| `esbuild` | `^0.24.0` | 0.24.2 | 0.28.2 | 构建输入——见上。搭版本号。 |
+| `typescript` | `^5.4.0` | 5.9.3 | 7.0.2 | TS 7 是原生重写，那是一次迁移，不是一次升级。 |
+| `@types/vscode` | `^1.85.0` | **1.125.0** | 1.140.0 | 唯一真正的缺口，见下。 |
+
+### `@types/vscode` 能跑到 `engines.vscode` 前面
+
+`engines.vscode` 承诺的是 `^1.85.0`，README 里重复了三次。但 `"@types/vscode": "^1.85.0"` 是一个
+覆盖所有 `1.x` 的 caret 范围，于是 `npm` 装的是最新那个次版本——这里是 `1.125.0`，还能到 `1.140.0`。
+这个错配是 VS Code 扩展的常态（官方生成器写的就是这个范围），代价是：编译器会欣然接受一个
+1.110 才加的 API，而清单上仍写着 1.85——类型检查过、发得出去、然后在别人老一点的 VS Code 上抛
+`undefined is not a function`。
+
+**今天这个承诺是成立的，而且是量出来的、不是推出来的。** `src/` 对着 1.85 的类型是干净的——
+40 个文件全过，`tsc` 退出码 0：
+
+```bash
+mkdir -p /c/tmp/vsc85 && cd /c/tmp/vsc85
+npm pack @types/vscode@1.85.0 --registry=https://registry.npmmirror.com && tar xzf types-vscode-1.85.0.tgz
+# 写一份把 "vscode" 映射到 C:/tmp/vsc85/vscode/index.d.ts 的 tsconfig，然后：
+node node_modules/typescript/bin/tsc -p /c/tmp/vsc85/tsconfig.json   # 退出码 0；--listFiles 里出现的是 1.85 那份、不是 node_modules
+```
+
+这个检查**必须**覆盖模块解析才值钱；把 `paths` 指向旧的 `index.d.ts` 才是真正的测试，而
+`--listFiles` 是证明映射真的生效、而不是你以为它生效的唯一办法。要回答「≥ 1.85 还算不算数」，
+没有更快的路。
+
+**这个缺口是面向未来的，而且修它需要一个版本号。** 把范围钉死——`"1.85.0"` 或 `"~1.85.0"`——
+让类型再也跑不到下限之上，或者把两者一起抬上去。无论哪种都改 `package.json`，那是随包文件，
+所以要等下一个版本。另外，**别**加一条只比较两个范围字符串的门禁断言：它会在**正确**的那种写法
+（`~1.85.0` 对 `^1.85.0`）上变红，在错的那一种上放行。
+
 ## 附录 — 本机 SSH 配置
 
 历史上 Windows 用户名含非 ASCII 字符，而 `ssh` 会通过账户数据库按本地代码页解析 `HOME`，

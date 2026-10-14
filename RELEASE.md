@@ -542,6 +542,78 @@ Marketplace, the bytes in the Release asset and the sha256 printed in the log ar
   written one paragraph above it. That is the whole reason a baseline is safe to record here
   and then keep writing in the same document; it is not true of any of the other files.
 
+## Appendix — dependency baseline
+
+Audited 2026-10-14 against `npm outdated --registry=https://registry.npmmirror.com`. The
+registry has to be named: the corporate proxy blocks `registry.npmjs.org` outright, and the
+mirror does not implement `npm audit`'s endpoint (`NOT_IMPLEMENTED /-/npm/v1/security/*`), so
+there is no vulnerability scan in this repo — say that rather than implying one ran.
+
+**One runtime dependency, and it is current.** `yaml` is the only entry in `dependencies`, at
+`2.9.1`, which is the published latest. It is not shipped as a package: `esbuild.mjs` sets
+`bundle: true` with `external: ['vscode']`, so `yaml` is inlined into `dist/extension.js`.
+Consequence worth knowing before touching it: **a `yaml` bump changes the bytes users
+download**, so it rides a version number like any other shipped edit.
+
+**Dev-only, and it does not appear in the VSIX at all** (`scripts/**` and `test/**` are on the
+`.vscodeignore` list, and `--no-dependencies` never walks `node_modules`): `tsx`, `typescript`,
+`@vscode/vsce`, `markdown-it`, `@types/markdown-it`, `sharp`, `potrace`, `@types/potrace`,
+`@types/node`, `@types/vscode`. Two of these are not quite free:
+
+- `esbuild` produces `dist/extension.js`, which ships. A bump can change the minified output
+  and therefore the artifact, even though the dependency itself never enters it.
+- `sharp` and `potrace` generate `media/icon.png` / `media/icon.svg`, which also ship — but
+  they are checked in, so a bump only matters if the icons are regenerated.
+
+**The rule that makes the rest cheap:** editing a version *string* in `package.json` is an edit
+to a shipped file and needs a version number; a `package-lock.json`-only bump that leaves the
+range strings identical does not move a single byte of the VSIX. So in-range updates that are
+not build inputs can be taken at any time, and everything else waits for a release.
+
+| Package | Declared | Resolved | Latest | Why it is where it is |
+| --- | --- | --- | --- | --- |
+| `yaml` | `^2.9.1` | 2.9.1 | 2.9.1 | Runtime, bundled. **Current.** |
+| `potrace` | `^2.1.8` | 2.1.8 | 2.1.8 | Icon generation. **Current.** |
+| `@types/potrace` | `^2.1.5` | 2.1.5 | 2.1.5 | **Current.** |
+| `markdown-it` | `^15.0.0` | 15.0.0 | 15.0.2 | Test fixture only; the shipped `media/markdown-it.umd.min.js` is a checked-in asset, not built here. Bumpable lockfile-only. |
+| `sharp` | `^0.35.3` | 0.35.3 | 0.35.5 | As above. |
+| `tsx` | `^4.19.0` | 4.23.12 | 4.23.15 | Test runner. Bumpable lockfile-only. |
+| `@types/markdown-it` | `^14.1.2` | 14.1.2 | 14.2.0 | Types. Bumpable lockfile-only. |
+| `@vscode/vsce` | `^3.2.0` | 3.9.2 | 4.0.0 | Deliberate pin. `4.0.0` cannot do OIDC at all and `latest` still points at it; the working build is the `next` dist-tag. Keep `3.9.2` for *packaging*, use `4.0.1-3` by `npx` for *publishing*. See the Marketplace section. |
+| `@types/node` | `^20.11.0` | 20.19.43 | 26.6.5 | Stays on the Node 20 line on purpose: the extension host is Node 18/20/22 and `esbuild` targets `node18`. A `@types/node` ahead of the runtime teaches you the wrong globals. |
+| `esbuild` | `^0.24.0` | 0.24.2 | 0.28.2 | Build input — see above. Ride a version. |
+| `typescript` | `^5.4.0` | 5.9.3 | 7.0.2 | TS 7 is the native rewrite; that is a migration, not a bump. |
+| `@types/vscode` | `^1.85.0` | **1.125.0** | 1.140.0 | The one real gap. Read below. |
+
+### `@types/vscode` can outrun `engines.vscode`
+
+`engines.vscode` promises `^1.85.0`, and the README repeats it three times. But
+`"@types/vscode": "^1.85.0"` is a caret range over every `1.x`, so `npm` installs whatever the
+newest minor is — `1.125.0` here, `1.140.0` available. That mismatch is the ordinary shape of a
+VS Code extension (the official generator writes exactly this range), and it means the
+compiler is happy to accept an API added in 1.110 while the manifest still claims 1.85: it
+type-checks, ships, and throws `undefined is not a function` on somebody's older VS Code.
+
+**Today the promise holds, and it was measured rather than assumed.** `src/` is clean against
+the 1.85 typings — all 40 files, `tsc` exit 0:
+
+```bash
+mkdir -p /c/tmp/vsc85 && cd /c/tmp/vsc85
+npm pack @types/vscode@1.85.0 --registry=https://registry.npmmirror.com && tar xzf types-vscode-1.85.0.tgz
+# a tsconfig that maps "vscode" onto C:/tmp/vsc85/vscode/index.d.ts, then:
+node node_modules/typescript/bin/tsc -p /c/tmp/vsc85/tsconfig.json   # exits 0, and --listFiles shows the 1.85 file, not node_modules
+```
+
+The check has to override the module resolution to be worth anything; pointing `paths` at the
+old `index.d.ts` is what makes it a real test, and `--listFiles` is how you prove the mapping
+was used instead of believing it. There is no faster way to answer "does ≥ 1.85 still hold".
+
+**The gap is forward-looking, and fixing it needs a version.** Pin the range — `"1.85.0"` or
+`"~1.85.0"` — so the types can no longer resolve past the floor, or raise both together. Either
+way it edits `package.json`, which ships, so it waits for the next release. Whatever you do,
+do not add a gate assertion that merely compares the two range strings: it would fail on the
+range that is *correct* (`~1.85.0` against `^1.85.0`) and pass on the one that is wrong.
+
 ## Appendix — SSH setup on this machine
 
 Historically the Windows username was non-ASCII and the `ssh` binary resolved

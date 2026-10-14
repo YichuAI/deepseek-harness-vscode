@@ -323,8 +323,8 @@ code --install-extension harness-connector-deepseek-<ver>.vsix
 
 Cursor, VSCodium and Windsurf read Open VSX rather than the Microsoft Marketplace, and an
 extension present in only one of the two does not exist for those editors. Published since
-0.2.1 under the same `lucasliang` namespace; the version serving as of 2026-10-14 is `0.2.5`
-(`allVersions` = 0.2.1, 0.2.2, 0.2.5).
+0.2.1 under the same `lucasliang` namespace; the version serving as of 2026-10-14 is `0.2.6`
+(`allVersions` = 0.2.1, 0.2.2, 0.2.5, 0.2.6).
 
 ```bash
 # On this machine npmjs is behind a proxy that answers 502, so every npx call
@@ -355,7 +355,8 @@ answers `403`. (The web UI can delete a version; a token cannot.) `0.2.2` was lo
 pushed ahead of the README badge fix, never activated, undeletable — so Open VSX kept serving
 `0.2.1` and the fix had to wait for a later version. `0.2.5` was published here on 2026-10-14
 without incident, because by then its artifact had a GitHub Release behind it and had stopped
-moving.
+moving. `0.2.6` followed the same way minutes after its Release was created, and all fourteen
+entries matched on re-download.
 
 Two things this route needs that the others do not:
 

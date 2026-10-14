@@ -5,6 +5,60 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),  
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.6] — 2026-10-14
+
+Tagline: **a command that could only refuse now does the thing, because the Host that prints a
+launch URL is one this extension is allowed to start.**
+Tagline (ZH): **一条只会拒绝的命令现在真去办事了——因为会打印启动 URL 的那个 Host，正是这个扩展有权启动的。**
+
+### Fixed
+
+- **`DeepSeek Harness: Open Web UI` no longer dead-ends.** The command had exactly one ending: a
+  sentence saying it could not open the web UI. The sentence was accurate — the Harness gates its
+  web UI per process, `/` answers `401` without the token `dsh web` printed at startup, and that
+  token is `randomBytes` kept in a `WeakMap` inside the Host process (`browser-auth.ts`), so the
+  `credentials` route cannot compose one however much it holds the signing secret. What was wrong
+  was treating that as the answer for all three routes. Managed launch and paste both *do* hold a
+  URL — the launch URL is a reusable per-process secret, not a single-use grant — and the command
+  now opens it. The third route is handled below.
+
+- **An already-running Host is reported as adopted, not as a failed launch.** Switching to
+  `managed` does not guarantee a Host was started: if something is already answering on the
+  configured port it is adopted, and nothing on this machine ever printed a URL for it. That used
+  to be indistinguishable from the command doing nothing; it now says so, and says how to get a
+  URL of your own.
+
+### Added
+
+- **`planOpenWebUi` — the decision, as a pure function over plain values**
+  (`src/app/session-mode.ts`). Four outcomes: open a URL we already hold (the launched Host first,
+  the adopted launch URL as fallback); offer to switch to `managed`; explain why that offer does
+  not hold over Remote-SSH; explain that this route has no URL at all. It sits outside
+  `extension.ts` because the failure that motivated it was a branching problem rather than a
+  plumbing one, and because as an interface of plain values it can be asserted without a VS Code
+  host — which is what the ten new assertions do.
+
+- **There is now something to offer on the third route.** From `credentials` the command asks
+  whether to switch `sessionMode` to `managed`, persists that at `ConfigurationTarget.Global`,
+  reconnects with `force`, and opens the URL the Host it started printed. It is persisted rather
+  than remembered for one call, because that Host has to outlive the next connect: a reconnect
+  still reading `credentials` would abandon it. Over Remote-SSH the offer is deliberately withheld
+  — a Host started in a remote window listens on the *remote's* loopback while the browser this
+  command opens is on the machine in front of you, so the button could not work — and the message
+  names the machine to run `dsh web` on instead.
+
+- **`OPEN_WEB_UI_TEXT`**, kept beside the decision so "what does this command say" is answerable
+  from one place. The previous wording is exactly what made the command look broken: it described
+  the constraint perfectly and never mentioned that a Host started from here would lift it.
+
+### Notes
+
+- **The advertised assertion count moved with it** — 493 → **504** across both READMEs, both
+  `ARCHITECTURE` files and `RELEASE.md`. `check-versions` compares all of them, which is why the
+  earlier version's number is left standing inside its own entry.
+- Gates on this tree: `tsc --noEmit` clean, protocol-test **504**, e2e **96** (3 of 5 chains),
+  live integration **41/41**, `check-versions` green (49 with `--online`).
+
 ## [0.2.5] — 2026-10-14
 
 Tagline: **a documentation release that had to be a version, because the README ships inside the

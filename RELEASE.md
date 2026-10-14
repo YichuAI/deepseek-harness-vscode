@@ -55,7 +55,7 @@ npm run check-versions     # → all checks pass; add --online to include the
 npm run build              # → dist/extension.js
 
 # 1.4 protocol test (fake harness — no dsh web needed)
-npm run protocol-test      # → all 493 assertions ✓
+npm run protocol-test      # → all 504 assertions ✓
 
 # 1.5 end-to-end chains (real filesystem; reports its own coverage)
 npm run e2e-test           # → 3 of 5 chains covered, 2 not written; every
@@ -88,19 +88,44 @@ Manual checks:
       twin. This is a standing rule, not a per-release judgement call.
 - [ ] `CHANGELOG.md` and `ARCHITECTURE.md` still quote the **current** assertion
       count from `npm run protocol-test` (it has grown 50 → 64 → 98 → 83 → 156 →
-      178 → 180 → 190 → 211 → 231 → 243 → 268 → 295 → 312 → 342 → 381 → 461 → 493 as
+      178 → 180 → 190 → 211 → 231 → 243 → 268 → 295 → 312 → 342 → 381 → 461 → 493 → 504 as
       the rc.2 rewrite replaced the rc.6 fake harness, the waterfall/pending-panel
       groups landed, v0.2.2 added the session-mode vocabulary, the per-platform
       install routing and the launcher's pure functions, and v0.2.3 added the
       per-hunk surgery, the nine right-click asks and the loopback fence, and
       v0.2.4 added the waterfall attribution rule, the launch plan and the
       remote install route, and v0.2.5 touched shipped documentation only and
-      added no new assertions;
+      added no new assertions, and v0.2.6 added the Open Web UI decision
+      function and the copy it branches on;
       stale counts are the most common doc drift here — and since
       v0.2.1 `check-versions` fails the build on it rather than leaving it to
       this line).
 - [ ] `README.md`'s newest "What's new" heading is this version, and the README
       keeps **exactly one** release's notes. History goes in the CHANGELOG.
+- [ ] The README's badges are still **derived, not typed**, and the ones that are
+      checked still draw. `check-versions --online` fetches each of them and reads
+      the label the SVG announces about itself, because a badge that string-matches
+      the right URL and paints `404 badge not found` is exactly the bug that section
+      exists for. One omission is deliberate: the two `open-vsx` badges are in the
+      README but **not** in that list. shields' Open VSX provider flaps — it
+      answered `200 open vsx: v0.2.5` and then `200 404: badge not found` for the
+      same URL of a published, downloadable extension within minutes — and a release
+      gate that red-lights at random is worse than no gate. Check those two by eye.
+- [ ] The four **identity badges** in the hero (`dsh …`, `setup …`, `ui …`,
+      `VS Code …`) are the only hand-typed numbers left in either README, and they
+      are hand-typed on purpose: nothing serves "the Remote contract this build
+      targets". Move them when `ARCHITECTURE.md`'s contract target moves, not
+      before — and note that the gate's title check now accepts either a `#`
+      heading or an `<h1>`, because the README stopped opening with one.
+- [ ] Repository metadata still describes the project — it is how anyone finds the
+      repo at all, so it ships with the release rather than decorating it:
+
+      `gh repo view YichuAI/deepseek-harness-vscode --json description,homepageUrl,repositoryTopics`
+
+      The homepage points at the Marketplace listing; the topics carry the words
+      people actually search for (`dsh`, `deepseek-harness`, `vscode-extension`,
+      `ai-coding-assistant`, …). Set them with `gh repo edit --add-topic <t>`
+      `--homepage <url>`.
 - [ ] `LICENSE` present (MIT).
 - [ ] **Nothing new sits at the top level of the repo.** `.vscodeignore` is an
       exclusion list, so a directory nobody thought about ships by default — the
@@ -132,7 +157,7 @@ Manual checks:
 unzip -l harness-connector-deepseek-<ver>.vsix
 ```
 
-Expected (v0.2.5 = 14 files, 368,277 bytes in a clean checkout, ~360 KB):
+Expected (v0.2.6 = 14 files, 372,811 bytes in a clean checkout, ~364 KB):
 
 ```
 [Content_Types].xml
@@ -165,9 +190,12 @@ other **12 entries have identical CRC32 and length**; the two that differ are ex
 `extension/changelog.md` and `extension/media/icon.svg`, which is how the second one was
 found — nothing about the size alone would have said which file had moved.
 
-At v0.2.5 that gap is **zero**, deliberately. Both files were rewritten from their index blobs
-(`git cat-file blob :CHANGELOG.md` into `writeFileSync`) so the working tree holds the same
-bytes git will check out, and this tree packages to 368,277 locally and ships as 368,277.
+At v0.2.5 that gap is **zero**, deliberately, and v0.2.6 keeps it there. Both files were rewritten
+from their index blobs (`git cat-file blob :CHANGELOG.md` into `writeFileSync`) so the working tree
+holds the same bytes git will check out, and v0.2.5's tree packages to 368,277 locally and ships as
+368,277. v0.2.6 was measured rather than arranged: every shipped file on disk reads zero CR bytes
+(`tr -cd '\r' | wc -c`), so its 372,811 above is already the clean figure and the Release asset
+should match it byte for byte in size.
 `git status` may still label them modified until git's stat cache is refreshed, but
 `git diff --stat` is empty and `git cat-file blob :<path> | tr -cd '\r' | wc -c` reads 0 — the
 worktree content genuinely is the blob. Note that `git checkout-index` cannot produce this:
@@ -197,7 +225,8 @@ So when a figure here disagrees with a fresh clone by a few bytes, check `git st
 line endings before assuming the tree changed — and when recording a baseline, say which of the
 two you measured. For v0.2.5 there is nothing to reconcile: the 368,277 above was measured on
 a worktree whose two exposed files had already been normalised to LF, so it is already the
-clean figure.
+clean figure. v0.2.6 is the same by a simpler route — every shipped file was verified LF on disk
+before packaging, so no second measurement is owed.
 
 ---
 
@@ -294,7 +323,8 @@ code --install-extension harness-connector-deepseek-<ver>.vsix
 
 Cursor, VSCodium and Windsurf read Open VSX rather than the Microsoft Marketplace, and an
 extension present in only one of the two does not exist for those editors. Published since
-0.2.1 under the same `lucasliang` namespace.
+0.2.1 under the same `lucasliang` namespace; the version serving as of 2026-10-14 is `0.2.5`
+(`allVersions` = 0.2.1, 0.2.2, 0.2.5).
 
 ```bash
 # On this machine npmjs is behind a proxy that answers 502, so every npx call
@@ -323,7 +353,25 @@ re-publishing it is refused with `… is already published, but currently isn't 
 therefore not visible`, and `DELETE /api/-/publish/<ns>/<ext>/<ver>` with a publisher token
 answers `403`. (The web UI can delete a version; a token cannot.) `0.2.2` was lost that way —
 pushed ahead of the README badge fix, never activated, undeletable — so Open VSX kept serving
-`0.2.1` and the fix had to wait for a later version.
+`0.2.1` and the fix had to wait for a later version. `0.2.5` was published here on 2026-10-14
+without incident, because by then its artifact had a GitHub Release behind it and had stopped
+moving.
+
+Two things this route needs that the others do not:
+
+- **The PAT is stored nowhere.** Repository secrets are empty and it has never been written to
+  a file — it is passed inline and forgotten, which is the intent. It does survive in this
+  machine's local session transcripts under `~/.workbuddy/projects/` (search `ovsxat_`), so a
+  later run can recover it there; nothing else on the machine has it. Treat that as the reason
+  to keep issuing short-lived tokens rather than as a place to put one deliberately.
+- **Bypass the proxy.** This machine sets `http_proxy`/`https_proxy` to `127.0.0.1:13067`, and
+  open-vsx.org is not reachable through it — the same reason `curl` here needs `--noproxy '*'`.
+  Unset both (and the lowercase pair) before `verify-pat` or `publish`; the `npx` fetch of
+  `ovsx` itself is unaffected and still needs the npmmirror registry.
+
+To confirm a publish landed, compare **per-entry CRC and length** between the downloaded VSIX
+and the local one — whole-file `sha256` will differ even for an identical package, because zip
+entries carry timestamps. On 0.2.5 all 14 entries matched.
 
 ---
 
@@ -470,7 +518,8 @@ Marketplace, the bytes in the Release asset and the sha256 printed in the log ar
   `readme.md`/`changelog.md`, and the `*.zh-CN.md` twins ship verbatim. So every baseline
   below belongs to one particular tree, and editing a shipped doc afterwards invalidates it.
   Re-measure; do not carry the old figure forward. Shipped bytes, as `gh release view --json
-  assets` reports them — i.e. what a user actually downloads: `v0.2.5` = 368,277; `v0.2.4` = 363,809; `v0.2.2` = 331,706;
+  assets` reports them — i.e. what a user actually downloads: `v0.2.6` = 372,811 (local and shipped agree);
+  `v0.2.5` = 368,277; `v0.2.4` = 363,809; `v0.2.2` = 331,706;
   `v0.2.1` = 313,426; `v0.2.0` = 312,853 at `581ba27`; `v0.1.9` = 309,620;
   `v0.1.7` = 288,750.
   (`v0.2.3` is deliberately absent — it has a tag, a CHANGELOG entry and a package, and no
@@ -483,8 +532,9 @@ Marketplace, the bytes in the Release asset and the sha256 printed in the log ar
   disk in the working tree: v0.2.2 by 3 (331,709 against 331,706) and v0.2.4 by 157
   (363,966 against 363,809), both run down in step 2. v0.2.1 was off by 15 (313,441 against
   313,426), never run down and left named rather than smoothed over — the same shape of cause,
-  but the file was not identified. v0.2.0 and v0.2.5 agreed exactly, and v0.2.5 agreed on
-  purpose: the exposed files were normalised to LF before the measurement rather than after.
+  but the file was not identified. v0.2.0, v0.2.5 and v0.2.6 agreed exactly, and v0.2.5 agreed on
+  purpose — the exposed files were normalised to LF before the measurement rather than after —
+  while v0.2.6 simply had no exposed file: all fourteen entries were LF on disk at package time.
   v0.2.3 shows the same 3 as v0.2.2 (353,366 local against 353,363 clean) but belongs to
   neither column, because it was never published — see the policy bullet above.
   `RELEASE.md` is on the `.vscodeignore` list, so editing *this* file cannot move the number

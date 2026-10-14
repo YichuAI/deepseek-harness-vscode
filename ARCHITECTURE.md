@@ -1100,7 +1100,7 @@ media/
 ├── origin.png                # source material (excluded from VSIX)
 └── markdown-it.umd.min.js    # bundled for VSIX (114 KB)
 scripts/
-├── protocol-test.ts          # fake-harness protocol test, 493 assertions (no dsh web)
+├── protocol-test.ts          # fake-harness protocol test, 504 assertions (no dsh web)
 ├── protocol-probe.ts         # asks a live `dsh web` what it actually serves
 ├── check-versions.ts         # every version surface must agree with package.json
 ├── integration-test.ts       # closed-loop test against real dsh

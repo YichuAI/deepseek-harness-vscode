@@ -1,19 +1,49 @@
-# DeepSeek Harness Connector for VS Code
+<p align="center">
+  <img src="https://raw.githubusercontent.com/YichuAI/deepseek-harness-vscode/main/media/icon.png" alt="DeepSeek Harness Connector" width="112">
+</p>
 
-[English](./README.md) | [简体中文](./README.zh-CN.md)
+<h1 align="center">DeepSeek Harness Connector for VS Code</h1>
 
-[![VS Code Marketplace](https://badgen.net/vs-marketplace/v/lucasliang.harness-connector-deepseek)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
-[![安装量](https://badgen.net/vs-marketplace/i/lucasliang.harness-connector-deepseek)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
-[![最新版本](https://img.shields.io/github/v/release/YichuAI/deepseek-harness-vscode)](https://github.com/YichuAI/deepseek-harness-vscode/releases)
-[![许可证](https://img.shields.io/github/license/YichuAI/deepseek-harness-vscode)](./LICENSE)
+<p align="center">
+  <strong>同一个 Harness。同一个工作区。同一个会话。</strong><br>
+  你的 agent 继续在原来的地方跑。这个插件只是给它前面接上一个原生的 VS Code 客户端——连上本机这个
+  Harness，读浏览器正在读的那个会话，应答它的审批，用 VS Code 自己的 diff 看每一处改动。
+</p>
 
-> DeepSeek Harness 的原生 VS Code 客户端。
->
-> 连接你已在本地运行的 Harness 实例，直接在 VS Code 中继续相同的工作区和会话。
+<p align="center">
+  <img src="https://img.shields.io/badge/dsh-0.2.0--rc.2-2f6feb?style=flat-square" alt="dsh 0.2.0-rc.2">
+  <img src="https://img.shields.io/badge/setup-attach--only-1a7f37?style=flat-square" alt="只连接，不拉起进程">
+  <img src="https://img.shields.io/badge/ui-no%20webview-8250df?style=flat-square" alt="界面无 webview">
+  <img src="https://img.shields.io/badge/VS%20Code-%E2%89%A5%201.85-007ACC?style=flat-square" alt="VS Code 1.85 及以上">
+</p>
 
-**同一个 Harness。同一个工作区。同一个会话。VS Code 客户端。**
+<p align="center">
+  <a href="./README.md">English</a> | <strong>简体中文</strong>
+</p>
 
-[![宣传片：它自己找到 Host，同一个会话在两个窗口里回答](https://raw.githubusercontent.com/YichuAI/deepseek-harness-vscode/main/docs/media/promo-preview.webp)](./docs/media/promo-1080p.mp4)
+<p align="center">
+  <a href="https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek"><img src="https://badgen.net/vs-marketplace/v/lucasliang.harness-connector-deepseek" alt="Marketplace 版本"></a>
+  <a href="https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek"><img src="https://badgen.net/vs-marketplace/i/lucasliang.harness-connector-deepseek" alt="Marketplace 安装量"></a>
+  <a href="https://open-vsx.org/extension/lucasliang/harness-connector-deepseek"><img src="https://img.shields.io/open-vsx/v/lucasliang/harness-connector-deepseek?style=flat-square" alt="Open VSX 版本"></a>
+  <a href="https://open-vsx.org/extension/lucasliang/harness-connector-deepseek"><img src="https://img.shields.io/open-vsx/dt/lucasliang/harness-connector-deepseek?style=flat-square" alt="Open VSX 下载量"></a>
+  <a href="https://github.com/YichuAI/deepseek-harness-vscode/releases"><img src="https://img.shields.io/github/v/release/YichuAI/deepseek-harness-vscode?style=flat-square" alt="最新版本"></a>
+  <a href="https://github.com/YichuAI/deepseek-harness-vscode/stargazers"><img src="https://badgen.net/github/stars/YichuAI/deepseek-harness-vscode" alt="GitHub Star"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/github/license/YichuAI/deepseek-harness-vscode?style=flat-square" alt="许可证"></a>
+</p>
+
+<p align="center">
+  <a href="#快速开始"><strong>安装</strong></a> ·
+  <a href="https://open-vsx.org/extension/lucasliang/harness-connector-deepseek">Open VSX</a> ·
+  <a href="https://github.com/YichuAI/deepseek-harness-vscode/releases">下载 VSIX</a> ·
+  <a href="./CHANGELOG.zh-CN.md">更新日志</a> ·
+  <a href="./STORY.zh-CN.md">它是怎么做出来的</a>
+</p>
+
+<p align="center">
+  <em>独立、非官方的社区项目——与 DeepSeek 无隶属关系，未获其背书，也非其发布。</em>
+</p>
+
+<a href="./docs/media/promo-1080p.mp4"><img src="https://raw.githubusercontent.com/YichuAI/deepseek-harness-vscode/main/docs/media/promo-preview.webp" alt="宣传片：它自己找到 Host，同一个会话在两个窗口里回答" width="100%"></a>
 
 *30 秒宣传片，剪的是它最能打的两幕。没有声音是刻意的——全片没有旁白，信息都在字幕上。[点开看完整版](./docs/media/promo-1080p.mp4) · [它到底是怎么做出来的](./STORY.zh-CN.md)（English: [STORY.md](./STORY.md)）*
 
@@ -26,7 +56,7 @@
 | **它需要什么** | VS Code ≥ 1.85，以及一个与窗口在**同一台机器**上的 Harness。这是唯一的硬约束，见[《远程开发》](#远程开发)。 |
 | **怎么装** | `code --install-extension lucasliang.harness-connector-deepseek` |
 
-**快捷跳转：**[它能做什么](#它能做什么) · [新特性](#v025-新特性) · [快速开始](#快速开始) · [配置](#配置) · [命令](#命令) · [远程开发](#远程开发) · [限制](#限制) · [开发](#开发) · [设计](#设计写盘归-dsh插件只观察与告知)
+**快捷跳转：**[它能做什么](#它能做什么) · [新特性](#v026-新特性) · [快速开始](#快速开始) · [配置](#配置) · [命令](#命令) · [远程开发](#远程开发) · [限制](#限制) · [开发](#开发) · [设计](#设计写盘归-dsh插件只观察与告知)
 
 ## 它能做什么
 
@@ -65,35 +95,34 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 
 *左上：同一个会话、同一刻、两个客户端——没有导入，没有镜像，没有分叉。右上：「Diff」打开的是 VS Code 自己的 diff 编辑器，不是 webview 仿的，左边那一侧是插件在改动前抓到的文本。左下：对话就在侧边栏里，工具行和改动卡片都在。右下：浏览器那一侧，原样。*
 
-## v0.2.5 新特性
+## v0.2.6 新特性
 
-**第一个上到 Marketplace 的构建（自 0.2.0 以来）——同时是一次文档轮，因为 README 本身就在安装包里。**
+**「Open Web UI」以前是条死路。现在它要么真给你打开 web UI，要么提出去启动那个唯一能办到的东西。**
 
-两半都是真的，而且必须放在一起说。运行时与 v0.2.4 相比没有任何变化；变的是新读者第一眼看到的一切。这也正是「改文档也值得发一个版本号」的原因：`README.md` 和 `CHANGELOG.md` 是 VSIX 里那十四个文件中的两个，所以**改文档就是改产物**，版本号跟着产物走。
+这条命令以前只会弹一句话。harness 按进程守着它的 web UI：请求里不带 `dsh web` 启动时打印的那个 token，`/` 就答 `401`——而那个 token 是 `randomBytes`，只活在 Host 进程的内存里，磁盘上没有任何东西能把它复原出来。三条取会话的路里，有两条其实手上有 URL（扩展自己启动的 Host；你自己粘进来的启动 URL），这两条本来就能用。第三条 `credentials` 手上从来没有 URL，而所有人收到的答案都是这一句。
 
-**如果你是从 Marketplace 装的：有四个版本的行为对你来说是新的。** v0.2.1 到 v0.2.4 只发到了 GitHub Releases，所以 Marketplace 一直停在 0.2.0。这次你能拿到：
+第三条路上，token 依然是造不出来的。变的是现在有办法了：**从这里**启动的 Host，会把它的 URL 打印进一个由这个扩展掌控的控制台。
 
 | | |
 | --- | --- |
-| **逐 hunk 撤销** | 改动卡片给每个 hunk 各配一个撤销；文件级撤销收走剩下的全部。两者都会重新比对文件字节，对不上就拒绝，而不是覆盖你。 |
-| **右键上的 解释 / 修复 / 审查** | 编辑器、资源管理器、diff 编辑器、源代码管理行四处都能用——提示词已写好，`@` 引用和行号范围一起带上。 |
-| **卡片属于某一段对话** | 每个会话的瀑布都从同一根 socket 下来。只有帧点名的正是你正在看的那个会话时才画卡片，所以浏览器标签里另一个会话的提问不会再出现在这里——可以回答，说的却是另一次运行。 |
-| **远程能自己弄到 `dsh`** | `dsh` 不在 `PATH` 上时，托管启动改用 `npx` 重试——把它取到**远程**上；`Install Host` 则在扩展宿主里执行安装，在远程窗口上扩展宿主就是远程。 |
-| **「Open Web UI」带着它的 token** | harness 按进程守着 web UI，裸的 `host:port` 会答 `401`。这条命令现在打开扩展手上已有的那条启动 URL；没有 token 可加的时候，它会直说。 |
+| **手上有的 URL，直接打开** | 要么是扩展启动的那个 Host，要么是本次会话被接管时用的那条启动 URL。启动 URL 是按进程有效的密钥，不是一次性凭证，所以到要用的时候它还有效。 |
+| **这条路上没有 URL？那就提议去启动一个** | 在 `credentials` 模式下，命令会问你要不要把 `sessionMode` 切到 `managed`，把你选的配置持久化、重连，然后打开它启动的那个 Host 打印出来的 URL。之所以持久化而不是只在这一次调用里记住，是因为那个 Host 必须活过下一次连接。 |
+| **……但在 Remote-SSH 上，它会说明为什么不行** | 在远程窗口里启动的 Host 监听的是**远程那台**的回环，而这条命令打开的浏览器在你面前这台机器上。一个按不出结果的按钮，比一句说清原因的话更糟。 |
+| **而且它不再把一个被接管的 Host 说成启动失败** | 如果配置的端口上已经有东西在应答，那就没有启动任何 Host，也就不存在任何 URL——现在会把这件事如实报告出来，而不是当成一次错误。 |
 
-**这次新增可读的：** 上面那条宣传片，以及[开发故事](./STORY.zh-CN.md)——58 天、24 个版本，以及为什么这个项目里最值钱的一次改动是删掉一个按钮。
+分支判断放在 `src/app/session-mode.ts` 的 `planOpenWebUi` 里，是对一组普通值求值的纯函数，所以这个决策不需要 VS Code 宿主就能断言。文案也一样被断言了——因为老文案把约束描述得分毫不差、却从不提有任何东西能解开它，恰恰就是这条命令看起来坏掉的原因。
 
 门禁：
 
 | 关卡 | 结果 |
 | --- | --- |
-| 协议断言（假 Harness，不需要 `dsh`） | **493 项断言**——v0.2.3 时 461，再之前 381 |
+| 协议断言（假 Harness，不需要 `dsh`） | **504 项断言**——v0.2.5 时 493，v0.2.3 时 461 |
 | 端到端链路 | **96** 条，覆盖五条里的三条；另外两条仍由套件自己打印为「未编写」，而不是悄悄略过 |
 | 实机 Host（`0.2.0-rc.2`，`127.0.0.1:3080`） | **41/41** |
 
-第 1 条和第 4 条——v0.0.4→v0.1.1 的更新日志里论证过必须补的那两类链路，因为面板当时根本没启动、而「Allow」曾经从未真正放行——现在对着一个能被杀掉再重启的假 Host 真跑，且完全不需要 VS Code 扩展宿主。随着 hunk 级撤销落地，第 5 条从 6 节长到 13 节。实机那一轮里新增了一条断言，从一个真实的 `user-questions/request` 上读出提问被归属到的那个会话，而那是这个事实唯一能被测量、而不是被推理出来的地方。
+新增的十条断言，覆盖那个决策的四种结果、它们之间的顺序（我们手上的 URL 优先于需要现造的那个），以及用户真正会读到的四段文案。第 1 条和第 4 条——v0.0.4→v0.1.1 的更新日志里论证过必须补的那两类链路，因为面板当时根本没启动、而「Allow」曾经从未真正放行——现在对着一个能被杀掉再重启的假 Host 真跑，且完全不需要 VS Code 扩展宿主。实机那一轮里有一条断言，从一个真实的 `user-questions/request` 上读出提问被归属到的那个会话，而那是这个事实唯一能被测量、而不是被推理出来的地方。
 
-上一个版本 v0.2.4 装的是「测试一天翻出的三件事」——别人对话的卡片、没装 `dsh` 的远程机、丢了 token 的启动 URL；v0.2.3 带来了逐 hunk 撤销和右键上的*解释 / 修复 / 审查*。这两个版本都没有发布到 Marketplace 或 Open VSX，所以对从这两处安装的人来说它们同样是新的。它们的说明、以及更早每个版本的说明，都在 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
+上一个版本 v0.2.5 是纯文档版：宣传片、开发故事，以及自 0.2.0 以来第一次上架的 Marketplace 版本。v0.2.4 装的是「测试一天翻出的三件事」，v0.2.3 带来了逐 hunk 撤销和右键上的*解释 / 修复 / 审查*。它们的说明、以及更早每个版本的说明，都在 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
 
 ## 环境要求
 
@@ -129,7 +158,7 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
    或从 [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases) 安装 VSIX：
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.2.5.vsix
+   code --install-extension harness-connector-deepseek-0.2.6.vsix
    ```
 
 3. **不用配置任何东西。** 在默认的 `sessionMode: "credentials"` 下，扩展会自动连接：它读取 `dsh web` 写在 `$DSH_HOME/.credentials.yaml` 里的浏览器会话签名密钥，自己签出同一个 `dsh-auth-…` cookie。**没有需要粘贴的 token。**
@@ -279,7 +308,7 @@ path"`、`@dir/`，可带 `:L<n>` / `:L<n>-L<m>` 后缀；从 `@` 补全列表�
 一个独立的 Node 脚本用真实客户端代码驱动一个**假**的 harness（假实现照 `0.2.1-alpha.2` 的服务端那一半写死）—— 不需要 `dsh web`：
 
 ```bash
-npm run protocol-test    # 493 项断言：双流传输拆分（$events 白名单 vs
+npm run protocol-test    # 504 项断言：双流传输拆分（$events 白名单 vs
                          # session/follow）、线缆协商（点分/斜杠、cookie 门禁、
                          # 事件套接字）、认证、cookie 派生、{args} payload、
                          # 审批与提问两条瀑布（Allow/Deny 的确切信封、cancel 撤卡、
@@ -368,9 +397,9 @@ npm run build            # esbuild → dist/extension.js
 npm run watch            # 变更时自动重建
 npm run typecheck
 npm run check-versions   # 每一个版本展示面都必须和 package.json 一致
-npm run protocol-test    # 针对假 harness 的 493 项协议断言
+npm run protocol-test    # 针对假 harness 的 504 项协议断言
 npm run protocol-probe   # 报告真实 dsh web 暴露了什么
-npm run package          # → harness-connector-deepseek-0.2.5.vsix
+npm run package          # → harness-connector-deepseek-0.2.6.vsix
 ```
 
 在 VS Code 中按 `F5` 启动带有该扩展的扩展开发宿主。
@@ -464,7 +493,7 @@ host 不是 `127.0.0.1`、`localhost` 或 `::1`，扩展就会拒绝，而且是
 
 | 场景 | 状态 | 含义 |
 | --- | --- | --- |
-| **本地窗口** | ✅ **已实测** | 受支持的组合，也是本机唯一端到端跑过的组合：对 `127.0.0.1:3080` 上一个活 Host 跑通 **41/41** 条集成断言，外加 493 条协议断言和 96 条端到端断言。 |
+| **本地窗口** | ✅ **已实测** | 受支持的组合，也是本机唯一端到端跑过的组合：对 `127.0.0.1:3080` 上一个活 Host 跑通 **41/41** 条集成断言，外加 504 条协议断言和 96 条端到端断言。 |
 | **Remote-SSH** | ⚠️ **未实测**——本机没有 SSH 服务（`localhost:22` 拒绝连接） | 当 Harness 跑在**远端机器上**时可用。扩展声明了 `extensionKind: "workspace"`，所以在远程窗口里它的扩展宿主就运行在远端：读远端的 `$DSH_HOME`、枚举远端的监听表、连远端的回环。你笔记本上的 Harness 从那里连不到——也不该连得到，因为它要改的工作区并不是你打开的这个。 |
 | **WSL** | ⚠️ **未实测**——`wsl.exe` 在本沙箱的程序黑名单上，根本起不来 | 形状和 Remote-SSH 一样：在发行版里跑 `dsh web`。VS Code 把 WSL 当作一个普通远程交给扩展，所以不需要任何 WSL 专属处理。 |
 | **开发容器** | ⚠️ **未实测**——本机没有装 `docker` | 形状还是一样：在容器里跑 `dsh web`。注意被读的是容器自己的 `$DSH_HOME/.credentials.yaml`，不是宿主机的。 |

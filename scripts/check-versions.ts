@@ -128,8 +128,16 @@ eq('package-lock.json’s root entry carries the current version', lock.packages
 const readme = read('README.md')
 const readmeZh = read('README.zh-CN.md')
 
-const h1 = readme.split('\n')[0] ?? ''
-const h1Zh = readmeZh.split('\n')[0] ?? ''
+// The title stopped being line 1 when the README grew a centred hero — the file
+// now opens with `<p align="center">` holding the logo. So read whichever form
+// the file uses, and read *something*: checking `split('\n')[0]` after that
+// change would have compared an empty string and passed forever.
+const titleOf = (text: string): string =>
+  text.split('\n').find((line) => /^#\s/.test(line) || /<h1\b/i.test(line)) ?? ''
+const h1 = titleOf(readme)
+const h1Zh = titleOf(readmeZh)
+check('README has a title line', h1 !== '', h1 || '(neither `# ` nor `<h1>` found)')
+check('README.zh-CN has a title line', h1Zh !== '', h1Zh || '(neither `# ` nor `<h1>` found)')
 check('README H1 carries no version', !/\(v?\d+\.\d+\.\d+\)/.test(h1), h1)
 check('README.zh-CN H1 carries no version', !/\(v?\d+\.\d+\.\d+\)/.test(h1Zh), h1Zh)
 
@@ -388,20 +396,46 @@ async function published(): Promise<void> {
     ['Marketplace version', `https://badgen.net/vs-marketplace/v/${EXT_ID}`],
     ['Marketplace installs', `https://badgen.net/vs-marketplace/i/${EXT_ID}`],
     ['GitHub release', `https://img.shields.io/github/v/release/${REPO}`],
+    ['GitHub stars', `https://badgen.net/github/stars/${REPO}`],
+    // The README also carries `img.shields.io/open-vsx/v|dt/…`, and they are
+    // deliberately *not* listed here. That provider flaps: within a few minutes
+    // it answered `200 open vsx: v0.2.5` and then `200 404: badge not found` for
+    // the same URL of an extension that is published and downloadable — so the
+    // check would red-light at random on a release gate, which is worse than not
+    // having it. The risk this section exists to catch is a *typed* number going
+    // stale; both Open VSX badges derive their value live, so that risk is absent.
+    // Verified by hand instead: both draw when the provider is healthy.
   ]
-  for (const [name, url] of badges) {
-    try {
-      const res = await fetch(url, { headers: { 'User-Agent': 'check-versions' } })
-      const svg = await res.text()
-      const label = /aria-label="([^"]*)"/.exec(svg)?.[1] ?? ''
-      check(
-        `the ${name} badge still renders`,
-        res.ok && label !== '' && !/not found|retired|invalid|deprecated/i.test(label),
-        label || `HTTP ${String(res.status)} with no label`,
-      )
-    } catch (e) {
-      check(`could not reach the ${name} badge`, false, e instanceof Error ? e.message : String(e))
+  // A badge host sits upstream of someone else's API and will answer
+  // `404: badge not found` while that upstream hiccups — measured on the Open
+  // VSX pair, which drew fine seconds later and then flapped again. One miss is
+  // therefore not evidence of a dead badge; several spread over half a minute
+  // are, and the last answer is what gets reported. If the Open VSX lines are
+  // the only red ones, re-run before believing them.
+  const badgeBackoffMs = [2000, 5000, 8000]
+  const probeBadge = async (url: string): Promise<{ ok: boolean; detail: string }> => {
+    let detail = ''
+    for (let attempt = 0; attempt <= badgeBackoffMs.length; attempt++) {
+      try {
+        const res = await fetch(url, { headers: { 'User-Agent': 'check-versions' } })
+        const svg = await res.text()
+        const label = /aria-label="([^"]*)"/.exec(svg)?.[1] ?? ''
+        detail = label || `HTTP ${String(res.status)} with no label`
+        if (res.ok && label !== '' && !/not found|retired|invalid|deprecated/i.test(label)) {
+          return { ok: true, detail }
+        }
+      } catch (e) {
+        detail = e instanceof Error ? e.message : String(e)
+      }
+      const wait = badgeBackoffMs[attempt]
+      if (wait !== undefined) await new Promise((resolve) => setTimeout(resolve, wait))
     }
+    return { ok: false, detail }
+  }
+
+  for (const [name, url] of badges) {
+    const { ok, detail } = await probeBadge(url)
+    check(`the ${name} badge still renders`, ok, detail)
   }
 }
 

@@ -1,19 +1,50 @@
-# DeepSeek Harness Connector for VS Code
+<p align="center">
+  <img src="https://raw.githubusercontent.com/YichuAI/deepseek-harness-vscode/main/media/icon.png" alt="DeepSeek Harness Connector" width="112">
+</p>
 
-[English](./README.md) | [简体中文](./README.zh-CN.md)
+<h1 align="center">DeepSeek Harness Connector for VS Code</h1>
 
-[![VS Code Marketplace](https://badgen.net/vs-marketplace/v/lucasliang.harness-connector-deepseek)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
-[![Installs](https://badgen.net/vs-marketplace/i/lucasliang.harness-connector-deepseek)](https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek)
-[![Latest release](https://img.shields.io/github/v/release/YichuAI/deepseek-harness-vscode)](https://github.com/YichuAI/deepseek-harness-vscode/releases)
-[![License](https://img.shields.io/github/license/YichuAI/deepseek-harness-vscode)](./LICENSE)
+<p align="center">
+  <strong>Same Harness. Same Workspace. Same Session.</strong><br>
+  Your agent keeps running wherever it already is. This puts a native VS Code client in front of it:
+  attach to the Harness on this machine, read the session the browser is reading, answer its
+  approvals, and review every edit in VS Code's own diff.
+</p>
 
-> Native VS Code client for DeepSeek Harness.
->
-> Connect to your existing local Harness instance and continue the same workspaces and sessions directly inside VS Code.
+<p align="center">
+  <img src="https://img.shields.io/badge/dsh-0.2.0--rc.2-2f6feb?style=flat-square" alt="dsh 0.2.0-rc.2">
+  <img src="https://img.shields.io/badge/setup-attach--only-1a7f37?style=flat-square" alt="setup: attach-only">
+  <img src="https://img.shields.io/badge/ui-no%20webview-8250df?style=flat-square" alt="ui: no webview">
+  <img src="https://img.shields.io/badge/VS%20Code-%E2%89%A5%201.85-007ACC?style=flat-square" alt="VS Code 1.85 or later">
+</p>
 
-**Same Harness. Same Workspace. Same Session. VS Code Client.**
+<p align="center">
+  <strong>English</strong> | <a href="./README.zh-CN.md">简体中文</a>
+</p>
 
-[![The trailer: it finds your Host by itself, and one session answers in two windows](https://raw.githubusercontent.com/YichuAI/deepseek-harness-vscode/main/docs/media/promo-preview.webp)](./docs/media/promo-1080p.mp4)
+<p align="center">
+  <a href="https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek"><img src="https://badgen.net/vs-marketplace/v/lucasliang.harness-connector-deepseek" alt="Marketplace version"></a>
+  <a href="https://marketplace.visualstudio.com/items?itemName=lucasliang.harness-connector-deepseek"><img src="https://badgen.net/vs-marketplace/i/lucasliang.harness-connector-deepseek" alt="Marketplace installs"></a>
+  <a href="https://open-vsx.org/extension/lucasliang/harness-connector-deepseek"><img src="https://img.shields.io/open-vsx/v/lucasliang/harness-connector-deepseek?style=flat-square" alt="Open VSX version"></a>
+  <a href="https://open-vsx.org/extension/lucasliang/harness-connector-deepseek"><img src="https://img.shields.io/open-vsx/dt/lucasliang/harness-connector-deepseek?style=flat-square" alt="Open VSX downloads"></a>
+  <a href="https://github.com/YichuAI/deepseek-harness-vscode/releases"><img src="https://img.shields.io/github/v/release/YichuAI/deepseek-harness-vscode?style=flat-square" alt="Latest release"></a>
+  <a href="https://github.com/YichuAI/deepseek-harness-vscode/stargazers"><img src="https://badgen.net/github/stars/YichuAI/deepseek-harness-vscode" alt="GitHub stars"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/github/license/YichuAI/deepseek-harness-vscode?style=flat-square" alt="License"></a>
+</p>
+
+<p align="center">
+  <a href="#quick-start"><strong>Install</strong></a> ·
+  <a href="https://open-vsx.org/extension/lucasliang/harness-connector-deepseek">Open VSX</a> ·
+  <a href="https://github.com/YichuAI/deepseek-harness-vscode/releases">Download VSIX</a> ·
+  <a href="./CHANGELOG.md">Changelog</a> ·
+  <a href="./STORY.md">How it got built</a>
+</p>
+
+<p align="center">
+  <em>An independent, unofficial community project — not affiliated with, endorsed by, or published by DeepSeek.</em>
+</p>
+
+<a href="./docs/media/promo-1080p.mp4"><img src="https://raw.githubusercontent.com/YichuAI/deepseek-harness-vscode/main/docs/media/promo-preview.webp" alt="The trailer: it finds your Host by itself, and one session answers in two windows" width="100%"></a>
 
 *The 30-second trailer, cut down to its two product beats. The silence is deliberate — there is no narration, the film says it in type. [Play it](./docs/media/promo-1080p.mp4) · [How it got built](./STORY.md) (中文版: [STORY.zh-CN.md](./STORY.zh-CN.md))*
 
@@ -26,7 +57,7 @@
 | **What it needs** | VS Code ≥ 1.85, and a Harness on the **same machine** as the window. That is the one hard constraint; see [Remote development](#remote-development). |
 | **Install** | `code --install-extension lucasliang.harness-connector-deepseek` |
 
-**Jump to:** [What it does](#what-it-does) · [What's new](#whats-new-in-v025) · [Quick start](#quick-start) · [Configuration](#configuration) · [Commands](#commands) · [Remote development](#remote-development) · [Limitations](#limitations) · [Development](#development) · [Design](#design-dsh-owns-the-write-the-plugin-observes-and-tells)
+**Jump to:** [What it does](#what-it-does) · [What's new](#whats-new-in-v026) · [Quick start](#quick-start) · [Configuration](#configuration) · [Commands](#commands) · [Remote development](#remote-development) · [Limitations](#limitations) · [Development](#development) · [Design](#design-dsh-owns-the-write-the-plugin-observes-and-tells)
 
 ## What it does
 
@@ -65,35 +96,34 @@ VS Code reads the workspaces and sessions the browser already has, and continues
 
 *Top left: the same session at the same moment in two clients — nothing imported, mirrored or forked. Top right: "Diff" is VS Code's own diff editor, not a webview imitation — the left side is the text the plugin captured before the change. Bottom left: the conversation lives in the sidebar, tool rows and changed-files card included. Bottom right: the browser side, untouched.*
 
-## What's new in v0.2.5
+## What's new in v0.2.6
 
-**The first build to reach the Marketplace since 0.2.0 — and a documentation round, because the README ships inside the package.**
+**"Open Web UI" was a dead end. It now either opens the web UI or offers to start the one thing that can.**
 
-Both halves of that are true and they belong together. The runtime is unchanged from v0.2.4; what changed is everything a new reader meets first. It is also why a documentation change got a version number at all: `README.md` and `CHANGELOG.md` are two of the fourteen files inside the VSIX, so **changing the docs changes the artifact**, and the number follows the artifact.
+The command could only ever print a sentence. The Harness gates its web UI per process: `/` answers `401` unless the request carries the token `dsh web` printed when it started, and that token is `randomBytes` held in the Host's process memory — nothing on disk can reproduce it. Two of the three session routes do end up holding a URL anyway (a Host the extension started; a launch URL you pasted) and both of those already worked. The `credentials` route never holds one, and that was the whole answer for everyone.
 
-**Installing from the Marketplace? Four releases of behaviour are new to you.** v0.2.1 through v0.2.4 went to GitHub Releases only, so the Marketplace has been serving 0.2.0. What you get now:
+No token can still be invented on that third route. What changed is that there is now something to do about it, because a Host started **from here** prints its URL into a console this extension owns.
 
 | | |
 | --- | --- |
-| **Undo one hunk** | The changed-files card lists each hunk with its own revert; the file-level revert takes whatever is left. Both re-check the file's bytes and refuse rather than overwrite you. |
-| **Explain / Fix / Review on a right-click** | From the editor, the explorer, the diff editor or a source-control row — prompt written, `@` mention and line range included. |
-| **Cards belong to a conversation** | Every session's waterfalls arrive down one socket. A card is drawn only when the frame names the session you are looking at, so a question from a browser tab on another session no longer appears here, answerable and about a different run. |
-| **A remote that can get its own `dsh`** | Managed launch retries through `npx` when `dsh` is not on `PATH` — fetching it *on the remote* — and `Install Host` runs the install in the extension host, which on a remote window is the remote. |
-| **"Open Web UI" carries its token** | The Harness gates its web UI per process, so a bare `host:port` answers `401`. The command opens the launch URL the extension already holds, and says so when there is no token to add. |
+| **A URL we hold opens directly** | Either a Host the extension launched, or the launch URL this session was adopted from. The launch URL is a per-process secret, not a single-use grant, so it is still good when you need it. |
+| **No URL on this route? It offers to start one** | From `credentials`, the command asks whether to switch `sessionMode` to `managed`, persists the change, reconnects, and opens the URL the Host it started printed. Persisted rather than remembered for one call, because that Host has to outlive the next connect. |
+| **…except over Remote-SSH, where it says why not** | A Host started in a remote window listens on the **remote's** loopback while the browser this command opens is on the machine in front of you. A button that cannot work is worse than a sentence that explains it. |
+| **And it stops calling an adopted Host a failed launch** | If something is already answering on the configured port then nothing was started and no URL exists — that is now reported as what happened rather than as an error. |
 
-**New to read this time:** the trailer above, and [the development story](./STORY.md) — 58 days, 24 versions, and why the most valuable change in the project was deleting a button.
+The branching lives in `planOpenWebUi`, a pure function over plain values in `src/app/session-mode.ts`, so the decision is asserted without a VS Code host. The copy is asserted too, because the old wording describing the constraint accurately and never mentioning that anything could lift it is precisely what made the command look broken.
 
 Verification:
 
 | Gate | Result |
 | --- | --- |
-| Protocol assertions (fake Harness, no `dsh` needed) | **493 assertions** — 461 in v0.2.3, 381 before that |
+| Protocol assertions (fake Harness, no `dsh` needed) | **504 assertions** — 493 in v0.2.5, 461 in v0.2.3 |
 | End-to-end chains | **96** across 3 of 5 chains; the other two still print as unwritten rather than being quietly omitted |
 | Live Host (`0.2.0-rc.2`, `127.0.0.1:3080`) | **41/41** |
 
-Chains 1 and 4 — the two whose absence the changelog of v0.0.4→v0.1.1 justifies fixing, because the panel did not start and "Allow" never actually allowed — now run for real against a fake Host that can be killed and restarted, with no VS Code Extension Host needed. Chain 5 grew from 6 sections to 13 as hunk-level undo landed. The live run includes one assertion that reads which session a question was attributed to off a real `user-questions/request`, because that is the only place the fact can be measured rather than reasoned about.
+The ten new assertions cover the four outcomes of that decision, the order between them (a URL we hold beats one we would have to create), and the four strings a user actually reads. Chains 1 and 4 — the two whose absence the changelog of v0.0.4→v0.1.1 justifies fixing, because the panel did not start and "Allow" never actually allowed — run for real against a fake Host that can be killed and restarted, with no VS Code Extension Host needed. The live run includes one assertion that reads which session a question was attributed to off a real `user-questions/request`, because that is the only place the fact can be measured rather than reasoned about.
 
-The version before this one — v0.2.4 — carries the three fixes a day of testing turned up (a card from someone else's conversation, a remote with no `dsh` on it, a launch URL that had lost its token); v0.2.3 brought per-hunk undo and *Explain / Fix / Review*. Neither was ever published to the Marketplace or to Open VSX, so both are new to anyone installing from either. Their notes, and every earlier release's, are in [CHANGELOG.md](./CHANGELOG.md).
+The version before this one — v0.2.5 — was documentation only: the trailer, the development story, and the first Marketplace listing since 0.2.0. v0.2.4 carries the three fixes a day of testing turned up, and v0.2.3 brought per-hunk undo and *Explain / Fix / Review*. Their notes, and every earlier release's, are in [CHANGELOG.md](./CHANGELOG.md).
 
 ## Requirements
 
@@ -133,7 +163,7 @@ The version before this one — v0.2.4 — carries the three fixes a day of test
    Or install the VSIX from [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases):
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.2.5.vsix
+   code --install-extension harness-connector-deepseek-0.2.6.vsix
    ```
 
 3. Nothing to configure. In the default `sessionMode: "credentials"` the extension
@@ -302,7 +332,7 @@ that implements the `0.2.1-alpha.2` server half exactly — so no `dsh web` is
 needed:
 
 ```bash
-npm run protocol-test    # 493 assertions: the two-stream transport split
+npm run protocol-test    # 504 assertions: the two-stream transport split
                          # ($events allowlist vs session/follow), wire negotiation
                          # (dot/slash, cookie gating, event socket), auth and cookie
                          # derivation, {args} payloads (wrapped vs bare), the approval
@@ -419,9 +449,9 @@ npm run build            # esbuild → dist/extension.js
 npm run watch            # rebuild on change
 npm run typecheck
 npm run check-versions   # every version surface must agree with package.json
-npm run protocol-test    # 493 protocol assertions against a fake harness
+npm run protocol-test    # 504 protocol assertions against a fake harness
 npm run protocol-probe   # report what your real dsh web exposes
-npm run package          # → harness-connector-deepseek-0.2.5.vsix
+npm run package          # → harness-connector-deepseek-0.2.6.vsix
 ```
 
 Press `F5` in VS Code to launch an Extension Development Host with the extension loaded.
@@ -534,7 +564,7 @@ That leaves four arrangements, and the honest state of each:
 
 | Scenario | State | What it means |
 | --- | --- | --- |
-| **Local window** | ✅ **Measured** | The supported arrangement and the only one exercised here: **41/41** integration assertions against a live Host on `127.0.0.1:3080`, on top of the 493 protocol and 96 end-to-end assertions. |
+| **Local window** | ✅ **Measured** | The supported arrangement and the only one exercised here: **41/41** integration assertions against a live Host on `127.0.0.1:3080`, on top of the 504 protocol and 96 end-to-end assertions. |
 | **Remote-SSH** | ⚠️ **Not measured** — this machine has no SSH server (`localhost:22` refuses) | Works when the Harness runs **on the remote host**. The extension declares `extensionKind: "workspace"`, so in a remote window its extension host runs on the remote machine: it reads that machine's `$DSH_HOME`, probes that machine's listener table, and talks to that machine's loopback. A Harness on your laptop is unreachable from there — and should be, since the workspace it would edit is not the one you have open. |
 | **WSL** | ⚠️ **Not measured** — `wsl.exe` is on this sandbox's program blacklist, so it could not be launched at all | Same shape as Remote-SSH: run `dsh web` inside the distro. VS Code hands WSL over as an ordinary remote, so nothing WSL-specific is needed. |
 | **Dev container** | ⚠️ **Not measured** — `docker` is not installed here | Same shape again: run `dsh web` inside the container. The container's own `$DSH_HOME/.credentials.yaml` is what gets read, not the host's. |

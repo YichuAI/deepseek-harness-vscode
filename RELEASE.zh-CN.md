@@ -52,7 +52,7 @@ npm run check-versions     # → 全部检查通过；加 --online 会把已发�
 npm run build              # → dist/extension.js
 
 # 1.4 协议测试（假 harness——不需要 dsh web）
-npm run protocol-test      # → 全部 493 项断言 ✓
+npm run protocol-test      # → 全部 504 项断言 ✓
 
 # 1.5 端到端链路（真实文件系统；会自己报告覆盖情况）
 npm run e2e-test           # → 5 条链路里已写 3 条、未写 2 条；已编写的
@@ -90,14 +90,34 @@ npm run package            # → harness-connector-deepseek-<版本>.vsix
       不是每次发版再临时判断的事。
 - [ ] `CHANGELOG.md` 与 `ARCHITECTURE.md` 里的断言数与 `npm run protocol-test`
       的**当前**输出一致（它已历经 50 → 64 → 98 → 83 → 156 → 178 → 180 → 190 →
-      211 → 231 → 243 → 268 → 295 → 312 → 342 → 381 → 461 → 493，其中 rc.2 重写用新假
+      211 → 231 → 243 → 268 → 295 → 312 → 342 → 381 → 461 → 493 → 504，其中 rc.2 重写用新假
       harness 替换了 rc.6 的那套，waterfall／待处理面板两组随之落地，v0.2.2 又加上了
       会话模式词表、分平台安装路线和启动器的两个纯函数，v0.2.3 再加上了逐 hunk 手术、
       那九条右键提问和回环围栏，v0.2.4 再加上了 waterfall 的归属规则、启动计划
-      和远程安装路由，v0.2.5 只动了随包文档、没有新增断言；此处数字过期是最常见的文档漂移——
+      和远程安装路由，v0.2.5 只动了随包文档、没有新增断言，v0.2.6 加上了 Open Web UI 的
+      决策函数以及它据以分支的那几段文案；此处数字过期是最常见的文档漂移——
       **而自 v0.2.1 起，`check-versions` 会直接让构建失败，不再靠这一行靠人记**）。
 - [ ] `README.md` 最新的「新特性」标题就是这个版本，而且 README 只保留**一个**版本的
       说明。历史写进 CHANGELOG。
+- [ ] README 上的徽章仍然是**推导出来的、不是手写的**，而且被检查的那些真的能画出来。
+      `check-versions --online` 会把它们逐个抓下来，读 SVG 自己声明的 label——因为一个 URL
+      字符串对得上、画出来却是 `404 badge not found` 的徽章，正是那一节存在的理由。
+      有一处是**有意不查**的：两个 `open-vsx` 徽章留在 README 里，但**不在**那份名单里。
+      shields 的 Open VSX 上游会抖——同一个 URL、一个已发布且可下载的扩展，几分钟内先答
+      `200 open vsx: v0.2.5`、再答 `200 404: badge not found`——而一个会随机变红的发版门禁
+      比没有门禁更糟。这两个用眼睛确认。
+- [ ] 首屏那四个**身份徽章**（`dsh …`、`setup …`、`ui …`、`VS Code …`）是两份 README 里
+      仅存的手写数字，而且是**刻意手写**的：没有任何端点能提供「这个构建针对的 Remote 契约」。
+      等 `ARCHITECTURE.md` 里的契约目标变了再动它们，别提前动。顺带记一句：门禁的标题检查
+      现在同时接受 `#` 标题和 `<h1>`，因为 README 已经不再以标题开头了。
+- [ ] 仓库元数据仍然描述这个项目——别人正是靠它找到仓库的，所以它属于发版的一部分，
+      不是装饰：
+
+      `gh repo view YichuAI/deepseek-harness-vscode --json description,homepageUrl,repositoryTopics`
+
+      homepage 指向 Marketplace 页面；topics 装的是人们真正会搜的词（`dsh`、
+      `deepseek-harness`、`vscode-extension`、`ai-coding-assistant` 等）。用
+      `gh repo edit --add-topic <t> --homepage <url>` 设置。
 - [ ] `LICENSE` 存在（MIT）。
 - [ ] **仓库顶层没有多出任何东西。** `.vscodeignore` 是一张排除表，所以一个没人想到的目录
       默认就会随包——v0.2.3 的候选包里就躺着一个本地的 `宣传片/` 分镜目录，在一个 896 KB 的
@@ -123,7 +143,7 @@ npm run package            # → harness-connector-deepseek-<版本>.vsix
 unzip -l harness-connector-deepseek-<版本>.vsix
 ```
 
-预期（v0.2.5 = 14 个文件，干净检出 368,277 字节，约 360 KB）：
+预期（v0.2.6 = 14 个文件，干净检出 372,811 字节，约 364 KB）：
 
 ```
 [Content_Types].xml
@@ -154,9 +174,11 @@ CRLF，而它对应的 blob——以及 CI 的检出——不是。这棵树里�
 `extension/changelog.md` 和 `extension/media/icon.svg`——第二个就是这么找出来的：光看总字节数，
 没有任何线索告诉你动的是哪个文件。
 
-v0.2.5 这个差值**是零**，而且是刻意的。这两个文件都用它们的索引 blob 重写过一遍
-（`git cat-file blob :CHANGELOG.md` 取出来再 `writeFileSync`），所以工作树里放的就是 git 将来会
-检出的同一批字节，这棵树本地打包 368,277，发出去也是 368,277。在 git 的 stat 缓存刷新之前，
+v0.2.5 这个差值**是零**，而且是刻意的，v0.2.6 也让它继续为零。这两个文件都用它们的索引 blob
+重写过一遍（`git cat-file blob :CHANGELOG.md` 取出来再 `writeFileSync`），所以工作树里放的就是
+git 将来会检出的同一批字节；v0.2.5 这棵树本地打包 368,277，发出去也是 368,277。v0.2.6 是量
+出来的、不是安排出来的：每一个随包文件在盘上都是零 CR 字节（`tr -cd '\r' | wc -c`），所以上面
+的 372,811 本身就已经是干净读数，Release 附件的体积应该与它一致。在 git 的 stat 缓存刷新之前，
 `git status` 可能仍把它们标成已修改，但 `git diff --stat` 是空的，
 `git cat-file blob :<路径> | tr -cd '\r' | wc -c` 读到 0——工作树内容确实就是那个 blob。要说明
 的是 `git checkout-index` 做不到这件事：它服从 `core.eol`，而后者默认是 native，所以哪怕加上
@@ -181,7 +203,8 @@ node <仓库>/node_modules/@vscode/vsce/vsce package --no-dependencies  # → CI
 
 所以当这里的数字和一个新克隆差了几个字节时，先看 `git status` 和行尾，再判断是不是树变了；而
 记基线的时候，写清楚你量的是哪一种。v0.2.5 没有需要对账的地方：上面的 368,277 是在那两个暴露
-文件已经归一成 LF 之后量的，本身就已经是干净读数。
+文件已经归一成 LF 之后量的，本身就已经是干净读数。v0.2.6 走的是更简单的一条路——打包之前逐一
+确认过每个随包文件在盘上都是 LF，所以不欠第二次测量。
 
 ---
 
@@ -282,7 +305,8 @@ code --install-extension harness-connector-deepseek-<版本>.vsix
 ### Open VSX
 
 Cursor、VSCodium 和 Windsurf 读的是 Open VSX 而不是微软 Marketplace，而只存在于其中一边的
-扩展，对那几个编辑器来说等于不存在。自 0.2.1 起以同一个 `lucasliang` 命名空间发布。
+扩展，对那几个编辑器来说等于不存在。自 0.2.1 起以同一个 `lucasliang` 命名空间发布；
+截至 2026-10-14 对外服务的是 `0.2.5`（`allVersions` = 0.2.1、0.2.2、0.2.5）。
 
 ```bash
 # 本机 npmjs 走代理会拿到 502，所以每次 npx 都要带镜像源；换台机器就可以去掉。
@@ -306,7 +330,21 @@ npx --registry=$REG ovsx get lucasliang.harness-connector-deepseek
 报 `… is already published, but currently isn't active and therefore not visible`；用发行者
 token 打 `DELETE /api/-/publish/<ns>/<ext>/<ver>` 返回 `403`。（网页端可以删版本，token 不行。）
 `0.2.2` 就是这么丢的——在 README 徽章修复之前先推了上去，从未激活，也删不掉——于是 Open VSX
-继续服务 `0.2.1`，那个修复只能等下一个版本号。
+继续服务 `0.2.1`，那个修复只能等下一个版本号。`0.2.5` 于 2026-10-14 在这里发布，一路顺畅，
+因为它那时已经有一个 GitHub Release 撑在背后、产物不再变动了。
+
+这条路有两件事是别的路不需要的：
+
+- **PAT 哪里都不存。** 仓库 secrets 是空的，它也从来没被写进任何文件——就地传入、用完即忘，
+  这正是设计意图。它确实会留在这台机的本地会话记录里（`~/.workbuddy/projects/`，搜 `ovsxat_`），
+  所以之后再发时可以从那儿找回来；机器上再没有别的地方有它。请把这当成「所以要一直签短期
+  token」的理由，而不是一个可以主动往里写 token 的地方。
+- **绕开代理。** 这台机把 `http_proxy`/`https_proxy` 设成了 `127.0.0.1:13067`，open-vsx.org
+  走不通——和这里 `curl` 必须加 `--noproxy '*'` 是同一个原因。`verify-pat` 和 `publish` 之前
+  把大小写两组都 unset；`npx` 取 `ovsx` 本身不受影响，仍然要带 npmmirror 镜像源。
+
+要确认发布真的落地，拿下载回来的 VSIX 和本地的**逐条目比 CRC 和长度**——整包 `sha256`
+即使包完全相同也会不一样，因为 zip 条目带时间戳。0.2.5 的 14 个条目全部一致。
 
 ---
 
@@ -414,6 +452,7 @@ Actions → **Release** → *Run workflow* → 填 `tag: v0.2.1`。它会检出�
   `changelog.md` 的形式随包，`*.zh-CN.md` 双胞胎原样随包。所以下面每一条基线都属于某一棵
   特定的树，事后再改一个随包文档，那个数字就作废了。重新量，不要把旧数字往下带。随包发出的
   字节数（也就是 `gh release view --json assets` 报出来的、用户真正下载的那个）：
+  `v0.2.6` = 372,811（本地与发出去一致）；
   `v0.2.5` = 368,277（本地工作树同为 368,277）；
   `v0.2.4` = 363,809（本地工作树 363,966）；
   `v0.2.2` = 331,706；
@@ -427,8 +466,9 @@ Actions → **Release** → *Run workflow* → 填 `tag: v0.2.1`。它会检出�
   本地读数和发出去的附件总会差几个字节，原因永远是有个文件在本地测量时是 CRLF：v0.2.2 差 3
   （331,709 对 331,706），v0.2.4 差 157（363,966 对 363,809）——这两个都已经在第 2 步里查到根。
   v0.2.1 那 15 字节（313,441 对 313,426）从未查清，这里按原因的形状归到同一类，但不假装那个文件
-  也被找到了。v0.2.0 和 v0.2.5 则完全一致，而 v0.2.5 的一致是刻意的：那两个暴露文件是在测量
-  **之前**就归一成 LF 的，不是之后才解释的。v0.2.3 和 v0.2.2 一样差 3（本地 353,366 对干净
+  也被找到了。v0.2.0、v0.2.5 和 v0.2.6 则完全一致：v0.2.5 的一致是刻意的，那两个暴露文件是在测量
+  **之前**就归一成 LF 的，不是之后才解释的；v0.2.6 则干脆没有暴露文件，打包时十四个条目在盘上
+  全是 LF。v0.2.3 和 v0.2.2 一样差 3（本地 353,366 对干净
   353,363），但它两栏都不属于——它从未发布，见上面的版本策略条目。
   `RELEASE.md` 在 `.vscodeignore` 的排除表里，所以改**这个**文件不会让上一段写下的那个数字
   发生变化。基线之所以能记在这里、然后继续在同一个文档里写字，唯一的原因就是这个；换成本文件

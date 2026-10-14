@@ -22,7 +22,14 @@ import { DEFAULT_LAUNCH_COMMAND, ManagedLauncher, detectDesktopInstall } from '.
 import { installCli } from './harness/install.ts'
 import { AppController, attachmentKindFor } from './app/controller.ts'
 import { buildDiagnosticsReport, NPM_INSTALL_COMMAND } from './app/diagnosis.ts'
-import { parseSessionMode, traitsOf, USE_LAUNCH_URL_COMMAND, type SessionMode } from './app/session-mode.ts'
+import {
+  OPEN_WEB_UI_TEXT,
+  parseSessionMode,
+  planOpenWebUi,
+  traitsOf,
+  USE_LAUNCH_URL_COMMAND,
+  type SessionMode,
+} from './app/session-mode.ts'
 import { DSH_REVIEW_SCHEME } from './review/virtualDocument.ts'
 import type { PendingAttachmentPayload, WebviewAction } from './view/provider.ts'
 import { HarnessWebviewViewProvider, type UiState } from './view/provider.ts'
@@ -301,45 +308,70 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   /**
    * Hand the harness web UI to the browser, token and all.
    *
-   * This used to be a message saying it could not be done, on the grounds that
-   * only the token-bearing launch URL authenticates and a Host started by
-   * somebody else never shows us that URL. That reasoning is still right, but
-   * it was answering the wrong question: the URL is not always somebody else's
-   * to hold. Two of the three routes leave us with one.
+   * The harness gates its web UI per process, and only the launch URL carries
+   * the token that opens it, so this is never a link we can compose — it is one
+   * we have to hold. Which route holds one, and what to do when none does, is
+   * `planOpenWebUi` in `app/session-mode.ts`; this function only executes the
+   * answer.
    *
-   *   1. Managed launch — we own the child's console, so we read the URL off it.
-   *   2. Paste — the user handed us the URL, and it is a *reusable* per-process
-   *      secret, not a single-use grant, so it is still good when we need it.
-   *   3. Credentials — there was never a token: the cookie is minted from the
-   *      signing secret without any exchange. Nothing to add, and saying so is
-   *      better than opening a page that answers `401`.
+   * The case that needed work is the `credentials` route, where there is
+   * genuinely no token: the cookie is minted from the signing secret, the
+   * browser has nothing, and the token is `randomBytes` living in the Host's
+   * memory. That used to be the end of the conversation. It is not, because a
+   * Host *this* extension starts prints a URL into a console we own — so the
+   * command offers to become that instead of explaining the constraint and
+   * stopping.
    */
   const openWebUi = async (): Promise<void> => {
-    const launched = launcherForMode()?.launchUrl()
-    if (launched !== undefined) {
-      await vscode.env.openExternal(vscode.Uri.parse(launched))
+    // `auth.browserUrl()` is the pasted route and declines unless it is still
+    // authenticated for the Host we are pointed at; `launcherForMode()` is only
+    // defined in the mode that starts a Host.
+    const adopted = auth.browserUrl()
+    const plan = planOpenWebUi({
+      launchedUrl: launcherForMode()?.launchUrl(),
+      adoptedUrl: adopted,
+      mintedLocally: auth.localMintEnabled(),
+      authenticated: auth.isReady(),
+      remoteName: vscode.env.remoteName,
+    })
+
+    if (plan.kind === 'explain-minted-remote') {
+      void vscode.window.showInformationMessage(OPEN_WEB_UI_TEXT.mintedRemote)
       return
     }
-    // `auth.browserUrl()` is the pasted route, and it declines unless it is
-    // still authenticated for the Host we are pointed at.
-    const pasted = auth.browserUrl()
-    if (pasted !== undefined) {
-      log.info('openWebUI: reopening the launch URL this session was adopted from')
-      await vscode.env.openExternal(vscode.Uri.parse(pasted))
+    if (plan.kind === 'explain-no-url') {
+      void vscode.window.showInformationMessage(OPEN_WEB_UI_TEXT.noUrl)
       return
     }
-    // No launch URL exists on this route — the exchange was skipped, not failed.
-    const minted = auth.localMintEnabled() && auth.isReady()
-    void vscode.window.showInformationMessage(
-      minted
-        ? 'This session was minted from $DSH_HOME/.credentials.yaml, which does no token exchange, so '
-          + 'there is no token for this command to add. The terminal running `dsh web` printed one. '
-          + 'Alternatively, switch deepseekHarness.sessionMode to "managed" and this command opens the web UI itself.'
-        : 'Open the web UI with the URL `dsh web` printed to its console — it carries the '
-          + 'per-process token the browser needs. The extension authenticates on its own; set '
-          + 'deepseekHarness.sessionMode to "managed" and it will start the Host itself, which also '
-          + 'lets this command open the web UI for you.',
-    )
+    if (plan.kind === 'open') {
+      if (plan.url === adopted) {
+        log.info('openWebUI: reopening the launch URL this session was adopted from')
+      }
+      await vscode.env.openExternal(vscode.Uri.parse(plan.url))
+      return
+    }
+
+    const { message, action, dismiss } = OPEN_WEB_UI_TEXT.offerManaged
+    if (await vscode.window.showInformationMessage(message, action, dismiss) !== action) return
+
+    // Persisted rather than remembered for one call: the Host this starts has to
+    // outlive the next connect, and a reconnect that still read `credentials`
+    // would abandon it. The config-change handler notices the new mode and
+    // reconnects on its own; awaiting a connect here is what makes the launch
+    // URL exist (or provably not exist) by the time we look for it.
+    await vscode.workspace
+      .getConfiguration(SECTION)
+      .update('sessionMode', 'managed', vscode.ConfigurationTarget.Global)
+    await controller.doConnect({ force: true })
+
+    const url = launcher.launchUrl()
+    if (url === undefined) {
+      // A Host already answering on the configured port is adopted, not started,
+      // so nothing on this machine ever printed a URL for it.
+      void vscode.window.showWarningMessage(OPEN_WEB_UI_TEXT.alreadyRunning)
+      return
+    }
+    await vscode.env.openExternal(vscode.Uri.parse(url))
   }
 
   /**

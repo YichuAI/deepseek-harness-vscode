@@ -75,19 +75,24 @@ export const USE_LAUNCH_URL_COMMAND = 'deepseekHarness.useLaunchUrl'
 /**
  * Everything `Open Web UI` can know about what we hold, as plain values.
  *
- * The pieces come from four different places (the launcher, the auth object,
- * the config-derived local-mint flag and `vscode.env`), which is exactly why the
- * decision is made here instead of inline: as an object it can be asserted
- * without a VS Code host, and the failure that motivated this — a command that
- * could only ever refuse — was a branching problem, not a plumbing one.
+ * The pieces come from four different places (the launcher, the auth object, the
+ * configured mode and `vscode.env`), which is exactly why the decision is made
+ * here instead of inline: as an object it can be asserted without a VS Code host.
+ *
+ * It carries the **mode**, not a boolean about minting. An earlier version passed
+ * `auth.localMintEnabled()`, and that single bit is `false` for two modes whose
+ * remedies are opposites — `managed` (start the Host we were always going to
+ * start) and `paste` (ask for the URL, and never start anything). Collapsing them
+ * produced a message telling `paste` users to switch to `managed` and `managed`
+ * users to switch to the mode they were already in.
  */
 export interface OpenWebUiInput {
   /** The URL a Host we started printed. Absent unless this mode starts one. */
   launchedUrl: string | undefined
   /** The launch URL this session was adopted from, if the route kept one. */
   adoptedUrl: string | undefined
-  /** True when the cookie was minted from `$DSH_HOME/.credentials.yaml`. */
-  mintedLocally: boolean
+  /** The configured route, which is what decides the remedy. */
+  mode: SessionMode
   /** Whether a usable cookie for the configured Host exists at all. */
   authenticated: boolean
   /** `vscode.env.remoteName`: set when the window is not the local machine. */
@@ -96,9 +101,14 @@ export interface OpenWebUiInput {
 
 export type OpenWebUiPlan =
   | { kind: 'open'; url: string }
-  | { kind: 'offer-managed' }
-  | { kind: 'explain-minted-remote' }
-  | { kind: 'explain-no-url' }
+  /** `credentials`: only a Host we start prints a token. */
+  | { kind: 'offer-managed'; reason: 'minted' | 'no-session' }
+  /** `paste`: asking is the mode, not a fallback. */
+  | { kind: 'ask-launch-url' }
+  /** `managed`: start the Host, then read the URL it printed. */
+  | { kind: 'start-managed' }
+  /** A Host started here would land on a loopback this browser cannot reach. */
+  | { kind: 'explain-remote'; reason: 'minted' | 'managed' }
 
 /**
  * Decide what `DeepSeek Harness: Open Web UI` should do, instead of refusing.
@@ -108,59 +118,96 @@ export type OpenWebUiPlan =
  * only the launch URL carries the token. That token is `randomBytes` kept in a
  * WeakMap inside the Host process (`browser-auth.ts`), so the `credentials` route
  * — which holds the signing secret and can mint a *cookie* byte-for-byte — still
- * cannot compose an authenticated URL. The old command answered every case with
- * that fact, and it is true, but it was answering the wrong question: two of the
- * three routes do hold a URL, and on the third we can get one by starting a Host
- * ourselves, which is a thing this extension is allowed to do.
+ * cannot compose an authenticated URL.
  *
- * Order matters. A URL we already hold beats one we would have to create, and
- * `offer-managed` only survives the remote check because a Host started in a
- * Remote-SSH window listens on the *remote's* loopback while the browser this
- * command opens is on the laptop.
+ * That much was always true; what was wrong was the branching. There is no case
+ * here that has to end in a refusal, because **every mode can name a next step**:
+ * `managed` starts the Host that prints a URL, `paste` asks for one, and
+ * `credentials` can switch to the first. So the plan has no dead end short of a
+ * remote window whose loopback is not the one the browser will use.
+ *
+ * Order matters. A URL we already hold beats one we would have to create; the
+ * mode decides the remedy; and the remote check comes last, because it only
+ * disqualifies the remedies that start something.
  */
 export function planOpenWebUi(input: OpenWebUiInput): OpenWebUiPlan {
   if (input.launchedUrl !== undefined) return { kind: 'open', url: input.launchedUrl }
   if (input.adoptedUrl !== undefined) return { kind: 'open', url: input.adoptedUrl }
 
-  // Only the minted route has a way out, and only while it is actually
-  // authenticated: offering to start a Host to somebody whose cookie is missing
-  // would fix the wrong problem.
-  if (!input.mintedLocally || !input.authenticated) return { kind: 'explain-no-url' }
-  if (input.remoteName !== undefined) return { kind: 'explain-minted-remote' }
-  return { kind: 'offer-managed' }
+  const traits = traitsOf(input.mode)
+
+  // `paste` reads nothing and starts nothing by design — the user chose it to
+  // avoid exactly those two things — so being asked for the URL *is* the route.
+  if (traits.expectsPaste) return { kind: 'ask-launch-url' }
+
+  // Everything below would have to start a Host, and a Host started in a
+  // Remote-SSH window listens on the remote's loopback while the browser this
+  // command opens is on the laptop. A button that cannot work is worse than a
+  // sentence that says why.
+  if (input.remoteName !== undefined) {
+    return { kind: 'explain-remote', reason: traits.startsHost ? 'managed' : 'minted' }
+  }
+
+  if (traits.startsHost) return { kind: 'start-managed' }
+
+  // `credentials`: the missing cookie is not the obstacle, it is part of the
+  // description. Minting produces a cookie and no token, so a Host started from
+  // here is the only thing that prints us something a browser can use — whether
+  // or not a cookie happens to be present. `reason` changes the explanation and
+  // nothing else.
+  return { kind: 'offer-managed', reason: input.authenticated ? 'minted' : 'no-session' }
 }
 
 /**
  * The copy for every outcome that does not open anything.
  *
  * Kept beside the decision so "what does this command say" is answerable in one
- * place, and so the strings can be asserted — the previous wording is how the
- * command came to look broken: it described the constraint accurately and never
- * mentioned that a Host started from here would lift it.
+ * place, and so the strings can be asserted. Three of them take the target
+ * because "which Host" is the first thing a reader needs and the last thing a
+ * fixed sentence can say.
  */
 export const OPEN_WEB_UI_TEXT = {
   offerManaged: {
-    message:
+    /** There is a cookie, and it is a minted one — so there is no token in it. */
+    minted:
       'This session was minted from $DSH_HOME/.credentials.yaml, which does no token exchange, so '
       + 'there is no token for this command to add to a URL. A Host started from here prints one.',
+    /** No cookie either. Still not a dead end: the Host we start issues its own. */
+    noSession: (target: string): string =>
+      `No browser session for ${target} is available — none is stored, or the stored one expired — `
+      + 'and a minted session carries no token to put in a URL anyway. A Host started from here '
+      + 'prints one.',
     action: 'Switch to managed and open',
     dismiss: 'Not now',
   },
-  /** The button cannot help from a window whose browser is on another machine. */
-  mintedRemote:
-    'This session was minted from $DSH_HOME/.credentials.yaml, which does no token exchange, so '
-    + 'there is no token for this command to add to a URL. Starting a Host here would start it on '
-    + 'the remote, whose loopback this browser cannot reach — run `dsh web` on the machine you are '
-    + 'sitting at and paste its URL with "DeepSeek Harness: Use Launch URL".',
-  /** No reusable URL on this route, and nothing we could start to get one. */
-  noUrl:
-    'Open the web UI with the URL `dsh web` printed to its console — it carries the per-process '
-    + 'token the browser needs. The extension authenticates on its own; set '
-    + 'deepseekHarness.sessionMode to "managed" and it will start the Host itself, which also '
-    + 'lets this command open the web UI for you.',
+  /** `paste`: the command owes the user the one thing the mode is built around. */
+  askLaunchUrl: {
+    message: (target: string): string =>
+      `This window uses deepseekHarness.sessionMode "paste", so the extension reads no credential `
+      + `file and starts no process for ${target}. Run \`dsh web\` — or open the desktop app — and `
+      + 'paste the whole line it printed: that line carries the per-process token the browser needs.',
+    action: 'Paste launch URL',
+    dismiss: 'Not now',
+  },
+  explainRemote: {
+    minted:
+      'This session was minted from $DSH_HOME/.credentials.yaml, which does no token exchange, so '
+      + 'there is no token for this command to add to a URL. Starting a Host here would start it on '
+      + 'the remote, whose loopback this browser cannot reach — run `dsh web` on the machine you are '
+      + 'sitting at and paste its URL with "DeepSeek Harness: Use Launch URL".',
+    managed:
+      'This window uses deepseekHarness.sessionMode "managed", so a Host would be started on the '
+      + 'remote — and the browser this command opens is on the machine in front of you, whose '
+      + 'loopback is not the remote\'s. Run `dsh web` on the machine you are sitting at and paste '
+      + 'its line with "DeepSeek Harness: Use Launch URL".',
+  },
   /** The mode switch landed, but an existing Host was adopted instead of started. */
-  alreadyRunning:
-    'DeepSeek Harness: a Host was already answering on the configured port, so none was started — '
-    + 'and only the console of the process that started it printed its launch URL. Stop that Host '
-    + 'and run this command again to have the extension start one it can open.',
+  alreadyRunning: (target: string): string =>
+    `DeepSeek Harness: a Host was already answering on ${target}, so none was started — and only `
+    + 'the console of the process that started it printed its launch URL. Stop that Host and run '
+    + 'this command again to have the extension start one it can open.',
+  /** Nothing was adopted and nothing started: say what the connect itself said. */
+  startFailed: (target: string, detail: string): string =>
+    `DeepSeek Harness: could not start a Host on ${target} to open the web UI. ${detail}`,
 } as const
+

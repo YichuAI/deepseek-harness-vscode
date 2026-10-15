@@ -308,41 +308,35 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   /**
    * Hand the harness web UI to the browser, token and all.
    *
-   * The harness gates its web UI per process, and only the launch URL carries
-   * the token that opens it, so this is never a link we can compose — it is one
-   * we have to hold. Which route holds one, and what to do when none does, is
+   * The harness gates its web UI per process, and only the launch URL carries the
+   * token that opens it, so this is never a link we can compose — it is one we
+   * have to hold. Which route holds one, and what to do when none does, is
    * `planOpenWebUi` in `app/session-mode.ts`; this function only executes the
    * answer.
    *
-   * The case that needed work is the `credentials` route, where there is
-   * genuinely no token: the cookie is minted from the signing secret, the
-   * browser has nothing, and the token is `randomBytes` living in the Host's
-   * memory. That used to be the end of the conversation. It is not, because a
-   * Host *this* extension starts prints a URL into a console we own — so the
-   * command offers to become that instead of explaining the constraint and
-   * stopping.
+   * The mistake this command used to make was to read the mode as a single bit
+   * about minting. That bit is off for `managed` *and* for `paste`, so a `paste`
+   * window was advised to switch to `managed` and a `managed` window to switch to
+   * the mode it was already in — while the one state that actually needed the
+   * offer, `credentials` with no live cookie, fell into the same sentence as both.
+   * The mode now travels in as the mode, and every branch ends in a step.
    */
   const openWebUi = async (): Promise<void> => {
     // `auth.browserUrl()` is the pasted route and declines unless it is still
     // authenticated for the Host we are pointed at; `launcherForMode()` is only
-    // defined in the mode that starts a Host.
+    // defined in the mode that starts a Host. The mode itself goes in because
+    // two of the three routes start nothing and their remedies are opposites.
+    const target = client.target()
+    const at = `${target.host}:${String(target.port)}`
     const adopted = auth.browserUrl()
     const plan = planOpenWebUi({
       launchedUrl: launcherForMode()?.launchUrl(),
       adoptedUrl: adopted,
-      mintedLocally: auth.localMintEnabled(),
+      mode: cfg.sessionMode,
       authenticated: auth.isReady(),
       remoteName: vscode.env.remoteName,
     })
 
-    if (plan.kind === 'explain-minted-remote') {
-      void vscode.window.showInformationMessage(OPEN_WEB_UI_TEXT.mintedRemote)
-      return
-    }
-    if (plan.kind === 'explain-no-url') {
-      void vscode.window.showInformationMessage(OPEN_WEB_UI_TEXT.noUrl)
-      return
-    }
     if (plan.kind === 'open') {
       if (plan.url === adopted) {
         log.info('openWebUI: reopening the launch URL this session was adopted from')
@@ -351,27 +345,70 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       return
     }
 
-    const { message, action, dismiss } = OPEN_WEB_UI_TEXT.offerManaged
-    if (await vscode.window.showInformationMessage(message, action, dismiss) !== action) return
+    if (plan.kind === 'explain-remote') {
+      void vscode.window.showInformationMessage(OPEN_WEB_UI_TEXT.explainRemote[plan.reason])
+      return
+    }
 
-    // Persisted rather than remembered for one call: the Host this starts has to
-    // outlive the next connect, and a reconnect that still read `credentials`
-    // would abandon it. The config-change handler notices the new mode and
-    // reconnects on its own; awaiting a connect here is what makes the launch
-    // URL exist (or provably not exist) by the time we look for it.
-    await vscode.workspace
-      .getConfiguration(SECTION)
-      .update('sessionMode', 'managed', vscode.ConfigurationTarget.Global)
+    // `paste` is the one mode whose whole contract is "hand me the line `dsh web`
+    // printed", so the command runs the ask rather than describing it.
+    if (plan.kind === 'ask-launch-url') {
+      const { message, action, dismiss } = OPEN_WEB_UI_TEXT.askLaunchUrl
+      if (await vscode.window.showInformationMessage(message(at), action, dismiss) === action) {
+        await vscode.commands.executeCommand(USE_LAUNCH_URL_COMMAND)
+      }
+      return
+    }
+
+    if (plan.kind === 'offer-managed') {
+      const { action, dismiss } = OPEN_WEB_UI_TEXT.offerManaged
+      const message = plan.reason === 'minted'
+        ? OPEN_WEB_UI_TEXT.offerManaged.minted
+        : OPEN_WEB_UI_TEXT.offerManaged.noSession(at)
+      if (await vscode.window.showInformationMessage(message, action, dismiss) !== action) return
+
+      // Persisted rather than remembered for one call: the Host this starts has to
+      // outlive the next connect, and a reconnect that still read `credentials`
+      // would abandon it. The config-change handler notices the new mode and
+      // reconnects on its own; awaiting a connect here is what makes the launch
+      // URL exist (or provably not exist) by the time we look for it.
+      await vscode.workspace
+        .getConfiguration(SECTION)
+        .update('sessionMode', 'managed', vscode.ConfigurationTarget.Global)
+    }
+
+    // `start-managed` arrives here already in the mode that owns the child's
+    // console; `offer-managed` arrives after switching into it. Both need the
+    // same thing: a connect that starts the Host and yields a URL.
     await controller.doConnect({ force: true })
-
     const url = launcher.launchUrl()
     if (url === undefined) {
-      // A Host already answering on the configured port is adopted, not started,
-      // so nothing on this machine ever printed a URL for it.
-      void vscode.window.showWarningMessage(OPEN_WEB_UI_TEXT.alreadyRunning)
+      // Two different failures wear the same empty result. A Host already
+      // answering on the port was *adopted*, so nothing on this machine printed a
+      // URL for it; anything else means we could not start one at all, and the
+      // controller's own diagnosis says why.
+      void vscode.window.showWarningMessage(
+        getState().connection === 'connected'
+          ? OPEN_WEB_UI_TEXT.alreadyRunning(at)
+          : OPEN_WEB_UI_TEXT.startFailed(at, connectFailureText()),
+      )
       return
     }
     await vscode.env.openExternal(vscode.Uri.parse(url))
+  }
+
+  /**
+   * One line for "why the Host would not start", from the controller's own record.
+   *
+   * Read at the moment of failure rather than reconstructed: the connect path
+   * already decided whether `dsh` is missing, whether `npx` was worth trying, and
+   * what the Host said, and a second guess here would eventually disagree with it.
+   */
+  const connectFailureText = (): string => {
+    const { lastError, hint } = controller.diagnostics()
+    if (hint !== undefined && hint.fix !== '') return hint.fix
+    if (lastError !== undefined && lastError !== '') return lastError
+    return 'Start `dsh web` yourself and paste its line with "DeepSeek Harness: Use Launch URL".'
   }
 
   /**

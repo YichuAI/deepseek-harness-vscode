@@ -837,7 +837,7 @@ media/
 ├── origin.png                # 源材料（VSIX 排除）
 └── markdown-it.umd.min.js    # VSIX 打包用（114 KB）
 scripts/
-├── protocol-test.ts          # 假 harness 协议测试，504 项断言（无需 dsh web）
+├── protocol-test.ts          # 假 harness 协议测试，512 项断言（无需 dsh web）
 ├── protocol-probe.ts         # 向真实 `dsh web` 询问它实际提供什么
 ├── check-versions.ts         # 每一个版本展示面都必须和 package.json 一致
 ├── integration-test.ts       # 针对真实 dsh 的闭环测试

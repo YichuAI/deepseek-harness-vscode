@@ -64,7 +64,7 @@ import {
 } from '../src/harness/discovery.ts'
 import { findHarnessWorkspace } from '../src/workspace/binding.ts'
 import { buildDiagnosticsReport, NPM_INSTALL_COMMAND, classifyConnectFailure, installGuidanceFor, redact } from '../src/app/diagnosis.ts'
-import { OPEN_WEB_UI_TEXT, SESSION_MODES, parseSessionMode, planOpenWebUi, traitsOf } from '../src/app/session-mode.ts'
+import { OPEN_WEB_UI_TEXT, SESSION_MODES, parseSessionMode, planOpenWebUi, traitsOf, type SessionMode } from '../src/app/session-mode.ts'
 import {
   DEFAULT_LAUNCH_COMMAND, NPX_FALLBACK_COMMAND, desktopInstallCandidates, envWithAugmentedPath,
   findLaunchUrl, launchPlan, redactLaunchUrl, usesNpx,
@@ -3156,17 +3156,18 @@ async function main(): Promise<void> {
 
     // ─── Open Web UI: the decision, not the plumbing ──────────────────────────
     //
-    // This command could only ever refuse, because every branch ended in the same
-    // sentence about the per-process token. The token really is out of reach on
-    // the `credentials` route — it is `randomBytes` in a WeakMap inside the Host
-    // process, so the signing secret cannot reproduce it, and minting a *cookie*
-    // locally does not help a browser that has none. So the fix is not to invent
-    // a token; it is to notice that a Host started from here prints one, and to
-    // offer that rather than explain the constraint.
+    // This command used to answer every state with the same sentence about the
+    // per-process token. The token really is out of reach on `credentials` — it
+    // is `randomBytes` in a WeakMap inside the Host process, so the signing
+    // secret cannot reproduce it — but which *remedy* applies is a question about
+    // the mode, and the first fix answered it with a boolean that is `false` for
+    // two modes with opposite remedies. These assertions are mostly about that
+    // distinction: `paste` asks, `managed` starts, `credentials` offers the
+    // switch, and none of them ever leaves the user with only a description.
     const openInput = {
       launchedUrl: undefined as string | undefined,
       adoptedUrl: undefined as string | undefined,
-      mintedLocally: false,
+      mode: 'credentials' as SessionMode,
       authenticated: true,
       remoteName: undefined as string | undefined,
     }
@@ -3187,34 +3188,75 @@ async function main(): Promise<void> {
       }),
       { kind: 'open', url: 'http://127.0.0.1:3080/?token=new' })
 
+    // The regression this pair exists for. `paste` and `managed` both report
+    // `localMintEnabled() === false`, so a plan keyed on that bit cannot tell
+    // them apart — and their remedies are opposites. Both were told to switch to
+    // `managed`: the wrong answer for a window already in it, and advice to start
+    // a process for a window whose whole point is that it starts none.
+    eq('a paste window is asked for the URL, not told to start a Host',
+      planOpenWebUi({ ...openInput, mode: 'paste' }), { kind: 'ask-launch-url' })
+    eq('...and a pasted URL still wins over asking again',
+      planOpenWebUi({ ...openInput, mode: 'paste', adoptedUrl: 'http://127.0.0.1:3081/?token=b' }),
+      { kind: 'open', url: 'http://127.0.0.1:3081/?token=b' })
+    eq('a managed window is told the Host will be started, not asked to change mode',
+      planOpenWebUi({ ...openInput, mode: 'managed', authenticated: false }),
+      { kind: 'start-managed' })
+    eq('a managed window with a URL in hand just opens it',
+      planOpenWebUi({ ...openInput, mode: 'managed', launchedUrl: 'http://127.0.0.1:3080/?token=a' }),
+      { kind: 'open', url: 'http://127.0.0.1:3080/?token=a' })
+
     eq('the credentials route offers to start a Host instead of refusing',
-      planOpenWebUi({ ...openInput, mintedLocally: true }), { kind: 'offer-managed' })
+      planOpenWebUi({ ...openInput }), { kind: 'offer-managed', reason: 'minted' })
+    // The state that produced the reported bug: `credentials`, and the stored
+    // cookie gone (expired, or minted from a credential file that has since
+    // changed). The old plan called that a dead end and printed a description of
+    // the constraint, because it read "no cookie" as "nothing can be done". It is
+    // the opposite — the Host we start issues its own session, so this is exactly
+    // the state the offer is for. The explanation differs, the offer does not.
+    eq('a credentials session with no live cookie is offered a Host, not turned away',
+      planOpenWebUi({ ...openInput, authenticated: false }),
+      { kind: 'offer-managed', reason: 'no-session' })
+
     // Over Remote-SSH a Host starts on the *remote's* loopback while the browser
     // this command opens is on the laptop, so the URL it printed would not load.
-    // A button that cannot work is worse than a sentence that says why.
-    eq('...and explains itself instead when the window is remote',
-      planOpenWebUi({ ...openInput, mintedLocally: true, remoteName: 'ssh-remote' }),
-      { kind: 'explain-minted-remote' })
-    // Already-connected is the precondition for the offer; without it the
-    // missing cookie is the actual problem and a Host does not fix it.
-    eq('an unauthenticated credentials session is not offered a Host',
-      planOpenWebUi({ ...openInput, mintedLocally: true, authenticated: false }),
-      { kind: 'explain-no-url' })
-    eq('a managed launch that has no URL yet explains rather than offers itself',
-      planOpenWebUi({ ...openInput }), { kind: 'explain-no-url' })
+    // A button that cannot work is worse than a sentence that says why — and
+    // which sentence depends on which mode was about to start one.
+    eq('the minted route explains itself instead when the window is remote',
+      planOpenWebUi({ ...openInput, remoteName: 'ssh-remote' }),
+      { kind: 'explain-remote', reason: 'minted' })
+    eq('...and so does the managed one, naming its own reason',
+      planOpenWebUi({ ...openInput, mode: 'managed', remoteName: 'ssh-remote' }),
+      { kind: 'explain-remote', reason: 'managed' })
+    // Asking for a URL is not starting a process, so it survives the remote check
+    // that disqualifies the other two.
+    eq('a remote paste window is still just asked for the URL',
+      planOpenWebUi({ ...openInput, mode: 'paste', remoteName: 'ssh-remote' }),
+      { kind: 'ask-launch-url' })
 
     // The copy is the part the user actually reads, and the wording is what made
     // the old command look broken: it described the constraint perfectly and
     // never mentioned that anything could lift it.
     check('the offer says both halves — no token here, one if we start the Host',
-      /no token/.test(OPEN_WEB_UI_TEXT.offerManaged.message)
-      && /started from here prints one/.test(OPEN_WEB_UI_TEXT.offerManaged.message))
+      /no token/.test(OPEN_WEB_UI_TEXT.offerManaged.minted)
+      && /started from here prints one/.test(OPEN_WEB_UI_TEXT.offerManaged.minted))
+    check('the no-cookie wording names the Host it could not find a session for',
+      OPEN_WEB_UI_TEXT.offerManaged.noSession('127.0.0.1:3081').includes('127.0.0.1:3081')
+      && /prints one/.test(OPEN_WEB_UI_TEXT.offerManaged.noSession('127.0.0.1:3081')))
     check('the offered button names the mode it switches to',
       /managed/.test(OPEN_WEB_UI_TEXT.offerManaged.action))
+    check('the paste prompt says which mode it is honouring and where the line comes from',
+      /paste/.test(OPEN_WEB_UI_TEXT.askLaunchUrl.message('127.0.0.1:3081'))
+      && /dsh web/.test(OPEN_WEB_UI_TEXT.askLaunchUrl.message('127.0.0.1:3081'))
+      && OPEN_WEB_UI_TEXT.askLaunchUrl.message('127.0.0.1:3081').includes('127.0.0.1:3081'))
     check('the remote wording names the machine the Host would land on',
-      /the remote/.test(OPEN_WEB_UI_TEXT.mintedRemote))
+      /the remote/.test(OPEN_WEB_UI_TEXT.explainRemote.minted)
+      && /the remote/.test(OPEN_WEB_UI_TEXT.explainRemote.managed))
     check('an already-running Host is reported as adopted, not as a failed launch',
-      /already answering/.test(OPEN_WEB_UI_TEXT.alreadyRunning))
+      /already answering/.test(OPEN_WEB_UI_TEXT.alreadyRunning('127.0.0.1:3081'))
+      && OPEN_WEB_UI_TEXT.alreadyRunning('127.0.0.1:3081').includes('127.0.0.1:3081'))
+    check('a launch that failed quotes the controller rather than guessing',
+      OPEN_WEB_UI_TEXT.startFailed('127.0.0.1:3081', 'dsh is not on PATH')
+        .includes('dsh is not on PATH'))
 
     // Upstream ships a desktop build for Windows and Apple Silicon, and nothing
     // for Linux or Intel Macs. Getting this wrong sends somebody to a download

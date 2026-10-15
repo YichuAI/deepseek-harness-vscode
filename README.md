@@ -57,7 +57,7 @@
 | **What it needs** | VS Code ≥ 1.85, and a Harness on the **same machine** as the window. That is the one hard constraint; see [Remote development](#remote-development). |
 | **Install** | `code --install-extension lucasliang.harness-connector-deepseek` |
 
-**Jump to:** [What it does](#what-it-does) · [What's new](#whats-new-in-v026) · [Quick start](#quick-start) · [Configuration](#configuration) · [Commands](#commands) · [Remote development](#remote-development) · [Limitations](#limitations) · [Development](#development) · [Design](#design-dsh-owns-the-write-the-plugin-observes-and-tells)
+**Jump to:** [What it does](#what-it-does) · [What's new](#whats-new-in-v027) · [Quick start](#quick-start) · [Configuration](#configuration) · [Commands](#commands) · [Remote development](#remote-development) · [Limitations](#limitations) · [Development](#development) · [Design](#design-dsh-owns-the-write-the-plugin-observes-and-tells)
 
 ## What it does
 
@@ -96,34 +96,36 @@ VS Code reads the workspaces and sessions the browser already has, and continues
 
 *Top left: the same session at the same moment in two clients — nothing imported, mirrored or forked. Top right: "Diff" is VS Code's own diff editor, not a webview imitation — the left side is the text the plugin captured before the change. Bottom left: the conversation lives in the sidebar, tool rows and changed-files card included. Bottom right: the browser side, untouched.*
 
-## What's new in v0.2.6
+## What's new in v0.2.7
 
-**"Open Web UI" was a dead end. It now either opens the web UI or offers to start the one thing that can.**
+**v0.2.6 taught "Open Web UI" to offer to start a Host. It then asked the wrong question about which route you were on, and the two routes that start nothing got each other's advice.**
 
-The command could only ever print a sentence. The Harness gates its web UI per process: `/` answers `401` unless the request carries the token `dsh web` printed when it started, and that token is `randomBytes` held in the Host's process memory — nothing on disk can reproduce it. Two of the three session routes do end up holding a URL anyway (a Host the extension started; a launch URL you pasted) and both of those already worked. The `credentials` route never holds one, and that was the whole answer for everyone.
+The offer was gated on `auth.localMintEnabled()`, a boolean that is `false` for `managed` *and* for `paste`. Both of them were therefore answered with the `credentials` sentence: a window set to `paste` was told to switch to `managed`, and a window already in `managed` was told to switch to the mode it was already in. Worse, the state that actually needed the offer — `credentials`, with the stored cookie gone — fell into the same sentence, because the plan read "no cookie" as "nothing to be done". It is the opposite of that: the Host the offer starts issues its own session, which is exactly why minting a cookie was never the obstacle.
 
-No token can still be invented on that third route. What changed is that there is now something to do about it, because a Host started **from here** prints its URL into a console this extension owns.
+The mode now travels into the decision as the mode, and each one ends in a step:
 
-| | |
-| --- | --- |
-| **A URL we hold opens directly** | Either a Host the extension launched, or the launch URL this session was adopted from. The launch URL is a per-process secret, not a single-use grant, so it is still good when you need it. |
-| **No URL on this route? It offers to start one** | From `credentials`, the command asks whether to switch `sessionMode` to `managed`, persists the change, reconnects, and opens the URL the Host it started printed. Persisted rather than remembered for one call, because that Host has to outlive the next connect. |
-| **…except over Remote-SSH, where it says why not** | A Host started in a remote window listens on the **remote's** loopback while the browser this command opens is on the machine in front of you. A button that cannot work is worse than a sentence that explains it. |
-| **And it stops calling an adopted Host a failed launch** | If something is already answering on the configured port then nothing was started and no URL exists — that is now reported as what happened rather than as an error. |
+| `sessionMode` | No token-bearing URL in hand | Why |
+| --- | --- | --- |
+| `paste` | Asks for the launch URL, running the same prompt as *Use Launch URL* | Being asked is the mode, not a fallback — it reads no credential file and starts no process, which is the reason to choose it. It is also the only route that starts nothing, so it is the only one that still works over Remote-SSH. |
+| `managed` | Starts the Host and opens the URL it printed | The mode already owns that child's console. It was simply never asked to use it. |
+| `credentials` | Offers to switch to `managed` and open, and persists the change | There is no token on this route either way — minting produces a cookie, and the launch token is `randomBytes` in the Host's memory. Starting a Host fixes both the "minted" and the "no cookie at all" case, so the offer is the same and only the explanation differs. |
+| any, over Remote-SSH | Says why, and which machine to run `dsh web` on | A Host would land on the remote's loopback while the browser is on the machine in front of you. |
 
-The branching lives in `planOpenWebUi`, a pure function over plain values in `src/app/session-mode.ts`, so the decision is asserted without a VS Code host. The copy is asserted too, because the old wording describing the constraint accurately and never mentioning that anything could lift it is precisely what made the command look broken.
+**A failed launch now quotes the failure instead of blurring it.** An empty result covers two different things: a Host already answering on the port — adopted, so nothing on this machine ever printed a URL for it — and a Host that could not be started at all. Those shared one message. The second now carries the fix line from the same classifier the status row uses.
+
+The branching is still `planOpenWebUi`, a pure function over plain values in `src/app/session-mode.ts`, asserted without a VS Code host. What changed is its input: it takes the mode, not a bit about minting. A bit that is `false` for two modes with opposite remedies is how a command ends up looking broken while every string in it is true.
 
 Verification:
 
 | Gate | Result |
 | --- | --- |
-| Protocol assertions (fake Harness, no `dsh` needed) | **504 assertions** — 493 in v0.2.5, 461 in v0.2.3 |
+| Protocol assertions (fake Harness, no `dsh` needed) | **512 assertions** — 504 in v0.2.6, 493 in v0.2.5, 461 in v0.2.3 |
 | End-to-end chains | **96** across 3 of 5 chains; the other two still print as unwritten rather than being quietly omitted |
 | Live Host (`0.2.0-rc.2`, `127.0.0.1:3080`) | **41/41** |
 
-The ten new assertions cover the four outcomes of that decision, the order between them (a URL we hold beats one we would have to create), and the four strings a user actually reads. Chains 1 and 4 — the two whose absence the changelog of v0.0.4→v0.1.1 justifies fixing, because the panel did not start and "Allow" never actually allowed — run for real against a fake Host that can be killed and restarted, with no VS Code Extension Host needed. The live run includes one assertion that reads which session a question was attributed to off a real `user-questions/request`, because that is the only place the fact can be measured rather than reasoned about.
+The eight new assertions are mostly about the distinction that was missing: `paste` is asked rather than told to start something, `managed` starts rather than told to change modes, `credentials` with no live cookie is offered a Host rather than turned away, and a remote `paste` window still gets asked — the remote check disqualifies the remedies that start a process, not the one that asks. Chains 1 and 4 — the two whose absence the changelog of v0.0.4→v0.1.1 justifies fixing, because the panel did not start and "Allow" never actually allowed — run for real against a fake Host that can be killed and restarted, with no VS Code Extension Host needed.
 
-The version before this one — v0.2.5 — was documentation only: the trailer, the development story, and the first Marketplace listing since 0.2.0. v0.2.4 carries the three fixes a day of testing turned up, and v0.2.3 brought per-hunk undo and *Explain / Fix / Review*. Their notes, and every earlier release's, are in [CHANGELOG.md](./CHANGELOG.md).
+The version before this one — v0.2.6 — made the same command offer to start a Host for the first time, and shipped the trailer and the development story. v0.2.5 was documentation only, and the first Marketplace listing since 0.2.0. Their notes, and every earlier release's, are in [CHANGELOG.md](./CHANGELOG.md).
 
 ## Requirements
 
@@ -163,7 +165,7 @@ The version before this one — v0.2.5 — was documentation only: the trailer, 
    Or install the VSIX from [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases):
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.2.6.vsix
+   code --install-extension harness-connector-deepseek-0.2.7.vsix
    ```
 
 3. Nothing to configure. In the default `sessionMode: "credentials"` the extension
@@ -332,7 +334,7 @@ that implements the `0.2.1-alpha.2` server half exactly — so no `dsh web` is
 needed:
 
 ```bash
-npm run protocol-test    # 504 assertions: the two-stream transport split
+npm run protocol-test    # 512 assertions: the two-stream transport split
                          # ($events allowlist vs session/follow), wire negotiation
                          # (dot/slash, cookie gating, event socket), auth and cookie
                          # derivation, {args} payloads (wrapped vs bare), the approval
@@ -449,9 +451,9 @@ npm run build            # esbuild → dist/extension.js
 npm run watch            # rebuild on change
 npm run typecheck
 npm run check-versions   # every version surface must agree with package.json
-npm run protocol-test    # 504 protocol assertions against a fake harness
+npm run protocol-test    # 512 protocol assertions against a fake harness
 npm run protocol-probe   # report what your real dsh web exposes
-npm run package          # → harness-connector-deepseek-0.2.6.vsix
+npm run package          # → harness-connector-deepseek-0.2.7.vsix
 ```
 
 Press `F5` in VS Code to launch an Extension Development Host with the extension loaded.
@@ -564,7 +566,7 @@ That leaves four arrangements, and the honest state of each:
 
 | Scenario | State | What it means |
 | --- | --- | --- |
-| **Local window** | ✅ **Measured** | The supported arrangement and the only one exercised here: **41/41** integration assertions against a live Host on `127.0.0.1:3080`, on top of the 504 protocol and 96 end-to-end assertions. |
+| **Local window** | ✅ **Measured** | The supported arrangement and the only one exercised here: **41/41** integration assertions against a live Host on `127.0.0.1:3080`, on top of the 512 protocol and 96 end-to-end assertions. |
 | **Remote-SSH** | ⚠️ **Not measured** — this machine has no SSH server (`localhost:22` refuses) | Works when the Harness runs **on the remote host**. The extension declares `extensionKind: "workspace"`, so in a remote window its extension host runs on the remote machine: it reads that machine's `$DSH_HOME`, probes that machine's listener table, and talks to that machine's loopback. A Harness on your laptop is unreachable from there — and should be, since the workspace it would edit is not the one you have open. |
 | **WSL** | ⚠️ **Not measured** — `wsl.exe` is on this sandbox's program blacklist, so it could not be launched at all | Same shape as Remote-SSH: run `dsh web` inside the distro. VS Code hands WSL over as an ordinary remote, so nothing WSL-specific is needed. |
 | **Dev container** | ⚠️ **Not measured** — `docker` is not installed here | Same shape again: run `dsh web` inside the container. The container's own `$DSH_HOME/.credentials.yaml` is what gets read, not the host's. |

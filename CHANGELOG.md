@@ -5,6 +5,71 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),  
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.7] — 2026-10-15
+
+Tagline: **the offer from v0.2.6 was gated on a boolean that cannot tell `paste` from `managed`,
+so the two routes that start nothing got each other's advice.**
+Tagline (ZH): **v0.2.6 那个提议被一个分不开 `paste` 和 `managed` 的布尔值卡着，于是两个什么都不启动的模式，各拿到了对方的建议。**
+
+### Fixed
+
+- **`Open Web UI` no longer answers a `paste` window with `credentials` advice.** The v0.2.6 offer
+  was gated on `auth.localMintEnabled()`, which is `false` for `managed` *and* for `paste`. Both
+  were therefore answered with the sentence written for the third mode: a window set to `paste`
+  was told to switch to `managed`, and a window already in `managed` was told to switch to the
+  mode it was already in. The reported symptom was exactly this — a wall of text instead of a
+  browser.
+
+- **…and it no longer turns away `credentials` windows that have no live cookie.** That state fell
+  into the same sentence, because the plan read "no cookie" as "nothing to be done" and returned
+  `explain-no-url`. It is the opposite: the cookie is not what the web UI needs, and the Host the
+  offer starts issues its own session. This is the case the offer was built for, and it now
+  reaches it whether or not a cookie happens to be present.
+
+- **A failed launch quotes the failure instead of blurring it.** An empty `launchUrl()` covers two
+  different things — a Host already answering on the port (adopted, so nothing here ever printed a
+  URL for it) and a Host that could not be started at all — and they shared one message. The
+  second now carries the `fix` line from the same classifier the status row uses
+  (`controller.diagnostics()`), rather than a second guess that would eventually disagree with it.
+
+### Changed
+
+- **`planOpenWebUi` takes the mode, not a bit about minting.** `OpenWebUiInput.mintedLocally` is
+  gone, `mode: SessionMode` replaces it, and the branch reads `traitsOf(mode)` — which is the
+  single place that already knew what each mode permits. A boolean that is `false` for two modes
+  with opposite remedies is how a command comes to look broken while every string in it is true.
+
+- **The outcomes are now five, and none of them is a dead end.** `open`; `offer-managed` (with
+  `reason: 'minted' | 'no-session'`, which changes the explanation and not the offer); and, new,
+  `ask-launch-url` for `paste` — the mode whose contract is "hand me the line", so the command now
+  runs the same prompt as *Use Launch URL* instead of describing it — and `start-managed` for
+  `managed`, which starts the Host and opens the URL it printed. `explain-remote` survives for the
+  one case a button cannot fix, and now says which machine to run `dsh web` on, per mode.
+  `explain-no-url` and `explain-minted-remote` are removed with the reasoning that produced them.
+
+- **`OPEN_WEB_UI_TEXT` moved to functions where the target matters.** "Which Host" is the first
+  thing a reader needs and the last thing a fixed sentence can say, so the three texts that name
+  it take it as an argument.
+
+### Notes
+
+- **The advertised assertion count moved with it** — 504 → **512** across both READMEs, both
+  `ARCHITECTURE` files and `RELEASE.md`. `check-versions` compares all of them, which is why the
+  earlier versions' numbers are left standing inside their own entries.
+- **The eight new assertions are mostly about the distinction that was missing**: `paste` is asked
+  rather than told to start something; `managed` starts rather than told to change modes;
+  `credentials` with no live cookie is offered a Host rather than turned away; and a remote
+  `paste` window is still asked, because the remote check disqualifies the remedies that start a
+  process and not the one that asks.
+- **The dependency chores stay deferred.** `RELEASE.md` says to fold the `@vscode/vsce` bump into
+  "the next version that edits a shipped file anyway", and this is one — but the pin that matters
+  for publishing is already in `release.yml` (`npx vsce@4.0.1-3`), and a release that changes
+  behaviour and one that changes the packager should not be the same release. Same for pinning
+  `@types/vscode` to the engine floor: it needs its own verification run against 1.85, which is
+  recorded in the dependency appendix.
+- Gates on this tree: `tsc --noEmit` clean, protocol-test **512**, e2e **96** (3 of 5 chains),
+  live integration **41/41**, `check-versions` green.
+
 ## [0.2.6] — 2026-10-14
 
 Tagline: **a command that could only refuse now does the thing, because the Host that prints a

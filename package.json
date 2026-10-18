@@ -2,7 +2,7 @@
   "name": "harness-connector-deepseek",
   "displayName": "DeepSeek Harness Connector",
   "description": "Native VS Code client for DeepSeek Harness. Connect to your existing local Harness instance and continue the same workspaces and sessions directly inside VS Code.",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "publisher": "lucasliang",
   "license": "MIT",
   "repository": {
@@ -81,6 +81,11 @@
       {
         "command": "deepseekHarness.useLaunchUrl",
         "title": "DeepSeek Harness: Use Launch URL",
+        "category": "DeepSeek Harness"
+      },
+      {
+        "command": "deepseekHarness.useAutoSession",
+        "title": "DeepSeek Harness: Switch to Auto and Connect",
         "category": "DeepSeek Harness"
       },
       {
@@ -317,17 +322,19 @@
         "deepseekHarness.sessionMode": {
           "type": "string",
           "enum": [
+            "auto",
             "credentials",
             "managed",
             "paste"
           ],
           "enumDescriptions": [
-            "Read the signing secret from `$DSH_HOME/.credentials.yaml` and mint the browser-session cookie locally. No paste and no extra process, but it means reading a file that also holds your model API keys.",
+            "Mint the cookie from `$DSH_HOME/.credentials.yaml` when that file is readable, and start `dsh web` when nothing is listening on the configured port. Works on a machine nobody prepared, and leaves an already-running Host exactly as it was.",
+            "Read the signing secret from `$DSH_HOME/.credentials.yaml` and mint the browser-session cookie locally, and nothing else. No paste and no extra process, but it means reading a file that also holds your model API keys — and it cannot work unless a Host is already running.",
             "Start `dsh web` yourself and take the launch URL it prints. Nothing is read from disk and nothing is pasted — this extension starts a process for you, which is why it is opt-in. The command it runs is `deepseekHarness.launchCommand`, and the Host it started is stopped when the window closes.",
             "Ask you for the launch URL printed by a `dsh web` you started. Nothing is read from disk and nothing is started. Run \"DeepSeek Harness: Use Launch URL\" to supply it."
           ],
-          "default": "credentials",
-          "markdownDescription": "How this extension obtains a Harness session.\n\n- `credentials` — mint the cookie locally from `$DSH_HOME/.credentials.yaml` (the original behaviour).\n- `managed` — start `dsh web` and read the launch URL off its console. No credential file, no paste.\n- `paste` — you start it and hand over the URL.\n\nThe default is unchanged from earlier versions; the other two are deliberate opt-ins. See the README's \"How the session is obtained\"."
+          "default": "auto",
+          "markdownDescription": "How this extension obtains a Harness session.\n\n- `auto` — mint if a credential is readable, and start a Host if nothing is listening (the default).\n- `credentials` — mint the cookie locally from `$DSH_HOME/.credentials.yaml`, and nothing else. Requires a Host you started.\n- `managed` — start `dsh web` and read the launch URL off its console. No credential file, no paste.\n- `paste` — you start it and hand over the URL.\n\n`auto` is the default from v0.2.8. Authentication and reachability are different problems: minting answers \"who are you\" and says nothing about whether anything is listening, so the old `credentials` default was a valid credential for a Host that did not exist. See the README's \"How the session is obtained\"."
         },
         "deepseekHarness.launchCommand": {
           "type": "string",

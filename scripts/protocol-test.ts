@@ -64,7 +64,7 @@ import {
 } from '../src/harness/discovery.ts'
 import { findHarnessWorkspace } from '../src/workspace/binding.ts'
 import { buildDiagnosticsReport, NPM_INSTALL_COMMAND, classifyConnectFailure, installGuidanceFor, redact } from '../src/app/diagnosis.ts'
-import { OPEN_WEB_UI_TEXT, SESSION_MODES, parseSessionMode, planOpenWebUi, traitsOf, type SessionMode } from '../src/app/session-mode.ts'
+import { AUTO_SESSION_COMMAND, DEFAULT_SESSION_MODE, OPEN_WEB_UI_TEXT, SESSION_MODES, USE_LAUNCH_URL_COMMAND, parseSessionMode, planOpenWebUi, traitsOf, type SessionMode } from '../src/app/session-mode.ts'
 import {
   DEFAULT_LAUNCH_COMMAND, NPX_FALLBACK_COMMAND, desktopInstallCandidates, envWithAugmentedPath,
   findLaunchUrl, launchPlan, redactLaunchUrl, usesNpx,
@@ -3135,14 +3135,25 @@ async function main(): Promise<void> {
   // machine, and `scripts/launch-probe.ts` is where it is observed instead of
   // asserted. These are the parts where being wrong is silent.
   {
-    eq('the three modes round-trip', SESSION_MODES.map((m) => parseSessionMode(m)), ['credentials', 'managed', 'paste'])
+    eq('the four modes round-trip', SESSION_MODES.map((m) => parseSessionMode(m)), ['auto', 'credentials', 'managed', 'paste'])
+    // The default moved in v0.2.8 and this assertion is where that lives. A
+    // fallback to `credentials` would resurrect the failure this release is
+    // about: a valid credential for a Host that nobody started.
+    eq('the default is the mode that can also start one', DEFAULT_SESSION_MODE, 'auto')
     eq('an unknown mode falls back to the default rather than throwing',
-      parseSessionMode('nonsense'), 'credentials')
-    eq('...and so does an absent one', parseSessionMode(undefined), 'credentials')
-    eq('...and so does a non-string one', parseSessionMode(3), 'credentials')
+      parseSessionMode('nonsense'), 'auto')
+    eq('...and so does an absent one', parseSessionMode(undefined), 'auto')
+    eq('...and so does a non-string one', parseSessionMode(3), 'auto')
+    // The old value still has to mean what it said, because settings written by
+    // earlier versions are still on disk and nothing migrates them.
+    eq('...but an explicit credentials is still honoured, not rewritten',
+      parseSessionMode('credentials'), 'credentials')
 
+    const automatic = traitsOf('auto')
+    check('auto is both halves — it may mint and it may start',
+      automatic.allowLocalMint && automatic.startsHost && !automatic.expectsPaste)
     const creds = traitsOf('credentials')
-    check('credentials is the only mode that reads the credential file',
+    check('credentials only mints: authentication is not reachability',
       creds.allowLocalMint && !creds.startsHost && !creds.expectsPaste)
     // The whole reason `managed` exists: if it fell back to reading
     // `$DSH_HOME/.credentials.yaml` anyway, choosing it would buy nothing and
@@ -3201,6 +3212,11 @@ async function main(): Promise<void> {
     eq('a managed window is told the Host will be started, not asked to change mode',
       planOpenWebUi({ ...openInput, mode: 'managed', authenticated: false }),
       { kind: 'start-managed' })
+    // `auto` needs no offer and no switch: it is already the mode that starts one.
+    // This is the v0.2.8 default, so it is also what a fresh install reaches.
+    eq('auto with nothing in hand simply starts the Host',
+      planOpenWebUi({ ...openInput, mode: 'auto', authenticated: false }),
+      { kind: 'start-managed' })
     eq('a managed window with a URL in hand just opens it',
       planOpenWebUi({ ...openInput, mode: 'managed', launchedUrl: 'http://127.0.0.1:3080/?token=a' }),
       { kind: 'open', url: 'http://127.0.0.1:3080/?token=a' })
@@ -3226,7 +3242,13 @@ async function main(): Promise<void> {
       { kind: 'explain-remote', reason: 'minted' })
     eq('...and so does the managed one, naming its own reason',
       planOpenWebUi({ ...openInput, mode: 'managed', remoteName: 'ssh-remote' }),
-      { kind: 'explain-remote', reason: 'managed' })
+      { kind: 'explain-remote', reason: 'startsHost' })
+    // `auto` starts a Host too, so it lands on the same answer — and the copy
+    // has to name the mode that is actually configured, not the one that usually
+    // does the starting.
+    eq('auto on a remote explains itself with the same reason',
+      planOpenWebUi({ ...openInput, mode: 'auto', remoteName: 'ssh-remote' }),
+      { kind: 'explain-remote', reason: 'startsHost' })
     // Asking for a URL is not starting a process, so it survives the remote check
     // that disqualifies the other two.
     eq('a remote paste window is still just asked for the URL',
@@ -3250,7 +3272,14 @@ async function main(): Promise<void> {
       && OPEN_WEB_UI_TEXT.askLaunchUrl.message('127.0.0.1:3081').includes('127.0.0.1:3081'))
     check('the remote wording names the machine the Host would land on',
       /the remote/.test(OPEN_WEB_UI_TEXT.explainRemote.minted)
-      && /the remote/.test(OPEN_WEB_UI_TEXT.explainRemote.managed))
+      && /the remote/.test(OPEN_WEB_UI_TEXT.explainRemote.startsHost('managed')))
+    // Two modes can start a Host, so the sentence quotes the configured one.
+    // Saying "managed" to somebody who set "auto" is the same class of mistake as
+    // telling a `paste` window to switch to `managed` — it sends them to a
+    // setting that is not the one they are on.
+    check('...and quotes whichever starting mode is actually configured',
+      OPEN_WEB_UI_TEXT.explainRemote.startsHost('auto').includes('"auto"')
+      && OPEN_WEB_UI_TEXT.explainRemote.startsHost('managed').includes('"managed"'))
     check('an already-running Host is reported as adopted, not as a failed launch',
       /already answering/.test(OPEN_WEB_UI_TEXT.alreadyRunning('127.0.0.1:3081'))
       && OPEN_WEB_UI_TEXT.alreadyRunning('127.0.0.1:3081').includes('127.0.0.1:3081'))
@@ -3308,6 +3337,33 @@ async function main(): Promise<void> {
       const h = classifyConnectFailure('fetch failed', { ...bare, sessionMode: 'paste' })
       return /Use Launch URL/.test(h.fix) && !/to "paste"/.test(h.fix)
     })())
+
+    // ─── the repair button, which used to be a field nobody drew ──────────────
+    //
+    // Every hint filled `repair` in and the panel rendered only `install`, so the
+    // remedy was one line of prose and the button that could have been there did
+    // not exist. The panel now draws it, which makes these ids load-bearing: a
+    // hint that names a command nobody registered is a button that does nothing.
+    eq('credentials offers the mode that can actually start a Host',
+      classifyConnectFailure('fetch failed', { ...bare, sessionMode: 'credentials' }).repair?.command,
+      AUTO_SESSION_COMMAND)
+    eq('paste offers the paste prompt instead of a mode switch',
+      classifyConnectFailure('fetch failed', { ...bare, sessionMode: 'paste' }).repair?.command,
+      USE_LAUNCH_URL_COMMAND)
+    // `auto` and `managed` already tried the launcher and failed at it, so there
+    // is no setting left to change — retrying is the only honest button.
+    eq('a mode that already tried the launcher offers a retry',
+      classifyConnectFailure('fetch failed', { ...bare, sessionMode: 'auto' }).repair?.command,
+      'deepseekHarness.connect')
+    check('...and every repair carries a label, because the button shows nothing else',
+      ['credentials', 'paste', 'auto'].every((m) => {
+        const r = classifyConnectFailure('fetch failed',
+          { ...bare, sessionMode: m as 'credentials' | 'paste' | 'auto' }).repair
+        return r !== undefined && r.label.length > 0
+      }))
+    check('an auto window is not told to switch to a mode it is already in',
+      !/sessionMode to "auto"/.test(
+        classifyConnectFailure('fetch failed', { ...bare, sessionMode: 'auto' }).fix))
   }
 
   // ─── O3. the launcher's pure parts ─────────────────────────────────────────

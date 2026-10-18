@@ -11,6 +11,9 @@
  *
  * So the boolean becomes a mode, and each mode names what it does:
  *
+ *   auto        — mint if a credential is there, and start a Host if one is not.
+ *                 The default: it is the only mode that works on a machine
+ *                 nobody prepared, without being told which case it is in.
  *   credentials — read the signing secret, mint the cookie locally.
  *                 Zero friction. Requires reading a file full of secrets.
  *   managed     — start `dsh web` ourselves and take the launch URL it prints.
@@ -18,9 +21,24 @@
  *   paste       — ask the user for the launch URL of a Host they started.
  *                 Reads nothing, starts nothing. Requires a copy-paste.
  *
- * The default stays `credentials` so that upgrading changes nothing for anyone
- * already using the extension, and the two new routes are explicit choices
- * rather than surprises.
+ * `auto` is not a fourth behaviour so much as the observation that the first
+ * three are a *sequence*, not a menu. Authentication and reachability are
+ * different problems: minting answers "who are you" and says nothing about
+ * whether anything is listening, so `credentials` on a machine with no Host is
+ * a working credential for a Host that does not exist. That was the default
+ * until v0.2.8, which is why a fresh install used to fail its first connection
+ * and then ask the user to edit a setting to fix it.
+ *
+ * `auto` therefore takes the credential route when the file is readable and
+ * falls through to starting a Host when nothing answers — which is what
+ * `controller.runConnect` already did, gated only by whether a launcher exists.
+ * It is safe to be the default because the mint step runs first: an existing
+ * Host is adopted with the cookie it always wanted, byte for byte the old
+ * behaviour, and only a machine with nothing on the port reaches the launcher.
+ *
+ * `managed` keeps `allowLocalMint: false` deliberately — choosing it means
+ * choosing not to read the credential file, and silently reading it anyway
+ * would defeat the reason for the choice.
  *
  * Kept separate from both `extension.ts` (which reads configuration) and
  * `controller.ts` (which acts on it) so that "what does this mode actually
@@ -28,10 +46,21 @@
  * VS Code host.
  */
 
-export type SessionMode = 'credentials' | 'managed' | 'paste'
+export type SessionMode = 'auto' | 'credentials' | 'managed' | 'paste'
 
 /** In the order they appear in the settings dropdown. */
-export const SESSION_MODES: readonly SessionMode[] = ['credentials', 'managed', 'paste']
+export const SESSION_MODES: readonly SessionMode[] = ['auto', 'credentials', 'managed', 'paste']
+
+/**
+ * The mode used when nothing is configured, or when what is configured is not
+ * one of the four.
+ *
+ * `auto` rather than `credentials`: the extension can only talk to a Host that
+ * exists, and of the four modes only the ones that start a Host can make one
+ * exist. A default that assumes a Host the user has not started is a default
+ * that fails on first run.
+ */
+export const DEFAULT_SESSION_MODE: SessionMode = 'auto'
 
 /** What a mode implies for the rest of the system. */
 export interface SessionModeTraits {
@@ -53,10 +82,14 @@ export interface SessionModeTraits {
 export function parseSessionMode(raw: unknown): SessionMode {
   return typeof raw === 'string' && (SESSION_MODES as readonly string[]).includes(raw)
     ? (raw as SessionMode)
-    : 'credentials'
+    : DEFAULT_SESSION_MODE
 }
 
 const TRAITS: Record<SessionMode, SessionModeTraits> = {
+  // Both halves of the first two modes, in the order that does no harm: minting
+  // first means an already-running Host is adopted exactly as before, and the
+  // launcher is only reached when nothing is listening at all.
+  auto: { allowLocalMint: true, startsHost: true, expectsPaste: false },
   credentials: { allowLocalMint: true, startsHost: false, expectsPaste: false },
   // Deliberately not `allowLocalMint`: a managed launch hands us a fresh cookie
   // from a Host we own, and reading the credential file anyway would defeat the
@@ -71,6 +104,15 @@ export function traitsOf(mode: SessionMode): SessionModeTraits {
 
 /** The palette command that completes the `paste` route. */
 export const USE_LAUNCH_URL_COMMAND = 'deepseekHarness.useLaunchUrl'
+
+/**
+ * The one action that turns "nothing is listening" into a working session.
+ *
+ * Registered as a command rather than inlined into the status row so that the
+ * diagnosis can *name* it: `ConnectionHint.repair` is a command id, and the
+ * panel runs whatever id it is handed.
+ */
+export const AUTO_SESSION_COMMAND = 'deepseekHarness.useAutoSession'
 
 /**
  * Everything `Open Web UI` can know about what we hold, as plain values.
@@ -105,10 +147,10 @@ export type OpenWebUiPlan =
   | { kind: 'offer-managed'; reason: 'minted' | 'no-session' }
   /** `paste`: asking is the mode, not a fallback. */
   | { kind: 'ask-launch-url' }
-  /** `managed`: start the Host, then read the URL it printed. */
+  /** `auto` / `managed`: start the Host, then read the URL it printed. */
   | { kind: 'start-managed' }
   /** A Host started here would land on a loopback this browser cannot reach. */
-  | { kind: 'explain-remote'; reason: 'minted' | 'managed' }
+  | { kind: 'explain-remote'; reason: 'minted' | 'startsHost' }
 
 /**
  * Decide what `DeepSeek Harness: Open Web UI` should do, instead of refusing.
@@ -145,7 +187,7 @@ export function planOpenWebUi(input: OpenWebUiInput): OpenWebUiPlan {
   // command opens is on the laptop. A button that cannot work is worse than a
   // sentence that says why.
   if (input.remoteName !== undefined) {
-    return { kind: 'explain-remote', reason: traits.startsHost ? 'managed' : 'minted' }
+    return { kind: 'explain-remote', reason: traits.startsHost ? 'startsHost' : 'minted' }
   }
 
   if (traits.startsHost) return { kind: 'start-managed' }
@@ -195,8 +237,9 @@ export const OPEN_WEB_UI_TEXT = {
       + 'there is no token for this command to add to a URL. Starting a Host here would start it on '
       + 'the remote, whose loopback this browser cannot reach — run `dsh web` on the machine you are '
       + 'sitting at and paste its URL with "DeepSeek Harness: Use Launch URL".',
-    managed:
-      'This window uses deepseekHarness.sessionMode "managed", so a Host would be started on the '
+    /** Names the mode, because two of them start a Host and the advice is the same for both. */
+    startsHost: (mode: SessionMode): string =>
+      `This window uses deepseekHarness.sessionMode "${mode}", so a Host would be started on the `
       + 'remote — and the browser this command opens is on the machine in front of you, whose '
       + 'loopback is not the remote\'s. Run `dsh web` on the machine you are sitting at and paste '
       + 'its line with "DeepSeek Harness: Use Launch URL".',

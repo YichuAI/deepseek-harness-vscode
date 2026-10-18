@@ -15,7 +15,7 @@
  * can be asserted directly instead of inferred from a rendered string.
  */
 
-import type { SessionMode } from './session-mode.ts'
+import { AUTO_SESSION_COMMAND, USE_LAUNCH_URL_COMMAND, type SessionMode } from './session-mode.ts'
 
 export type ConnectionFailureKind =
   /** Nothing is listening where we looked. */
@@ -202,14 +202,16 @@ export interface ConnectFailureContext {
  */
 function alternatives(mode: SessionMode | undefined): string {
   switch (mode) {
+    case 'auto':
+      return 'You are in "auto", which is the mode that does both: it minted from $DSH_HOME/.credentials.yaml if it could, then tried to start a Host. If it still could not start one, the command it runs is deepseekHarness.launchCommand — or install a Host above and this window connects itself.'
     case 'credentials':
-      return 'Or set deepseekHarness.sessionMode to "managed" (this extension starts a Host and takes its launch URL) or "paste" (you start it and hand over the URL) — neither one reads $DSH_HOME/.credentials.yaml.'
+      return 'Or set deepseekHarness.sessionMode to "auto" (mint from $DSH_HOME/.credentials.yaml when it is readable, and start a Host when nothing is listening) or "paste" (you start it and hand over the URL) — "credentials" only authenticates, it never starts a Host.'
     case 'managed':
-      return 'Or switch deepseekHarness.sessionMode to "credentials" to mint a session from $DSH_HOME/.credentials.yaml, or run "DeepSeek Harness: Use Launch URL" after starting the Host yourself.'
+      return 'Or switch deepseekHarness.sessionMode to "auto" to also mint from $DSH_HOME/.credentials.yaml when a Host is already running, or run "DeepSeek Harness: Use Launch URL" after starting the Host yourself.'
     case 'paste':
-      return 'Or set deepseekHarness.sessionMode to "managed" so this extension starts a Host for you, or to "credentials" to mint a session from $DSH_HOME/.credentials.yaml.'
+      return 'Or set deepseekHarness.sessionMode to "auto" and this extension starts a Host for you, or to "credentials" to mint a session from $DSH_HOME/.credentials.yaml.'
     default:
-      return 'Or set deepseekHarness.sessionMode: "managed" starts the Host for you, "credentials" mints a session from $DSH_HOME/.credentials.yaml, and "paste" takes a launch URL you copy yourself.'
+      return 'Or set deepseekHarness.sessionMode: "auto" does both (mint from $DSH_HOME/.credentials.yaml when it is readable, start a Host when nothing answers), "credentials" only mints, "managed" only starts, and "paste" takes a launch URL you copy yourself.'
   }
 }
 
@@ -366,7 +368,10 @@ export function classifyConnectFailure(message: string, ctx: ConnectFailureConte
         }
       }
 
-      // Nothing was attempted: managed launch is off, which is the default.
+      // Nothing was attempted: only `auto` and `managed` reach the launcher, and
+      // this branch is what the other two get. It used to say "which is the
+      // default" — true until v0.2.8, and the reason a fresh install failed
+      // before the user had done anything wrong.
       const credentials = ctx.credentialsUnavailable === true
         ? ' $DSH_HOME/.credentials.yaml could not be read either, so there is no stored session to fall back on.'
         : ''
@@ -378,8 +383,16 @@ export function classifyConnectFailure(message: string, ctx: ConnectFailureConte
       // build is not installed on a headless box in the first place.
       const howToStart = ctx.remote !== undefined && ctx.remote !== ''
         ? `Start the Host on that machine — a terminal there running "dsh web" — or set `
-          + 'deepseekHarness.sessionMode to "managed" and this extension starts it on the remote for you.'
+          + 'deepseekHarness.sessionMode to "auto" and this extension starts it on the remote for you.'
         : 'Open the desktop app, or run "dsh web" in a terminal.'
+      // The repair is the *specific* next step, not "try the thing that just
+      // failed". `credentials` cannot start a Host by design, so a Retry button
+      // there offers the one action guaranteed not to help.
+      const repair = ctx.sessionMode === 'paste'
+        ? { command: USE_LAUNCH_URL_COMMAND, label: 'Paste launch URL' }
+        : ctx.sessionMode === 'credentials'
+          ? { command: AUTO_SESSION_COMMAND, label: 'Switch to auto' }
+          : { command: 'deepseekHarness.connect', label: 'Retry' }
       return {
         kind,
         title: 'Harness is not running',
@@ -387,7 +400,7 @@ export function classifyConnectFailure(message: string, ctx: ConnectFailureConte
         fix:
           `Nothing is listening on ${where}.${credentials}${paste} ` +
           `${howToStart} ${alternatives(ctx.sessionMode)}`,
-        repair: { command: 'deepseekHarness.connect', label: 'Retry' },
+        repair,
         ...(install !== undefined ? { install } : {}),
       }
     }

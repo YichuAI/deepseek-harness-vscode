@@ -5,6 +5,53 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.8] — 2026-10-18
+
+版本定位：**默认模式是一份「给一个不存在的 Host 用的」有效凭据——而诊断从写出来那天就在点名的修复，从来没有被画出来。**
+
+### 变更
+
+- **`deepseekHarness.sessionMode` 默认改成 `auto`，不再是 `credentials`。** 这两个是不同问题的
+  答案：`credentials` 决定*你是谁*，对「有没有东西在听」一个字都没说。所以在没人跑过 `dsh web`
+  的机器上，第一次连接只能失败——而状态行给的补救是一段话，结尾是「或者把 `sessionMode` 设成……」。
+  `auto` 在 `$DSH_HOME/.credentials.yaml` 读得到时铸签，没有东西应答时落下去起一个 Host。
+- **`auto` 敢当默认，靠的是顺序。** 铸签发生在 `client.connect` 内部、排在前面，所以已经在跑的
+  Host 拿到的是老版本一直在发的那个 cookie——同一个代码路径，一个字节都不差。只有端口上真的
+  什么都没有，才会走到 `launcherForMode()`。能用的环境，行为一点没变。
+- **配置里显式写着的 `credentials` 不会被改写。** 有些机器永远有 Host 在跑，那些用户是故意选的
+  这个模式；一个悄悄把人迁走的版本，等于替别人做了一个它并没有事实依据的决定。
+  `parseSessionMode` 仍然接受四个值，只有**未知或缺失**的值才落到新默认。
+
+### 修复
+
+- **`ConnectionHint.repair` 是个没人画的字段。** 每条 hint 都填了它——大多数失败填
+  `diagnostics`，远程没装 `dsh` 时填 `installHost`——`protocol-test.ts` 还断言了每条都点名一个
+  命令，于是代码和测试互相点头，而面板只渲染了 `hint.install` 和一行 `hint.fix`。状态行现在会
+  从它画出第二个按钮，由 `AppController.runHintRepair` 执行诊断点名的那条命令。webview 仍然
+  不提供任何命令 id，所以这个按钮不是注入面。
+- **修复建议换成了真的能帮上忙的那一条。** `runtime-not-running` 过去对任何模式都答
+  `connect`——一个提供「保证没用」的动作的重试按钮，因为 `credentials` 按设计就起不了 Host。
+  现在 `credentials` 指向 `useAutoSession`，`paste` 指向粘贴框，只有启动器已经试过的模式还留着
+  `connect`。
+- **`alternatives()` 不再推荐读者已经在的模式。** `auto` 窗口被建议把 `sessionMode` 设成
+  `auto`——和 v0.2.7 在 `Open Web UI` 里修的那类错误同一类：点名读者当前状态的建议，读起来
+  就像根本没读。
+
+### 新增
+
+- **`DeepSeek Harness: Switch to Auto and Connect`**（`deepseekHarness.useAutoSession`）——
+  修复按钮执行的那条命令。先持久化模式，再强制重连，因为上一次尝试会让 client 以为自己已经试过。
+
+### 验证
+
+- 协议断言 **512 → 523**：默认值及其兜底、`auto` 确实是两半、显式 `credentials` 不被改写、
+  每种失败点名的修复真的能帮上忙、每条修复都带 label。
+- `tsc --noEmit` 干净；端到端 **96**（五条里的三条）；实机 Host **41/41**；`check-versions` 全绿。
+
+一句话：**那个按钮一直在数据结构里。** 失败分类器当初就是为了回答「用户接下来该做什么」而写的，
+从那天起它一直为每种失败产出一个 `{command, label}`——一个只有「有人会去按它」才说得通的结构。
+但没有人按。补救一直活在散文里，而唯一可能发现这件事的那条发布说明，把这个字段写成了它在工作。
+
 ## [0.2.7] — 2026-10-15
 
 版本定位：**v0.2.6 那个提议被一个分不开 `paste` 和 `managed` 的布尔值卡着，于是两个什么都不启动的模式，各拿到了对方的建议。**

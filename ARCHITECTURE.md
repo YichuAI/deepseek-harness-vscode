@@ -1053,7 +1053,7 @@ src/
 ├── app/
 │   ├── controller.ts         # AppController — orchestration
 │   ├── state.ts              # UiState shape + mapping helpers
-│   ├── session-mode.ts       # pure: the credentials/managed/paste traits
+│   ├── session-mode.ts       # pure: the auto/credentials/managed/paste traits
 │   └── diagnosis.ts          # pure: classify a failure, build the redacted report
 ├── conversation/
 │   ├── model.ts              # ConversationModel fold
@@ -1100,7 +1100,7 @@ media/
 ├── origin.png                # source material (excluded from VSIX)
 └── markdown-it.umd.min.js    # bundled for VSIX (114 KB)
 scripts/
-├── protocol-test.ts          # fake-harness protocol test, 512 assertions (no dsh web)
+├── protocol-test.ts          # fake-harness protocol test, 523 assertions (no dsh web)
 ├── protocol-probe.ts         # asks a live `dsh web` what it actually serves
 ├── check-versions.ts         # every version surface must agree with package.json
 ├── integration-test.ts       # closed-loop test against real dsh

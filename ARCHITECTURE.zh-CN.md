@@ -789,7 +789,7 @@ src/
 ├── app/
 │   ├── controller.ts         # AppController — 编排
 │   ├── state.ts              # UiState 形状 + 映射辅助
-│   ├── session-mode.ts       # 纯函数：credentials/managed/paste 三种模式的性状
+│   ├── session-mode.ts       # 纯函数：auto/credentials/managed/paste 四种模式的性状
 │   └── diagnosis.ts          # 纯函数：失败分类 + 脱敏诊断报告
 ├── conversation/
 │   ├── model.ts              # ConversationModel 折叠（"它说了什么"）
@@ -837,7 +837,7 @@ media/
 ├── origin.png                # 源材料（VSIX 排除）
 └── markdown-it.umd.min.js    # VSIX 打包用（114 KB）
 scripts/
-├── protocol-test.ts          # 假 harness 协议测试，512 项断言（无需 dsh web）
+├── protocol-test.ts          # 假 harness 协议测试，523 项断言（无需 dsh web）
 ├── protocol-probe.ts         # 向真实 `dsh web` 询问它实际提供什么
 ├── check-versions.ts         # 每一个版本展示面都必须和 package.json 一致
 ├── integration-test.ts       # 针对真实 dsh 的闭环测试

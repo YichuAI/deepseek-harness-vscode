@@ -191,6 +191,20 @@ export const CLIENT_SCRIPT = /* js */ `
     } else {
       installBtn.style.display = 'none';
     }
+    // The repair the diagnosis named, beside the install button and under the
+    // same rule: failed state only. It used to exist only as a field — every
+    // hint filled repair in and nothing ever drew it, so the one line of copy
+    // that said "or set sessionMode to …" was the whole remedy. hint.fix still
+    // carries the explanation; this is the doing.
+    const repairBtn = $('repair');
+    const repair = (conn === 'error' && hint) ? hint.repair : null;
+    if (repair) {
+      repairBtn.style.display = '';
+      repairBtn.textContent = repair.label;
+      repairBtn.title = hint.fix;
+    } else {
+      repairBtn.style.display = 'none';
+    }
     const hi = state.hostInfo;
     const bits = [];
     if (hi) {
@@ -1822,6 +1836,7 @@ export const CLIENT_SCRIPT = /* js */ `
   });
   $('connect').addEventListener('click', () => post({ type: 'connect' }));
   $('install').addEventListener('click', () => post({ type: 'install' }));
+  $('repair').addEventListener('click', () => post({ type: 'runRepair' }));
   $('new-session').addEventListener('click', () => post({ type: 'newSession' }));
   $('refresh').addEventListener('click', () => post({ type: 'refreshSessions' }));
   $('send').addEventListener('click', () => sendPrompt());

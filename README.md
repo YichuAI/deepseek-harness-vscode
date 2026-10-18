@@ -57,7 +57,7 @@
 | **What it needs** | VS Code ≥ 1.85, and a Harness on the **same machine** as the window. That is the one hard constraint; see [Remote development](#remote-development). |
 | **Install** | `code --install-extension lucasliang.harness-connector-deepseek` |
 
-**Jump to:** [What it does](#what-it-does) · [What's new](#whats-new-in-v027) · [Quick start](#quick-start) · [Configuration](#configuration) · [Commands](#commands) · [Remote development](#remote-development) · [Limitations](#limitations) · [Development](#development) · [Design](#design-dsh-owns-the-write-the-plugin-observes-and-tells)
+**Jump to:** [What it does](#what-it-does) · [What's new](#whats-new-in-v028) · [Quick start](#quick-start) · [Configuration](#configuration) · [Commands](#commands) · [Remote development](#remote-development) · [Limitations](#limitations) · [Development](#development) · [Design](#design-dsh-owns-the-write-the-plugin-observes-and-tells)
 
 ## What it does
 
@@ -67,7 +67,7 @@
 - **Right-click to ask about things.** Select code, a file in the explorer, or a change in the diff editor and the context menu offers *Explain / Fix / Review* — pre-filled with a prompt and the right `@` mention, including the line range for a selection.
 - **Opens VS Code's own editor for anything that is code.** A diff is a real diff editor; a path opens the file. Nothing is reimplemented in the webview.
 - **Finds the Host by itself**, including the desktop app, which starts its Host on an OS-assigned port that changes on every launch.
-- **Three ways to obtain a session, and you choose which.** Mint one from the harness's own credential store (zero configuration, but it means reading a file that also holds your API keys), let the extension start `dsh web` and take the launch URL it prints, or paste a launch URL yourself. See [How the session is obtained](#how-the-session-is-obtained).
+- **Four ways to obtain a session, and the default picks for you.** Mint one from the harness's own credential store (zero configuration, but it means reading a file that also holds your API keys), let the extension start `dsh web` and take the launch URL it prints, or paste a launch URL yourself. `auto` — the default since v0.2.8 — does the first and falls back to the second. See [How the session is obtained](#how-the-session-is-obtained).
 - **Starts no process unless you ask it to.** The default attaches to the Host you already have running.
 - **Can install its own Host, on whichever machine that means.** `DeepSeek Harness: Install Host` runs the install in the extension host — on a Remote-SSH window, that is the remote — so you never end up with `dsh` on your laptop and a remote that still has none. Managed launch also retries through `npx` by itself when `dsh` is not on `PATH`, which needs no install at all.
 
@@ -96,46 +96,50 @@ VS Code reads the workspaces and sessions the browser already has, and continues
 
 *Top left: the same session at the same moment in two clients — nothing imported, mirrored or forked. Top right: "Diff" is VS Code's own diff editor, not a webview imitation — the left side is the text the plugin captured before the change. Bottom left: the conversation lives in the sidebar, tool rows and changed-files card included. Bottom right: the browser side, untouched.*
 
-## What's new in v0.2.7
+## What's new in v0.2.8
 
-**v0.2.6 taught "Open Web UI" to offer to start a Host. It then asked the wrong question about which route you were on, and the two routes that start nothing got each other's advice.**
+**The default was a valid credential for a Host that did not exist.**
 
-The offer was gated on `auth.localMintEnabled()`, a boolean that is `false` for `managed` *and* for `paste`. Both of them were therefore answered with the `credentials` sentence: a window set to `paste` was told to switch to `managed`, and a window already in `managed` was told to switch to the mode it was already in. Worse, the state that actually needed the offer — `credentials`, with the stored cookie gone — fell into the same sentence, because the plan read "no cookie" as "nothing to be done". It is the opposite of that: the Host the offer starts issues its own session, which is exactly why minting a cookie was never the obstacle.
+`deepseekHarness.sessionMode` defaulted to `credentials`, which answers one question — who you are — and says nothing about whether anything is listening. On a machine where nobody had run `dsh web`, the first connect failed, and the status row answered with a paragraph that ended in "or set `sessionMode` to …". The extension knew what was wrong and could have fixed it with the click that was already on screen.
 
-The mode now travels into the decision as the mode, and each one ends in a step:
+| | |
+| --- | --- |
+| **`auto` is the default** | Mint from `$DSH_HOME/.credentials.yaml` when it is readable, and start a Host when nothing answers. Authentication and reachability were being treated as one question; they are two. |
+| **The repair is a button now** | `ConnectionHint.repair` has been defined since the failure classifier was written, filled in by every hint, and asserted by the protocol test — and never drawn. The panel rendered `install` and a line of prose, so the remedy was a sentence about a setting rather than a control that changes it. |
 
-| `sessionMode` | No token-bearing URL in hand | Why |
+`auto` is safe to be the default because of the order it runs in: the mint happens first, so an already-running Host is adopted with exactly the cookie earlier versions sent, byte for byte. Only a port with nothing on it reaches the launcher. For a working setup, nothing changes.
+
+For a broken one it is the difference between reading a diagnosis and pressing it:
+
+| `sessionMode` | The repair button | Why that one |
 | --- | --- | --- |
-| `paste` | Asks for the launch URL, running the same prompt as *Use Launch URL* | Being asked is the mode, not a fallback — it reads no credential file and starts no process, which is the reason to choose it. It is also the only route that starts nothing, so it is the only one that still works over Remote-SSH. |
-| `managed` | Starts the Host and opens the URL it printed | The mode already owns that child's console. It was simply never asked to use it. |
-| `credentials` | Offers to switch to `managed` and open, and persists the change | There is no token on this route either way — minting produces a cookie, and the launch token is `randomBytes` in the Host's memory. Starting a Host fixes both the "minted" and the "no cookie at all" case, so the offer is the same and only the explanation differs. |
-| any, over Remote-SSH | Says why, and which machine to run `dsh web` on | A Host would land on the remote's loopback while the browser is on the machine in front of you. |
+| `credentials` | **Switch to auto** | It cannot start a Host by design, so "Retry" would offer the one action guaranteed not to help. |
+| `paste` | **Paste launch URL** | Being asked is the mode, not a fallback. |
+| `auto`, `managed` | **Retry** | The launcher was already tried; there is no setting left to change. |
 
-**A failed launch now quotes the failure instead of blurring it.** An empty result covers two different things: a Host already answering on the port — adopted, so nothing on this machine ever printed a URL for it — and a Host that could not be started at all. Those shared one message. The second now carries the fix line from the same classifier the status row uses.
-
-The branching is still `planOpenWebUi`, a pure function over plain values in `src/app/session-mode.ts`, asserted without a VS Code host. What changed is its input: it takes the mode, not a bit about minting. A bit that is `false` for two modes with opposite remedies is how a command ends up looking broken while every string in it is true.
+An explicit `credentials` on disk is still honoured rather than migrated — it is the right mode on a machine that always has a Host running, and a release should not overrule somebody who chose it.
 
 Verification:
 
 | Gate | Result |
 | --- | --- |
-| Protocol assertions (fake Harness, no `dsh` needed) | **512 assertions** — 504 in v0.2.6, 493 in v0.2.5, 461 in v0.2.3 |
+| Protocol assertions (fake Harness, no `dsh` needed) | **523 assertions** — 512 in v0.2.7, 504 in v0.2.6, 493 in v0.2.5 |
 | End-to-end chains | **96** across 3 of 5 chains; the other two still print as unwritten rather than being quietly omitted |
 | Live Host (`0.2.0-rc.2`, `127.0.0.1:3080`) | **41/41** |
 
-The eight new assertions are mostly about the distinction that was missing: `paste` is asked rather than told to start something, `managed` starts rather than told to change modes, `credentials` with no live cookie is offered a Host rather than turned away, and a remote `paste` window still gets asked — the remote check disqualifies the remedies that start a process, not the one that asks. Chains 1 and 4 — the two whose absence the changelog of v0.0.4→v0.1.1 justifies fixing, because the panel did not start and "Allow" never actually allowed — run for real against a fake Host that can be killed and restarted, with no VS Code Extension Host needed.
+The eleven new assertions are about the default and about the button existing at all: that `auto` is both halves, that an unknown or absent setting falls back to the mode that can start something, that an explicit `credentials` is not silently rewritten, that each failure names the repair which can actually help it, and that every repair carries a label — because the button shows nothing else.
 
-The version before this one — v0.2.6 — made the same command offer to start a Host for the first time, and shipped the trailer and the development story. v0.2.5 was documentation only, and the first Marketplace listing since 0.2.0. Their notes, and every earlier release's, are in [CHANGELOG.md](./CHANGELOG.md).
+The version before this one — v0.2.7 — fixed the same class of mistake in a different command: `Open Web UI` was reading the mode as a boolean about minting, which is `false` for two modes whose remedies are opposites. v0.2.6 made that command offer to start a Host at all. Their notes, and every earlier release's, are in [CHANGELOG.md](./CHANGELOG.md).
 
 ## Requirements
 
 - VS Code ≥ 1.85
-- A local `dsh web` (default port `3080`), either already running or started for you by `sessionMode: "managed"`.
+- A local `dsh web` (default port `3080`), either already running or started for you by the default `sessionMode: "auto"`.
 - The Harness must be on **the same machine as the VS Code window**. That is the one hard constraint; [Remote development](#remote-development) covers what it means for Remote-SSH, WSL and containers.
 
 ## Quick start
 
-1. Start Harness locally, unless you would rather the extension did it:
+1. Start Harness locally — or skip this step and let the extension do it (it is the default):
 
    ```bash
    dsh web
@@ -147,9 +151,9 @@ The version before this one — v0.2.6 — made the same command offer to start 
    you want both surfaces side by side. (The token is a per-process secret compared
    on every request, not a single-use grant, so reloading that URL keeps working.)
 
-   Skipping this step is a supported choice: set
-   `deepseekHarness.sessionMode` to `"managed"` and the extension starts the Host
-   itself and takes the URL off its console. See
+   Skipping this step is the default: `deepseekHarness.sessionMode` is `"auto"`,
+   so when nothing answers on the port the extension starts the Host itself and
+   takes the URL off its console. See
    [How the session is obtained](#how-the-session-is-obtained).
 
    Older builds serve `/api/*` unauthenticated and need no token at all — the
@@ -165,13 +169,14 @@ The version before this one — v0.2.6 — made the same command offer to start 
    Or install the VSIX from [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases):
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.2.7.vsix
+   code --install-extension harness-connector-deepseek-0.2.8.vsix
    ```
 
-3. Nothing to configure. In the default `sessionMode: "credentials"` the extension
-   auto-connects by reading the browser-session signing secret out of
-   `$DSH_HOME/.credentials.yaml` and minting the cookie itself — no token to paste.
-   Read [How the session is obtained](#how-the-session-is-obtained) for what that
+3. Nothing to configure. The default `sessionMode: "auto"` first does what
+   `credentials` does — read the browser-session signing secret out of
+   `$DSH_HOME/.credentials.yaml` and mint the cookie itself, with no token to paste
+   — and if nothing is listening, it starts `dsh web` instead. Read
+   [How the session is obtained](#how-the-session-is-obtained) for what that
    implies, and for the two modes that never open that file.
 
 4. Open a folder in VS Code that you want to bind to a Harness workspace.
@@ -187,15 +192,24 @@ The version before this one — v0.2.6 — made the same command offer to start 
 ### How the session is obtained
 
 The harness authenticates `/api/*` with a browser-session cookie, and there are
-exactly three ways to get one here. `deepseekHarness.sessionMode` picks which.
+four ways to get one here. `deepseekHarness.sessionMode` picks which.
 
-**`credentials` (default) — mint it locally.** `dsh web` keeps a persistent
+**`auto` (default) — mint if you can, start a Host if you cannot.** The two
+questions that looked like one: *who are you* is answered by minting from
+`$DSH_HOME/.credentials.yaml`, while *is anything listening* is answered by the
+socket. `auto` mints first and only reaches the launcher when the port answers
+nothing, so a machine that already has a Host running behaves exactly as it did
+before, and a machine nobody prepared gets one started. Modes below are the two
+halves, for when you want one of them and not the other.
+
+**`credentials` — mint it locally, and nothing else.** `dsh web` keeps a persistent
 signing secret in `$DSH_HOME/.credentials.yaml` (`client-connection/browser-session`).
 The cookie is an HMAC over `{version, authority, issuedAt, expiresAt}` keyed by that
 secret, the cookie carries no trace of the launch token, and the secret is created
 once and reused by every later `dsh web` process — so anything that can read the file
 can mint a byte-identical cookie. The extension reads it and mints the cookie itself.
-That is why there is nothing to paste.
+That is why there is nothing to paste. It never starts a Host: choosing this mode on
+a machine with nothing running is a decision to run `dsh web` yourself.
 
 **`managed` — let the extension start the Host.** It runs `deepseekHarness.launchCommand`
 (`dsh web --port 0` by default), reads the launch URL off the console of a process it
@@ -206,7 +220,7 @@ stopped when the window closes.
 `dsh web: http://…` line, and run **DeepSeek Harness: Use Launch URL**. Nothing is read
 from disk and nothing is started.
 
-About `credentials`, since it is the default and it is a real privilege:
+About minting, since the default may do it and it is a real privilege:
 
 - **That same file holds your model API keys.** Reading it is **permission-equivalent**
   to full authority over this harness home. It is not an escalation, and it does not
@@ -239,7 +253,7 @@ silent fallback.
 | Situation | What to do |
 | --- | --- |
 | `$DSH_HOME` points elsewhere and the env var is not set | set `DSH_HOME` for the VS Code process, or start `dsh web` with the default home |
-| `dsh web` has never run in this harness home | run it once — the `client-connection/browser-session` record is created then, or switch to `sessionMode: "managed"` |
+| `dsh web` has never run in this harness home | run it once — the `client-connection/browser-session` record is created then, or set `sessionMode: "managed"` so only the launcher is used |
 | No `dsh` command on `PATH` under `managed` | managed launch retries through `npx` first; if that fails too, the panel offers **Install Host**; on Windows and macOS the desktop app also registers `dsh` for you |
 | `managed` ran but `dsh` exited immediately | usually the port is already taken — the log carries the child's own last lines |
 | You are in `paste` mode and have not pasted yet | run **DeepSeek Harness: Use Launch URL** |
@@ -257,7 +271,7 @@ authority that minted it).
 | `deepseekHarness.host` | `127.0.0.1` | Exactly three values are accepted — `127.0.0.1`, `localhost`, `::1`. Any other value is refused before a socket is opened. See [Remote development](#remote-development). |
 | `deepseekHarness.port` | `3080` | The default `dsh web` port. Override if you started `dsh web --port <n>`. |
 | `deepseekHarness.showSystemMessages` | `false` | Show plugin-injected system messages (runtime context, approval notices). Hidden by default; toggle live with the `SYS` button in the webview header. |
-| `deepseekHarness.sessionMode` | `credentials` | How a session is obtained. `credentials` mints the cookie locally from `$DSH_HOME/.credentials.yaml`; `managed` starts `dsh web` and takes its launch URL; `paste` waits for you to supply one. See [How the session is obtained](#how-the-session-is-obtained). |
+| `deepseekHarness.sessionMode` | `auto` | How a session is obtained. `auto` mints locally from `$DSH_HOME/.credentials.yaml` when it is readable and starts `dsh web` when nothing answers; `credentials` only mints; `managed` only starts; `paste` waits for you to supply a launch URL. See [How the session is obtained](#how-the-session-is-obtained). |
 | `deepseekHarness.launchCommand` | `dsh web --port 0` | The command `sessionMode: "managed"` runs. The default binds an OS-assigned port, because managed launch reads the real port off the launch URL and pinning one only adds a way to fail. Run through a shell, so wrappers and `npx` work. If the **default** command is not found, managed launch retries once through `npx` — which on a remote fetches and starts the Host there; a command you set yourself is never substituted. Read only when a Host is started; changing it does not disturb a running one. |
 | `deepseekHarness.autoApproveApprovals` | `false` | Automatically answer incoming approval requests with `allowed-once`. Off by default — enabling it means tools run without per-call confirmation. |
 | `deepseekHarness.autoDiscover` | `true` | When the configured port answers nothing, look for a dsh Host elsewhere on loopback (pinned `webserver.port` first, then the OS listener table, confirmed by the Host's own refusal text). Needed by the desktop app, which starts its Host on an OS-assigned port. The discovered port is session-local and never written to your settings. |
@@ -268,6 +282,7 @@ authority that minted it).
 - `DeepSeek Harness: Diagnostics` — one document with the runtime version, this extension's version, connection state, which capabilities the Host actually serves, and the last error. Offers a **Copy redacted report** action; nothing credential-bearing is included
 - `DeepSeek Harness: Clear Session Token` — drop the stored cookie and reconnect (a fresh one is minted under `credentials`, or a fresh Host is started under `managed`; use it before switching `dsh web` instances)
 - `DeepSeek Harness: Use Launch URL` — paste the `dsh web: http://…` line a Host printed and adopt its session. The `paste` route, usable in any mode
+- `DeepSeek Harness: Switch to Auto and Connect` — what the status row's repair button runs: persist `sessionMode: "auto"` and force a reconnect, which is the one-click answer to "nothing is listening" under `credentials`
 - `DeepSeek Harness: New Session` (in the active workspace)
 - `DeepSeek Harness: Refresh Sessions`
 - `DeepSeek Harness: Move to Right Side Bar` — dock the view in the secondary side bar (like Chat) so it stops competing with the file explorer. Also available via the ⇲ button in the webview header.
@@ -334,7 +349,7 @@ that implements the `0.2.1-alpha.2` server half exactly — so no `dsh web` is
 needed:
 
 ```bash
-npm run protocol-test    # 512 assertions: the two-stream transport split
+npm run protocol-test    # 523 assertions: the two-stream transport split
                          # ($events allowlist vs session/follow), wire negotiation
                          # (dot/slash, cookie gating, event socket), auth and cookie
                          # derivation, {args} payloads (wrapped vs bare), the approval
@@ -451,9 +466,9 @@ npm run build            # esbuild → dist/extension.js
 npm run watch            # rebuild on change
 npm run typecheck
 npm run check-versions   # every version surface must agree with package.json
-npm run protocol-test    # 512 protocol assertions against a fake harness
+npm run protocol-test    # 523 protocol assertions against a fake harness
 npm run protocol-probe   # report what your real dsh web exposes
-npm run package          # → harness-connector-deepseek-0.2.7.vsix
+npm run package          # → harness-connector-deepseek-0.2.8.vsix
 ```
 
 Press `F5` in VS Code to launch an Extension Development Host with the extension loaded.
@@ -566,7 +581,7 @@ That leaves four arrangements, and the honest state of each:
 
 | Scenario | State | What it means |
 | --- | --- | --- |
-| **Local window** | ✅ **Measured** | The supported arrangement and the only one exercised here: **41/41** integration assertions against a live Host on `127.0.0.1:3080`, on top of the 512 protocol and 96 end-to-end assertions. |
+| **Local window** | ✅ **Measured** | The supported arrangement and the only one exercised here: **41/41** integration assertions against a live Host on `127.0.0.1:3080`, on top of the 523 protocol and 96 end-to-end assertions. |
 | **Remote-SSH** | ⚠️ **Not measured** — this machine has no SSH server (`localhost:22` refuses) | Works when the Harness runs **on the remote host**. The extension declares `extensionKind: "workspace"`, so in a remote window its extension host runs on the remote machine: it reads that machine's `$DSH_HOME`, probes that machine's listener table, and talks to that machine's loopback. A Harness on your laptop is unreachable from there — and should be, since the workspace it would edit is not the one you have open. |
 | **WSL** | ⚠️ **Not measured** — `wsl.exe` is on this sandbox's program blacklist, so it could not be launched at all | Same shape as Remote-SSH: run `dsh web` inside the distro. VS Code hands WSL over as an ordinary remote, so nothing WSL-specific is needed. |
 | **Dev container** | ⚠️ **Not measured** — `docker` is not installed here | Same shape again: run `dsh web` inside the container. The container's own `$DSH_HOME/.credentials.yaml` is what gets read, not the host's. |

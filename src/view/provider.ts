@@ -148,6 +148,15 @@ export type WebviewAction =
    * command would be an injection surface bought for nothing.
    */
   | { type: 'install' }
+  /**
+   * Press the repair the diagnosis named, next to the install affordance.
+   *
+   * Also payload-free, and for the same reason: `ConnectionHint.repair` holds
+   * the command id, it is decided extension-side, and a webview that could name
+   * a command could run any of them. The button only ever says "the one you
+   * already decided on".
+   */
+  | { type: 'runRepair' }
   // ─── `@` completion (host-served fileReferences/list) ──────
   | { type: 'refsQuery'; query: string }
   // ─── composer attachments (images ride the prompt; files are staged) ──

@@ -5,6 +5,65 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),  
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.8] — 2026-10-18
+
+Tagline: **the default mode was a valid credential for a Host that did not exist — and the
+repair the diagnosis had been naming since it was written was never drawn.**
+Tagline (ZH): **默认模式是一份「给一个不存在的 Host 用的」有效凭据——而诊断从写出来那天就在点名的修复，从来没有被画出来。**
+
+### Changed
+
+- **`deepseekHarness.sessionMode` now defaults to `auto`, not `credentials`.** The two are answers
+  to different questions: `credentials` decides *who you are* and says nothing about whether
+  anything is listening, so on a machine where nobody had run `dsh web` the first connect could
+  only fail — and the status row's remedy was a paragraph ending in "or set `sessionMode` to …".
+  `auto` mints from `$DSH_HOME/.credentials.yaml` when that file is readable and falls through to
+  starting a Host when nothing answers.
+- **`auto` is safe as a default because of the order it runs in.** The mint happens first, inside
+  `client.connect`, so an already-running Host is adopted with exactly the cookie earlier versions
+  sent — byte for byte, same code path. Only a port with nothing on it reaches
+  `launcherForMode()`. A working setup sees no change at all.
+- **An explicit `credentials` on disk is still honoured and never rewritten.** There are machines
+  that always have a Host running and whose owners chose that mode on purpose; a release that
+  silently migrated them would be overruling a decision it does not have the facts to make.
+  `parseSessionMode` still accepts all four values, and only an *unknown or absent* one falls back
+  to the new default.
+
+### Fixed
+
+- **`ConnectionHint.repair` was a field nothing drew.** Every hint filled it in — `diagnostics`
+  for most failures, `installHost` on a remote with no `dsh` — and `protocol-test.ts` asserted
+  that each one named a command, so the code and the tests agreed with each other while the panel
+  rendered only `hint.install` and one line of `hint.fix`. The status row now draws a second
+  button from it, and `AppController.runHintRepair` runs whichever command the diagnosis named.
+  The webview still supplies no command id, so the button is not an injection surface.
+- **The repair is now the one that can actually help.** `runtime-not-running` used to answer every
+  mode with `connect` — a Retry offering the action guaranteed not to help, since `credentials`
+  cannot start a Host by design. It now names `useAutoSession` for `credentials`, the paste prompt
+  for `paste`, and keeps `connect` only where the launcher was already tried.
+- **`alternatives()` no longer offers the mode the reader is already in.** An `auto` window was
+  told to set `sessionMode` to `auto`, which is the same class of mistake v0.2.7 fixed in
+  `Open Web UI`: advice that names the reader's current state reads as if nothing was read at all.
+
+### Added
+
+- **`DeepSeek Harness: Switch to Auto and Connect`** (`deepseekHarness.useAutoSession`) — the
+  command the repair button runs. Persists the mode, then forces a reconnect, because the previous
+  attempt leaves the client convinced it has already tried.
+
+### Verification
+
+- Protocol assertions **512 → 523**: the default and its fallback, `auto` being both halves, an
+  explicit `credentials` not being rewritten, every failure naming a repair that can help it, and
+  every repair carrying a label.
+- `tsc --noEmit` clean; e2e **96** (3 of 5 chains); live Host **41/41**; `check-versions` green.
+
+Spotlight: **the button was in the data structure the whole time.** The failure classifier was
+written to answer "what should the user do", and it has been producing a `{command, label}` pair
+for every failure since — a shape that only makes sense if something is going to press it. Nothing
+did. The remedy lived in prose, and the one release note that could have caught it described the
+field as if it worked.
+
 ## [0.2.7] — 2026-10-15
 
 Tagline: **the offer from v0.2.6 was gated on a boolean that cannot tell `paste` from `managed`,

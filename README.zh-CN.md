@@ -56,7 +56,7 @@
 | **它需要什么** | VS Code ≥ 1.85，以及一个与窗口在**同一台机器**上的 Harness。这是唯一的硬约束，见[《远程开发》](#远程开发)。 |
 | **怎么装** | `code --install-extension lucasliang.harness-connector-deepseek` |
 
-**快捷跳转：**[它能做什么](#它能做什么) · [新特性](#v027-新特性) · [快速开始](#快速开始) · [配置](#配置) · [命令](#命令) · [远程开发](#远程开发) · [限制](#限制) · [开发](#开发) · [设计](#设计写盘归-dsh插件只观察与告知)
+**快捷跳转：**[它能做什么](#它能做什么) · [新特性](#v028-新特性) · [快速开始](#快速开始) · [配置](#配置) · [命令](#命令) · [远程开发](#远程开发) · [限制](#限制) · [开发](#开发) · [设计](#设计写盘归-dsh插件只观察与告知)
 
 ## 它能做什么
 
@@ -66,7 +66,7 @@
 - **右键就能问。** 选中一段代码、在资源管理器里右键一个文件、或者在 diff 编辑器里右键一处改动，右键菜单就会给出 *解释 / 修复 / 审查*——连提示词和正确的 `@` 引用一起填好，选区还会带上行号范围。
 - **凡是代码相关的，都交给 VS Code 自己的编辑器。** diff 就是真正的 diff 编辑器，路径点击就打开文件。不在 webview 里重新实现一套查看器。
 - **自己找到 Host**，包括桌面端那种每次启动都换一个系统分配端口的 Host。
-- **三条取会话的路，由你挑。** 从 harness 自己的凭据库里签发（零配置，但意味着要读一个同时装着你的 API key 的文件）、由扩展自己启动 `dsh web` 并读走它打印的启动 URL、或者你自己粘一个启动 URL。见[会话是怎么拿到的](#会话是怎么拿到的)。
+- **四条取会话的路，默认替你挑。** 从 harness 自己的凭据库里签发（零配置，但意味着要读一个同时装着你的 API key 的文件）、由扩展自己启动 `dsh web` 并读走它打印的启动 URL、或者你自己粘一个启动 URL。默认的 `auto`（v0.2.8 起）先做第一件，做不成就退到第二件。见[会话是怎么拿到的](#会话是怎么拿到的)。
 - **你不要求，它就不启动任何进程。** 默认行为仍然是附着到你已经在跑的那个 Host。
 - **能装自己的 Host，装在它该在的那台机器上。** `DeepSeek Harness: Install Host` 在扩展宿主里执行安装——在一个 Remote-SSH 窗口里，扩展宿主就是远程那台。所以不会出现「`dsh` 装在了你面前的笔记本上、而远程仍然没有」这种没人会注意到的失败。托管启动在 `dsh` 不在 `PATH` 上时也会自己改用 `npx` 再试一次，那条路连装都不必装。
 
@@ -95,41 +95,45 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 
 *左上：同一个会话、同一刻、两个客户端——没有导入，没有镜像，没有分叉。右上：「Diff」打开的是 VS Code 自己的 diff 编辑器，不是 webview 仿的，左边那一侧是插件在改动前抓到的文本。左下：对话就在侧边栏里，工具行和改动卡片都在。右下：浏览器那一侧，原样。*
 
-## v0.2.7 新特性
+## v0.2.8 新特性
 
-**v0.2.6 教会了「Open Web UI」提议去启动一个 Host。但它用来判断你走的是哪条路的那个布尔值，分不开 `paste` 和 `managed`——于是两个什么都不启动的模式，各拿到了对方的建议。**
+**默认值是一份「给一个不存在的 Host 用的」有效凭据。**
 
-那个提议被 `auth.localMintEnabled()` 卡着，而这个布尔值对 `managed` 和 `paste` **都是** `false`。两者因此都收到了为 `credentials` 写的那句话：设成 `paste` 的窗口被建议改成 `managed`，已经处在 `managed` 的窗口被建议改成它自己所在的模式。更糟的是，真正需要这个提议的那种状态——`credentials`，而存着的 cookie 已经没了——掉进了同一句话里，因为决策把「没有 cookie」读成了「无事可做」。事实恰好相反：那个提议启动的 Host 会自己签发会话，而这正是「本地铸签」从来不是障碍的原因。
+`deepseekHarness.sessionMode` 默认是 `credentials`。这个模式只回答一个问题——你是谁——对「有没有东西在听」一个字都没说。所以在没人跑过 `dsh web` 的机器上，第一次连接必然失败，状态行给的答复是一段话，结尾是「或者把 sessionMode 设成……」。扩展知道问题在哪，而当时屏幕上就有那个按钮的位置。
 
-现在进决策的是模式本身，而每一种模式都落在一个动作上：
+| | |
+| --- | --- |
+| **默认改成 `auto`** | 凭据文件读得到就铸签，没有东西应答就起一个 Host。认证和可达性之前被当成同一个问题，它们是两个。 |
+| **修复建议现在是个按钮** | `ConnectionHint.repair` 从分类器写出来那天就有，每条 hint 都填、协议测试还断言，**但从来没被画出来**。面板只渲染 `install` 和一行字，所以「重试」一直是个词，不是一个控件。 |
 
-| `sessionMode` | 手上没有带 token 的 URL 时 | 为什么 |
+`auto` 敢当默认，靠的是顺序：先铸签。所以已经在跑的 Host 拿到的还是老版本一直在发的那个 cookie，一个字节都不差；只有端口上真的什么都没有，才会走到启动器。能用的环境，行为一点没变。
+
+坏掉的环境，区别是「读一段诊断」和「按一下」：
+
+| `sessionMode` | 修复按钮 | 为什么是它 |
 | --- | --- | --- |
-| `paste` | 向你要那条启动 URL，跑的就是 *Use Launch URL* 那个输入框 | 「被问」就是这个模式本身，不是退路——它不读凭据文件、不启动进程，而这两件事正是选它的理由。它也是唯一不启动任何东西的路线，所以是远程窗口下唯一还有效的那条。 |
-| `managed` | 启动 Host，打开它打印的那条 URL | 这个模式本来就拥有那个子进程的控制台，只是从来没人让它去用。 |
-| `credentials` | 提议切到 `managed` 并打开，且把这次修改持久化 | 这条路上无论如何都没有 token——铸签产出的是 cookie，而启动 token 是 Host 内存里的 `randomBytes`。起一个 Host 能同时解决「已铸签」和「压根没 cookie」两种情况，所以提议是同一个，不同的只有解释。 |
-| 任意，且在远程窗口 | 说明为什么不行，以及该在哪台机器上跑 `dsh web` | Host 会落在远程的回环地址上，而这条命令要打开的浏览器在你面前的机器上。 |
+| `credentials` | **切到 auto** | 它按设计就不能起 Host，「重试」等于提供一个保证没用的动作。 |
+| `paste` | **粘贴启动 URL** | 被问一句就是这个模式本身，不是兜底。 |
+| `auto`、`managed` | **重试** | 启动器已经试过，没有设置可改了。 |
 
-**启动真的失败时，它现在把失败原文摆出来，而不是含糊过去。** 「拿不到 URL」这一种结果盖着两件不同的事：端口上已经有一个 Host 在应答——它是被**接管**的，所以这台机器上没有任何进程为它打印过 URL；以及根本没启动起来。这两件事以前共用一句话。现在第二种会带上状态行用的同一个分类器给出的修复建议。
-
-做判断的仍然是 `src/app/session-mode.ts` 里的 `planOpenWebUi`，一个对着纯值做决定的纯函数，不需要 VS Code 宿主就能断言。变的是它的输入：它收的是模式，不是那个关于铸签的布尔值。一个对两种补救办法完全相反的模式都返回 `false` 的布尔值，就是让一条命令看起来坏掉、而里面每一句话都成立的原因。
+配置里显式写着 `credentials` 的不会被迁移改写——在那台永远有 Host 在跑的机器上它就是对的，一个版本不该推翻别人自己选的。
 
 门禁：
 
 | 关卡 | 结果 |
 | --- | --- |
-| 协议断言（假 Harness，不需要 `dsh`） | **512 项断言**——v0.2.6 时 504，v0.2.5 时 493，v0.2.3 时 461 |
+| 协议断言（假 Harness，不需要 `dsh`） | **523 项断言**——v0.2.7 时 512，v0.2.6 时 504，v0.2.5 时 493 |
 | 端到端链路 | **96** 条，覆盖五条里的三条；另外两条仍由套件自己打印为「未编写」，而不是悄悄略过 |
 | 实机 Host（`0.2.0-rc.2`，`127.0.0.1:3080`） | **41/41** |
 
-新增的八条断言主要就在补这个缺失的区分：`paste` 是被问，而不是被建议去启动什么；`managed` 是直接启动，而不是被建议改模式；`credentials` 在没有活 cookie 时是被提议起 Host，而不是被劝退；以及远程窗口下的 `paste` 仍然会被问——远程这道检查否掉的是「要启动东西」的补救办法，不是「开口问」的那一个。第 1 条和第 4 条——v0.0.4→v0.1.1 的更新日志里论证过必须补的那两类链路，因为面板当时根本没启动、而「Allow」曾经从未真正放行——现在对着一个能被杀掉再重启的假 Host 真跑，且完全不需要 VS Code 扩展宿主。
+新增的十一条断言，一半关于默认值，一半关于那个按钮到底存不存在：`auto` 确实是两半、未知或缺失的值落到「能起 Host」的那个模式、显式写着 `credentials` 的不被偷偷改写、每种失败点名的修复真的是能帮上忙的那个、每条修复都带 label（因为按钮上只有它）。
 
-上一个版本 v0.2.6 让同一条命令第一次会提议起 Host，并随包带上了宣传片和开发故事；v0.2.5 是纯文档版，也是自 0.2.0 以来第一次上架 Marketplace。它们的说明、以及更早每个版本的说明，都在 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
+上一个版本 v0.2.7 修的是同一类错误在另一个命令里的表现：`Open Web UI` 把模式读成了一个关于铸签的布尔值，而那个布尔值对两种补救办法相反的模式都是 false。v0.2.6 让那条命令第一次会提议启动 Host。它们的说明、以及更早每个版本的说明，都在 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
 
 ## 环境要求
 
 - VS Code ≥ 1.85
-- 本地有一个 `dsh web`（默认端口 `3080`），要么已经在跑，要么由 `sessionMode: "managed"` 替你启动。
+- 本地有一个 `dsh web`（默认端口 `3080`），要么已经在跑，要么由默认的 `sessionMode: "auto"` 替你启动。
 - Harness 必须与 VS Code 窗口在**同一台机器上**。这是唯一的硬约束；Remote-SSH、WSL 和容器分别意味着什么，见[《远程开发》](#远程开发)。
 
 ## 快速开始
@@ -145,8 +149,8 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
    想同时开着网页端对照时，用它打开浏览器即可。（那个 token 是每次请求都比对的进程级密钥，
    不是一次性凭证，所以反复打开这个 URL 依然有效。）
 
-   跳过这一步也是受支持的：把 `deepseekHarness.sessionMode` 设成 `"managed"`，扩展会自己
-   启动 Host 并从它的控制台读走那个 URL。见[会话是怎么拿到的](#会话是怎么拿到的)。
+   跳过这一步是默认行为：`deepseekHarness.sessionMode` 默认 `"auto"`，没有东西在听时扩展
+   自己启动 Host 并从它的控制台读走那个 URL。见[会话是怎么拿到的](#会话是怎么拿到的)。
 
    更老的版本则完全不对 `/api/*` 做鉴权、不需要任何 token —— 插件会自行探测所连的是哪一种，
    所以如果没有出现启动 URL，这一步可以直接跳过。
@@ -160,12 +164,12 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
    或从 [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases) 安装 VSIX：
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.2.7.vsix
+   code --install-extension harness-connector-deepseek-0.2.8.vsix
    ```
 
-3. **不用配置任何东西。** 在默认的 `sessionMode: "credentials"` 下，扩展会自动连接：它读取 `dsh web` 写在 `$DSH_HOME/.credentials.yaml` 里的浏览器会话签名密钥，自己签出同一个 `dsh-auth-…` cookie。**没有需要粘贴的 token。**
+3. **不用配置任何东西。** 默认的 `sessionMode: "auto"` 会先按 `credentials` 的方式连接：读取 `dsh web` 写在 `$DSH_HOME/.credentials.yaml` 里的浏览器会话签名密钥，自己签出同一个 `dsh-auth-…` cookie，**没有需要粘贴的 token**。如果端口上什么都没有，它就把 `dsh web` 起起来。
 
-   读一下[《会话是怎么拿到的》](#会话是怎么拿到的)一节，就知道这意味着什么，以及另外两种压根不打开那个文件的模式。
+   读一下[《会话是怎么拿到的》](#会话是怎么拿到的)一节，就知道这意味着什么，以及压根不打开那个文件的两种模式。
 
 4. 在 VS Code 中打开一个你想绑定到 Harness 工作区的文件夹。
 
@@ -179,14 +183,20 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 
 ### 会话是怎么拿到的
 
-Harness 用浏览器会话 cookie 给 `/api/*` 做鉴权，而这里有且只有三条拿到它的路，由
+Harness 用浏览器会话 cookie 给 `/api/*` 做鉴权，而这里有四条拿到它的路，由
 `deepseekHarness.sessionMode` 决定走哪条。
 
-**`credentials`（默认）——本地签发。** `dsh web` 会在 `$DSH_HOME/.credentials.yaml`
+**`auto`（默认）——能签发就签发，签发不了就起一个 Host。** 这本来是看着像一个问题的两个问题：
+*你是谁*由 `$DSH_HOME/.credentials.yaml` 签发回答，*有没有东西在听*由 socket 回答。`auto` 先签发，
+只有端口上什么都不应答时才走到启动器——所以已经跑着 Host 的机器行为与以前完全一致，而没人准备过的
+机器会得到一个。下面三种就是它的两半，供你明确只要其中一半时使用。
+
+**`credentials`——本地签发，别的都不做。** `dsh web` 会在 `$DSH_HOME/.credentials.yaml`
 的 `client-connection/browser-session` 下留一个持久签名密钥。cookie 是用它给
 `{version, authority, issuedAt, expiresAt}` 算的 HMAC；cookie 里不含启动 token 的任何痕迹；
 而这个密钥只生成一次、之后每个 `dsh web` 进程复用——所以任何能读到该文件的东西，都能签出
-一个逐字节相同的 cookie。扩展读它并自己签发。这就是「没有需要粘贴的东西」的来源。
+一个逐字节相同的 cookie。扩展读它并自己签发。这就是「没有需要粘贴的东西」的来源。**它永远不启动
+Host**：在没有东西运行的机器上选这个模式，等于决定自己跑 `dsh web`。
 
 **`managed`——让扩展启动 Host。** 它运行 `deepseekHarness.launchCommand`（默认
 `dsh web --port 0`），从它自己拥有的进程的控制台里读走启动 URL，再用那个 token 去兑换。
@@ -195,7 +205,7 @@ Harness 用浏览器会话 cookie 给 `/api/*` 做鉴权，而这里有且只有
 **`paste`——你自己启，然后把 URL 交过来。** 跑 `dsh web`，复制那行
 `dsh web: http://…`，执行 **DeepSeek Harness: Use Launch URL**。不读磁盘，也不启动任何进程。
 
-关于 `credentials`，因为它是默认值，而且是一份真实的权限：
+关于本地签发，因为默认值可能会用它，而且它是一份真实的权限：
 
 - **那个文件里同时装着你的模型 API key。** 读它，在权限上**等价于**对这个 harness home
   拥有完整权力。它不是提权，也没有绕过一个「防你自己」的边界——但扩展进程因此能看到一批
@@ -239,7 +249,7 @@ authority）。
 | `deepseekHarness.host` | `127.0.0.1` | 只接受三个值：`127.0.0.1`、`localhost`、`::1`。其它值会在打开套接字之前就被拒绝。见[《远程开发》](#远程开发)。 |
 | `deepseekHarness.port` | `3080` | 默认 `dsh web` 端口。如果你用 `dsh web --port <n>` 启动则需修改。 |
 | `deepseekHarness.showSystemMessages` | `false` | 显示插件注入的系统消息（运行时上下文、审批通知）。默认隐藏；可通过 webview 头部的 `SYS` 按钮实时切换。 |
-| `deepseekHarness.sessionMode` | `credentials` | 会话从哪来。`credentials` 从 `$DSH_HOME/.credentials.yaml` 本地签发 cookie；`managed` 启动 `dsh web` 并读走它的启动 URL；`paste` 等你把 URL 交过来。见[会话是怎么拿到的](#会话是怎么拿到的)。 |
+| `deepseekHarness.sessionMode` | `auto` | 会话从哪来。`auto` 在 `$DSH_HOME/.credentials.yaml` 读得到时本地签发 cookie、没有东西应答时启动 `dsh web`；`credentials` 只签发；`managed` 只启动；`paste` 等你把 URL 交过来。见[会话是怎么拿到的](#会话是怎么拿到的)。 |
 | `deepseekHarness.launchCommand` | `dsh web --port 0` | `sessionMode: "managed"` 运行的命令。默认让系统分配端口，因为托管启动本来就是从启动 URL 里读真实端口，钉死端口只是多一种失败方式。命令走 shell，所以包装脚本和 `npx` 都能用。如果**默认**命令找不到，托管启动会改用 `npx` 再试一次——在远程上，这一步会把 Host 取到远程并在那里启动；而你自己设的命令永远不会被顶替。只在启动 Host 时读一次；改它不会打扰正在跑的那个 Host。 |
 | `deepseekHarness.autoApproveApprovals` | `false` | 自动用 `allowed-once` 回应所有审批请求。默认关闭——开启意味着工具调用不再逐次确认。 |
 | `deepseekHarness.autoDiscover` | `true` | 配置的端口没人应答时，在回环地址上另找 dsh Host（先看各 profile patch 里钉的 `webserver.port`，再枚举系统监听表，用 Host 自己的拒绝文本确认）。桌面端需要它——桌面端用系统分配的端口启动 Host。发现的端口只在本次会话内使用，绝不写回设置。 |
@@ -250,6 +260,7 @@ authority）。
 - `DeepSeek Harness: Diagnostics`（诊断）——一份文档：运行时版本、本扩展的版本、连接状态、这台 Host 实际提供哪些能力、以及最近一次错误。带一个**复制脱敏报告**动作；其中不含任何凭据内容
 - `DeepSeek Harness: Clear Session Token`（清除会话 token）——删除已存储的 cookie 并重连（`credentials` 下会重新签一个，`managed` 下会重新起一个 Host；切换 `dsh web` 实例前用它）
 - `DeepSeek Harness: Use Launch URL`（使用启动 URL）——粘贴 Host 打印的那行 `dsh web: http://…` 并采用它的会话。这就是 `paste` 那条路，任何模式下都能用
+- `DeepSeek Harness: Switch to Auto and Connect`（切到 auto 并连接）——状态行那个修复按钮执行的就是它：把 `sessionMode` 持久化成 `"auto"` 再强制重连，是 `credentials` 下「没有任何东西在听」的一键答案
 - `DeepSeek Harness: New Session`（在当前工作区新建会话）
 - `DeepSeek Harness: Refresh Sessions`（刷新会话列表）
 - `DeepSeek Harness: Move to Right Side Bar`（移至右侧边栏）——将视图停靠在辅助侧边栏（像聊天面板一样），不再与文件浏览器争抢左侧空间。也可通过 webview 头部的 ⇲ 按钮触发。
@@ -310,7 +321,7 @@ path"`、`@dir/`，可带 `:L<n>` / `:L<n>-L<m>` 后缀；从 `@` 补全列表�
 一个独立的 Node 脚本用真实客户端代码驱动一个**假**的 harness（假实现照 `0.2.1-alpha.2` 的服务端那一半写死）—— 不需要 `dsh web`：
 
 ```bash
-npm run protocol-test    # 512 项断言：双流传输拆分（$events 白名单 vs
+npm run protocol-test    # 523 项断言：双流传输拆分（$events 白名单 vs
                          # session/follow）、线缆协商（点分/斜杠、cookie 门禁、
                          # 事件套接字）、认证、cookie 派生、{args} payload、
                          # 审批与提问两条瀑布（Allow/Deny 的确切信封、cancel 撤卡、
@@ -399,9 +410,9 @@ npm run build            # esbuild → dist/extension.js
 npm run watch            # 变更时自动重建
 npm run typecheck
 npm run check-versions   # 每一个版本展示面都必须和 package.json 一致
-npm run protocol-test    # 针对假 harness 的 512 项协议断言
+npm run protocol-test    # 针对假 harness 的 523 项协议断言
 npm run protocol-probe   # 报告真实 dsh web 暴露了什么
-npm run package          # → harness-connector-deepseek-0.2.7.vsix
+npm run package          # → harness-connector-deepseek-0.2.8.vsix
 ```
 
 在 VS Code 中按 `F5` 启动带有该扩展的扩展开发宿主。
@@ -495,7 +506,7 @@ host 不是 `127.0.0.1`、`localhost` 或 `::1`，扩展就会拒绝，而且是
 
 | 场景 | 状态 | 含义 |
 | --- | --- | --- |
-| **本地窗口** | ✅ **已实测** | 受支持的组合，也是本机唯一端到端跑过的组合：对 `127.0.0.1:3080` 上一个活 Host 跑通 **41/41** 条集成断言，外加 512 条协议断言和 96 条端到端断言。 |
+| **本地窗口** | ✅ **已实测** | 受支持的组合，也是本机唯一端到端跑过的组合：对 `127.0.0.1:3080` 上一个活 Host 跑通 **41/41** 条集成断言，外加 523 条协议断言和 96 条端到端断言。 |
 | **Remote-SSH** | ⚠️ **未实测**——本机没有 SSH 服务（`localhost:22` 拒绝连接） | 当 Harness 跑在**远端机器上**时可用。扩展声明了 `extensionKind: "workspace"`，所以在远程窗口里它的扩展宿主就运行在远端：读远端的 `$DSH_HOME`、枚举远端的监听表、连远端的回环。你笔记本上的 Harness 从那里连不到——也不该连得到，因为它要改的工作区并不是你打开的这个。 |
 | **WSL** | ⚠️ **未实测**——`wsl.exe` 在本沙箱的程序黑名单上，根本起不来 | 形状和 Remote-SSH 一样：在发行版里跑 `dsh web`。VS Code 把 WSL 当作一个普通远程交给扩展，所以不需要任何 WSL 专属处理。 |
 | **开发容器** | ⚠️ **未实测**——本机没有装 `docker` | 形状还是一样：在容器里跑 `dsh web`。注意被读的是容器自己的 `$DSH_HOME/.credentials.yaml`，不是宿主机的。 |

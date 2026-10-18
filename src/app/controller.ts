@@ -445,6 +445,33 @@ export class AppController {
       // message: the webview is untrusted input, and a button that opens an
       // arbitrary URL on command is exactly the kind of thing that matters.
       case 'install': await this.runInstall(); break
+      // The status row's repair button. Which command it runs is the diagnosis's
+      // decision — `ConnectionHint.repair` carries the id — so the panel does not
+      // have to know what went wrong to offer the way out.
+      case 'runRepair': await this.runHintRepair(); break
+    }
+  }
+
+  /**
+   * Run whatever `ConnectionHint.repair` names.
+   *
+   * The alternative — a switch here over the failure kinds — would be a second
+   * copy of the diagnosis in a click handler, and the two copies would drift the
+   * first time a remedy changed. The id is produced extension-side and the
+   * webview never supplies one, so executing it is not an injection surface.
+   *
+   * A failure to run it is logged and swallowed: the button is already the last
+   * thing on a line of bad news, and an error dialog on top of it reads as if the
+   * repair made things worse.
+   */
+  private async runHintRepair(): Promise<void> {
+    const repair = this.connectionHint?.repair
+    if (repair === undefined) return
+    this.d.log.info(`repair: running ${repair.command} for ${this.connectionHint?.kind ?? 'unknown'}`)
+    try {
+      await Promise.resolve(this.d.vscodeAPI.commands.executeCommand(repair.command))
+    } catch (e) {
+      this.d.log.error(`repair: ${repair.command} failed — ${e instanceof Error ? e.message : String(e)}`)
     }
   }
 

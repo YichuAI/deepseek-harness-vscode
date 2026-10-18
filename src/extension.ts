@@ -23,6 +23,7 @@ import { installCli } from './harness/install.ts'
 import { AppController, attachmentKindFor } from './app/controller.ts'
 import { buildDiagnosticsReport, NPM_INSTALL_COMMAND } from './app/diagnosis.ts'
 import {
+  AUTO_SESSION_COMMAND,
   OPEN_WEB_UI_TEXT,
   parseSessionMode,
   planOpenWebUi,
@@ -346,7 +347,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
 
     if (plan.kind === 'explain-remote') {
-      void vscode.window.showInformationMessage(OPEN_WEB_UI_TEXT.explainRemote[plan.reason])
+      // `starts-host` names the mode it is talking about, so the copy is a
+      // function; `minted` describes the credential route and needs no argument.
+      const copy = OPEN_WEB_UI_TEXT.explainRemote[plan.reason]
+      void vscode.window.showInformationMessage(
+        typeof copy === 'function' ? copy(cfg.sessionMode) : copy,
+      )
       return
     }
 
@@ -395,6 +401,36 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       return
     }
     await vscode.env.openExternal(vscode.Uri.parse(url))
+  }
+
+  /**
+   * Switch to `auto` and connect again — the repair for "nothing is listening".
+   *
+   * `credentials` authenticates and never starts anything, so a fresh install on
+   * a machine where nobody ran `dsh web` failed its first connection and was told
+   * to go edit a setting. `auto` is that setting's answer, and this makes it one
+   * click instead of a detour through Settings.
+   *
+   * Persisted rather than remembered for one call: the Host it starts has to
+   * outlive the next connect, and the next connect reads the setting.
+   */
+  const useAutoSession = async (): Promise<void> => {
+    if (cfg.sessionMode !== 'auto') {
+      log.info(`session: ${cfg.sessionMode} → auto, from the status row's repair action`)
+      await vscode.workspace
+        .getConfiguration(SECTION)
+        .update('sessionMode', 'auto', vscode.ConfigurationTarget.Global)
+    }
+    // `force`, because the previous attempt left the client convinced it had
+    // already tried: a plain connect short-circuits on `connected`, and the
+    // state we are repairing is usually "failed", which is sticky in the same way.
+    await controller.doConnect({ force: true })
+    const state = getState()
+    if (state.connection !== 'connected') {
+      void vscode.window.showWarningMessage(
+        `DeepSeek Harness: still not connected in "auto". ${connectFailureText()}`,
+      )
+    }
   }
 
   /**
@@ -512,6 +548,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('deepseekHarness.disconnect', wireAction('disconnect')),
     vscode.commands.registerCommand('deepseekHarness.clearSessionToken', clearSessionToken),
     vscode.commands.registerCommand(USE_LAUNCH_URL_COMMAND, useLaunchUrl),
+    // The repair the status row offers when nothing is listening. Registered as a
+    // command because `ConnectionHint.repair` names one by id.
+    vscode.commands.registerCommand(AUTO_SESSION_COMMAND, useAutoSession),
     // Installs on whichever machine the extension host is on — see `installHost`.
     vscode.commands.registerCommand('deepseekHarness.installHost', installHost),
     vscode.commands.registerCommand('deepseekHarness.openWebUI', openWebUi),

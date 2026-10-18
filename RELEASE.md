@@ -55,7 +55,7 @@ npm run check-versions     # → all checks pass; add --online to include the
 npm run build              # → dist/extension.js
 
 # 1.4 protocol test (fake harness — no dsh web needed)
-npm run protocol-test      # → all 512 assertions ✓
+npm run protocol-test      # → all 523 assertions ✓
 
 # 1.5 end-to-end chains (real filesystem; reports its own coverage)
 npm run e2e-test           # → 3 of 5 chains covered, 2 not written; every
@@ -88,7 +88,7 @@ Manual checks:
       twin. This is a standing rule, not a per-release judgement call.
 - [ ] `CHANGELOG.md` and `ARCHITECTURE.md` still quote the **current** assertion
       count from `npm run protocol-test` (it has grown 50 → 64 → 98 → 83 → 156 →
-      178 → 180 → 190 → 211 → 231 → 243 → 268 → 295 → 312 → 342 → 381 → 461 → 493 → 504 → 512 as
+      178 → 180 → 190 → 211 → 231 → 243 → 268 → 295 → 312 → 342 → 381 → 461 → 493 → 504 → 512 → 523 as
       the rc.2 rewrite replaced the rc.6 fake harness, the waterfall/pending-panel
       groups landed, v0.2.2 added the session-mode vocabulary, the per-platform
       install routing and the launcher's pure functions, and v0.2.3 added the
@@ -159,7 +159,7 @@ Manual checks:
 unzip -l harness-connector-deepseek-<ver>.vsix
 ```
 
-Expected (v0.2.7 = 14 files, 376,628 bytes in a clean checkout, ~368 KB):
+Expected (v0.2.8 = 14 files, 380,213 bytes in a clean checkout, ~371 KB):
 
 ```
 [Content_Types].xml
@@ -192,10 +192,10 @@ other **12 entries have identical CRC32 and length**; the two that differ are ex
 `extension/changelog.md` and `extension/media/icon.svg`, which is how the second one was
 found — nothing about the size alone would have said which file had moved.
 
-At v0.2.5 that gap is **zero**, deliberately, and v0.2.6 and v0.2.7 keep it there. Both files were rewritten
+At v0.2.5 that gap is **zero**, deliberately, and every release since keeps it there. Both files were rewritten
 from their index blobs (`git cat-file blob :CHANGELOG.md` into `writeFileSync`) so the working tree
 holds the same bytes git will check out, and v0.2.5's tree packages to 368,277 locally and ships as
-368,277. v0.2.6 and v0.2.7 were measured rather than arranged: every shipped file on disk reads zero CR bytes
+368,277. v0.2.6 through v0.2.8 were measured rather than arranged: every shipped file on disk reads zero CR bytes
 (`tr -cd '\r' | wc -c`), so its 372,811 above is already the clean figure and the Release asset
 should match it byte for byte in size. v0.2.7 is the same reading with a bigger bundle.
 `git status` may still label them modified until git's stat cache is refreshed, but
@@ -227,7 +227,7 @@ So when a figure here disagrees with a fresh clone by a few bytes, check `git st
 line endings before assuming the tree changed — and when recording a baseline, say which of the
 two you measured. For v0.2.5 there is nothing to reconcile: the 368,277 above was measured on
 a worktree whose two exposed files had already been normalised to LF, so it is already the
-clean figure. v0.2.6 and v0.2.7 are the same by a simpler route — all fourteen entries were
+clean figure. v0.2.6 onward is the same by a simpler route — all fourteen entries were
 verified LF on disk before packaging, so no second measurement is owed.
 
 ---
@@ -527,7 +527,8 @@ Marketplace, the bytes in the Release asset and the sha256 printed in the log ar
   `readme.md`/`changelog.md`, and the `*.zh-CN.md` twins ship verbatim. So every baseline
   below belongs to one particular tree, and editing a shipped doc afterwards invalidates it.
   Re-measure; do not carry the old figure forward. Shipped bytes, as `gh release view --json
-  assets` reports them — i.e. what a user actually downloads: `v0.2.7` = 376,628 (local and shipped agree);
+  assets` reports them — i.e. what a user actually downloads: `v0.2.8` = 380,213 (local and shipped agree);
+  `v0.2.7` = 376,628;
   `v0.2.6` = 372,811;
   `v0.2.5` = 368,277; `v0.2.4` = 363,809; `v0.2.2` = 331,706;
   `v0.2.1` = 313,426; `v0.2.0` = 312,853 at `581ba27`; `v0.1.9` = 309,620;
@@ -542,9 +543,9 @@ Marketplace, the bytes in the Release asset and the sha256 printed in the log ar
   disk in the working tree: v0.2.2 by 3 (331,709 against 331,706) and v0.2.4 by 157
   (363,966 against 363,809), both run down in step 2. v0.2.1 was off by 15 (313,441 against
   313,426), never run down and left named rather than smoothed over — the same shape of cause,
-  but the file was not identified. v0.2.0, v0.2.5, v0.2.6 and v0.2.7 agreed exactly, and v0.2.5 agreed on
+  but the file was not identified. v0.2.0 and v0.2.5 onward agreed exactly, and v0.2.5 agreed on
   purpose — the exposed files were normalised to LF before the measurement rather than after —
-  while v0.2.6 and v0.2.7 simply had no exposed file: all fourteen entries were LF on disk at package time.
+  while v0.2.6 onward simply had no exposed file: all fourteen entries were LF on disk at package time.
   v0.2.3 shows the same 3 as v0.2.2 (353,366 local against 353,363 clean) but belongs to
   neither column, because it was never published — see the policy bullet above.
   `RELEASE.md` is on the `.vscodeignore` list, so editing *this* file cannot move the number

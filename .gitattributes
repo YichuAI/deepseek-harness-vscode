@@ -1,0 +1,13 @@
+# Line endings, pinned for the files that end up inside the VSIX.
+#
+# `core.autocrlf=true` is the right default on Windows for source it reads, but
+# it makes the *packaged artifact* depend on which machine packed it: a Windows
+# checkout hands `vsce` CRLF for `package.json` while the Linux runner hands it
+# LF, and the two produce VSIXs that differ (380,213 vs 380,195 for v0.2.8 —
+# 383 carriage returns, 18 bytes once zip has compressed them).
+#
+# Markdown has been kept LF on disk since v0.2.5 for this reason, by hand. This
+# file is that rule made enforceable rather than remembered: the packaged bytes
+# no longer depend on the machine, so `RELEASE.md`'s baseline can be one number.
+*.md          text eol=lf
+package.json  text eol=lf

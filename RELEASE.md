@@ -159,7 +159,7 @@ Manual checks:
 unzip -l harness-connector-deepseek-<ver>.vsix
 ```
 
-Expected (v0.2.8 = 14 files, 380,213 bytes in a clean checkout, ~371 KB):
+Expected (v0.2.8 = 14 files, 380,195 bytes in a clean checkout, ~371 KB):
 
 ```
 [Content_Types].xml
@@ -192,12 +192,18 @@ other **12 entries have identical CRC32 and length**; the two that differ are ex
 `extension/changelog.md` and `extension/media/icon.svg`, which is how the second one was
 found — nothing about the size alone would have said which file had moved.
 
-At v0.2.5 that gap is **zero**, deliberately, and every release since keeps it there. Both files were rewritten
-from their index blobs (`git cat-file blob :CHANGELOG.md` into `writeFileSync`) so the working tree
-holds the same bytes git will check out, and v0.2.5's tree packages to 368,277 locally and ships as
-368,277. v0.2.6 through v0.2.8 were measured rather than arranged: every shipped file on disk reads zero CR bytes
-(`tr -cd '\r' | wc -c`), so its 372,811 above is already the clean figure and the Release asset
-should match it byte for byte in size. v0.2.7 is the same reading with a bigger bundle.
+At v0.2.5 that gap is **zero**, deliberately, and every release since keeps it there — but only
+because the files were checked by hand each time. v0.2.8 is where that stopped being enough:
+`package.json` is one of the fourteen entries, it had never been normalised, and on a Windows
+checkout it carries 383 CRLF bytes that the Linux runner's checkout does not. This tree packaged to
+**380,213** locally while CI produced **380,195** — eighteen bytes apart, which is 383 carriage
+returns once zip has compressed them.
+
+The fix is `.gitattributes` (`*.md text eol=lf`, `package.json text eol=lf`), so the question
+stops being "what does this machine's working tree look like" and becomes "what is in the blob".
+With `package.json` stripped, this tree packages to 380,195, which is what the Release asset
+carries. Baseline figures are clean-checkout figures by definition; v0.2.6 and v0.2.7 matched by
+hand, and every release from v0.2.8 matches by construction.
 `git status` may still label them modified until git's stat cache is refreshed, but
 `git diff --stat` is empty and `git cat-file blob :<path> | tr -cd '\r' | wc -c` reads 0 — the
 worktree content genuinely is the blob. Note that `git checkout-index` cannot produce this:
@@ -225,10 +231,9 @@ ever *shipped* was found to be wrong.
 
 So when a figure here disagrees with a fresh clone by a few bytes, check `git status` and the
 line endings before assuming the tree changed — and when recording a baseline, say which of the
-two you measured. For v0.2.5 there is nothing to reconcile: the 368,277 above was measured on
-a worktree whose two exposed files had already been normalised to LF, so it is already the
-clean figure. v0.2.6 onward is the same by a simpler route — all fourteen entries were
-verified LF on disk before packaging, so no second measurement is owed.
+two you measured. From v0.2.8 there is only one: the text files in the package are pinned to LF
+by `.gitattributes`, so a Windows checkout and a Linux checkout pack the same bytes. The older
+figures above stay as recorded, because they were measured before the pin existed.
 
 ---
 
@@ -527,7 +532,8 @@ Marketplace, the bytes in the Release asset and the sha256 printed in the log ar
   `readme.md`/`changelog.md`, and the `*.zh-CN.md` twins ship verbatim. So every baseline
   below belongs to one particular tree, and editing a shipped doc afterwards invalidates it.
   Re-measure; do not carry the old figure forward. Shipped bytes, as `gh release view --json
-  assets` reports them — i.e. what a user actually downloads: `v0.2.8` = 380,213 (local and shipped agree);
+  assets` reports them — i.e. what a user actually downloads: `v0.2.8` = 380,195 (the figure
+  `.gitattributes` now makes machine-independent);
   `v0.2.7` = 376,628;
   `v0.2.6` = 372,811;
   `v0.2.5` = 368,277; `v0.2.4` = 363,809; `v0.2.2` = 331,706;

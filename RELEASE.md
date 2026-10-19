@@ -420,7 +420,7 @@ Three workflows live in `.github/workflows/`:
 
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
-| `ci.yml` | every branch push, every PR | typecheck · `check-versions` · `protocol-test` · build · package · assert the VSIX holds exactly the 14 expected files and no sources |
+| `ci.yml` | every branch push, every PR | typecheck · `check-versions` · `protocol-test` · build · package · assert the VSIX holds exactly the 18 expected files — the four walkthrough pages among them — and no sources |
 | `e2e.yml` | push to `main`, PR | the same gate on `ubuntu-latest`, `windows-latest`, `macos-latest` — the protocol test parses three OS listener-table dialects, so the matrix earns its cost on its own — plus `npm run e2e-test` |
 | `release.yml` | a `v*` tag, or a manual dispatch naming an existing tag | `check-versions --release` (the tag must exist *and* point at HEAD) · tests · build · package · read the version back **out of** the VSIX · sha256 it · create the GitHub Release with the matching CHANGELOG section · publish to the Marketplace |
 

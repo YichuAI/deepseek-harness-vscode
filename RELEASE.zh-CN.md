@@ -390,7 +390,7 @@ gh release edit v<版本> --draft
 
 | 工作流 | 触发条件 | 做什么 |
 | --- | --- | --- |
-| `ci.yml` | 每个分支的 push、每个 PR | 类型检查 · `check-versions` · `protocol-test` · 构建 · 打包 · 断言 VSIX 里恰好是那 14 个文件且不含源码 |
+| `ci.yml` | 每个分支的 push、每个 PR | 类型检查 · `check-versions` · `protocol-test` · 构建 · 打包 · 断言 VSIX 里恰好是那 18 个文件、四个 walkthrough 页在包里，且不含源码 |
 | `e2e.yml` | push 到 `main`、PR | 同样的门禁跑在 `ubuntu-latest`、`windows-latest`、`macos-latest` 上——协议测试要解析三种操作系统的监听表写法，光这一点就值回矩阵的成本——外加 `npm run e2e-test` |
 | `release.yml` | 一个 `v*` 标签，或手动触发并指定一个已存在的标签 | `check-versions --release`（标签必须存在**且**指向 HEAD）· 测试 · 构建 · 打包 · 把版本号**从打出来的 VSIX 里读回来** · 算 sha256 · 以对应的 CHANGELOG 段落建 GitHub Release · 发布到 Marketplace |
 

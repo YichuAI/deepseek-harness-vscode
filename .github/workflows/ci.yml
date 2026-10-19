@@ -75,5 +75,13 @@ jobs:
           if grep -qE '^(extension/)?(src|scripts|test|node_modules)/' /tmp/vsix-files.txt; then
             echo "::error::the VSIX contains sources that must stay excluded"; exit 1
           fi
-          test "$(wc -l < /tmp/vsix-files.txt)" -eq 14 \
-            || { echo "::error::expected 14 files in the VSIX"; exit 1; }
+          test "$(wc -l < /tmp/vsix-files.txt)" -eq 18 \
+            || { echo "::error::expected 18 files in the VSIX (14 in v0.2.8, plus the four walkthrough pages)"; exit 1; }
+          # `package.json` names these pages from `contributes.walkthroughs`, and
+          # a missing one is silent: the Getting Started step renders with an
+          # empty media column rather than failing. Check the package, not just
+          # the working tree — this is the surface a user actually installs.
+          for page in open-panel connect first-prompt approve-review; do
+            grep -qx "extension/media/walkthrough/$page.md" /tmp/vsix-files.txt \
+              || { echo "::error::walkthrough page $page.md is missing from the VSIX"; exit 1; }
+          done

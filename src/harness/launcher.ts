@@ -155,7 +155,7 @@ export function envWithAugmentedPath(
  * the command to whatever they like.
  *
  * Note there is no "open a browser" flag to suppress — `dsh web` does not have
- * one (verified against 0.2.0-rc.2's `--help`), so the default command carries
+ * one (verified against 0.2.1-rc.2's `--help`), so the default command carries
  * nothing that a future upstream could remove under us.
  */
 export const DEFAULT_LAUNCH_COMMAND = 'dsh web --port 0'

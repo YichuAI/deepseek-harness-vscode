@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/dsh-0.2.0--rc.2-2f6feb?style=flat-square" alt="dsh 0.2.0-rc.2">
+  <img src="https://img.shields.io/badge/dsh-0.2.1--rc.2-2f6feb?style=flat-square" alt="dsh 0.2.1-rc.2">
   <img src="https://img.shields.io/badge/setup-attach--only-1a7f37?style=flat-square" alt="只连接，不拉起进程">
   <img src="https://img.shields.io/badge/ui-no%20webview-8250df?style=flat-square" alt="界面无 webview">
   <img src="https://img.shields.io/badge/VS%20Code-%E2%89%A5%201.85-007ACC?style=flat-square" alt="VS Code 1.85 及以上">
@@ -56,7 +56,7 @@
 | **它需要什么** | VS Code ≥ 1.85，以及一个与窗口在**同一台机器**上的 Harness。这是唯一的硬约束，见[《远程开发》](#远程开发)。 |
 | **怎么装** | `code --install-extension lucasliang.harness-connector-deepseek` |
 
-**快捷跳转：**[它能做什么](#它能做什么) · [新特性](#v029-新特性) · [快速开始](#快速开始) · [配置](#配置) · [命令](#命令) · [远程开发](#远程开发) · [限制](#限制) · [开发](#开发) · [设计](#设计写盘归-dsh插件只观察与告知)
+**快捷跳转：**[它能做什么](#它能做什么) · [新特性](#v030-新特性) · [快速开始](#快速开始) · [配置](#配置) · [命令](#命令) · [远程开发](#远程开发) · [限制](#限制) · [开发](#开发) · [设计](#设计写盘归-dsh插件只观察与告知)
 
 ## 它能做什么
 
@@ -95,43 +95,35 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 
 *左上：同一个会话、同一刻、两个客户端——没有导入，没有镜像，没有分叉。右上：「Diff」打开的是 VS Code 自己的 diff 编辑器，不是 webview 仿的，左边那一侧是插件在改动前抓到的文本。左下：对话就在侧边栏里，工具行和改动卡片都在。右下：浏览器那一侧，原样。*
 
-## v0.2.9 新特性
+## v0.3.0 新特性
 
-**它消失的地方，恰好是决定「会不会有人用」的那三十秒。**
+**它写着的上游，比它真正测过的那个落后两个版本。**
 
-装完之后，活动栏多一个图标，然后什么都没有。就算自动连接成功了，面板也只是个空对话流，上面一行灰字：「Disconnected. Click Connect above.」——说得没错，但对一个没听过 Host 是什么、不知道该不该自己起一个、也不知道自己的文件会被怎么处理的人来说，这句话等于没说。
-
-| | |
-| --- | --- |
-| **一个由 VS Code 自己打开的 walkthrough** | 走 `contributes.walkthroughs`。装了带 walkthrough 的扩展，VS Code 会自己打开「入门」页——那是它唯一还攥着用户注意力的时刻。四步：面板在哪、状态行在说什么、输入框能干什么、审批和回看是两件不同的事。 |
-| **原来放灰字的地方，换成首装卡片** | 在第一次连接成功之前，空面板会说明接下来会发生什么，并带上那唯一一个能让它发生的按钮。连上之后又退回一行字：那时候状态行才是可操作的部分，这儿再放一份只是噪音。 |
-
-walkthrough **没有**用 `viewsWelcome`，这是决定，不是遗漏。欢迎内容只对空的**树视图**生效——[官方文档](https://code.visualstudio.com/api/references/contribution-points)这么写，[把这件事定下来的 issue](https://github.com/microsoft/vscode/issues/105832) 说得更直白——而这个面板是 webview。硬加进去，等于在一个「死字段终于活了」的版本里再塞一个死字段。webview 能做的是自己画一块欢迎区，就是上面表格的第二行。
-
-walkthrough 里的每个引用都是**校验过的**，不是信它没问题：断掉的引用不报错，VS Code 照常渲染那一步，按钮点了什么也不发生。门禁里那九条断言会把每个 `command:` 链接对到 `contributes.commands`、每个 `completionEvents` 对到真实存在的命令和视图、每个 `media.markdown` 对到磁盘上非空的文件。
-
-**另外，实机测试不再假设自己跑在 Windows 上。**
-
-`integration-test.ts` 把工作区默认写死成 `e:\deepseek\workspace_test`，然后断言 Host 已经认识这个目录。它在一台机器上过、在 Linux 上第 5 步就挂——那个路径匹配不到任何工作区。扩展本身没问题，是测试把一台机器的历史焊进去了，换台干净的 Host 在哪个系统上都一样挂。
+徽章上写的是 `dsh 0.2.0-rc.2`。而 `npm i -g @deepseek-ai/dsh` 现在装下来的其实是
+`0.2.1-rc.2`，它的发布说明里又从不提这个扩展——于是「还能不能用」成了每个用户得自己试一遍才知道的
+问题。这个版本用实测回答它，而不是用一个版本号。
 
 | | |
 | --- | --- |
-| **工作区归这次运行所有** | 调用方有意见就用 `TEST_CWD`，否则在系统临时目录下建一个，跑完删掉。第 5 步现在能在一个从没见过这个路径的 Host 上通过。 |
-| **派生出来的注册表，断言放在了正确的顺序上** | 没有 `workspace/list` 这个 RPC——`listWorkspaces()` 是从 `session/list` 折出来的——所以「这个工作区已被认识」这条断言挪到了**会话存在之后**，而不是要求机器上早就有人建过。 |
-| **「同一条路径」只有一个定义** | 比较逻辑搬进了 `harness/path-identity.ts`，启动器给 `PATH` 去重时本来就需要这条规则。五条断言把两个平台的行为都钉住——Windows 忽略大小写和两种分隔符，POSIX 两个都不忽略——它们在 Linux CI 上也跑，而那正是看不见这个 bug 的平台。 |
+| **声明支持 `0.2.1-rc.2`** | 仓库里所有相关说法都改成这个版本：徽章、协议注释、架构说明。 |
+| **两条认证路径都实测** | 对由这个 npm 版本亲自启动的 Host：从 `$DSH_HOME/.credentials.yaml` 铸签 **41/41**；兑换它打印的 `--port 0` 启动 URL 再来一遍，**41/41**。两条路，同一套 41 条断言。 |
+| **线缆没有动** | 斜杠端点、`/api/remote.mux`、cookie 门、13 个方法的控制面、`401` 指纹、启动 URL 形状，与 `0.2.0-rc.2` 完全一致。这是**测出来的结论**，不是假设：这个客户端依赖的每一条路由都在新 Host 上重新探过。 |
+
+上游这次新增的是这个扩展用不到的接口面：`session/title`、`session/conflict`、
+`settings/conflict`、`workspace/pinSession` / `unpinSession` / `rename` / `delete`，以及一条
+会话格式迁移链（`v3 → v4`）。读会话、发消息、答审批、看改动，一条都不需要它们。
 
 门禁：
 
 | 关卡 | 结果 |
 | --- | --- |
-| 协议断言（假 Harness，不需要 `dsh`） | **533 项断言**——v0.2.8 时 523 |
-| 端到端链路 | **96** 条，覆盖五条里的三条；另外两条仍由套件自己打印为「未编写」 |
-| 实机 Host（`0.2.1-alpha.2`，`127.0.0.1:3080`） | **41/41**，工作区是为这次运行新建的 |
+| 协议断言 | **533 项断言**——没有增加，因为「兼容」不是协议变更；这次的支持声明由下面的实机运行背书，而不是靠新增假响应 |
+| 端到端链路 | **96** 条，覆盖五条里的三条 |
+| 实机 Host（`0.2.1-rc.2`），本地铸签 | **41/41** |
+| 实机 Host（`0.2.1-rc.2`），启动 URL | **41/41** |
 | 版本门禁 | **52** 条 |
 
-新增断言里有十条是关于 walkthrough 到底渲染不渲染、以及首装卡片上那个按钮是不是真的会发出连接请求。第二条不是形式主义：每次渲染都重建一次卡片，按钮照样画得出来，按下去什么也不会发生——这正是协议测试现在排除掉的那种失败。
-
-上一个版本 v0.2.8 让默认值第一次有能力起一个 Host；v0.2.7 修的是同一类错误在另一个命令里的表现：`Open Web UI` 把模式读成了一个关于铸签的布尔值，而那个布尔值对两种补救办法相反的模式都是 false。v0.2.6 让那条命令第一次会提议启动 Host。它们的说明、以及更早每个版本的说明，都在 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
+上一个版本 v0.2.9 把首次安装这条路铺了出来：装完 VS Code 自己打开的 walkthrough，以及空面板里那块说明接下来会发生什么的卡片；v0.2.7 修的是同一类错误在另一个命令里的表现：`Open Web UI` 把模式读成了一个关于铸签的布尔值，而那个布尔值对两种补救办法相反的模式都是 false。v0.2.6 让那条命令第一次会提议启动 Host。它们的说明、以及更早每个版本的说明，都在 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
 
 ## 环境要求
 
@@ -167,7 +159,7 @@ walkthrough 里的每个引用都是**校验过的**，不是信它没问题：�
    或从 [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases) 安装 VSIX：
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.2.9.vsix
+   code --install-extension harness-connector-deepseek-0.3.0.vsix
    ```
 
 3. **不用配置任何东西。** 默认的 `sessionMode: "auto"` 会先按 `credentials` 的方式连接：读取 `dsh web` 写在 `$DSH_HOME/.credentials.yaml` 里的浏览器会话签名密钥，自己签出同一个 `dsh-auth-…` cookie，**没有需要粘贴的 token**。如果端口上什么都没有，它就把 `dsh web` 起起来。
@@ -388,7 +380,7 @@ DSH_PORT=3081 npm run integration-test
 真正能启动，「Allow」也曾经从未真正放行，而这两件事在单元测试下都会是绿的。它们之所以
 做得到，是因为 `HarnessClient` 和 `BrowserSessionAuth` **不 import `vscode`**——所以
 `test/e2e/fake-host.ts` 是一个真的 `http.Server` 加一份手写的 WebSocket，这两条链路在
-纯 Node 里跑，完全不需要扩展宿主。假 Host 刻意照 `0.2.0-rc.2` 连围栏一起做：一个忘了
+纯 Node 里跑，完全不需要扩展宿主。假 Host 刻意照 `0.2.1-rc.2` 连围栏一起做：一个忘了
 要求 cookie 的 POST 路由会给线缆协商探测回 `200` 而不是 `401`，那样测到的就是错误的分类器。它的 waterfall 发送器把帧的作用域当参数收，所以第 4 条链路能把来自*另一个*会话的提问放上线，检查它落在那个会话上——以及一个没点名任何会话的帧干脆不产生任何卡片。
 
 第 5 条是「有风险」而不是「有 bug」的那一条，也是唯一一条以文件系统为主题的：
@@ -415,7 +407,7 @@ npm run typecheck
 npm run check-versions   # 每一个版本展示面都必须和 package.json 一致
 npm run protocol-test    # 针对假 harness 的 533 项协议断言
 npm run protocol-probe   # 报告真实 dsh web 暴露了什么
-npm run package          # → harness-connector-deepseek-0.2.9.vsix
+npm run package          # → harness-connector-deepseek-0.3.0.vsix
 ```
 
 在 VS Code 中按 `F5` 启动带有该扩展的扩展开发宿主。
@@ -455,9 +447,16 @@ npm run package          # → harness-connector-deepseek-0.2.9.vsix
 
 ## 已验证版本
 
+- **上游 `@deepseek-ai/dsh@0.2.1-rc.2`（来自 npm），两条认证路径都跑过。** 对由这个版本亲自启动的
+  Host 完整跑了两遍端到端：一遍由扩展从 `$DSH_HOME/.credentials.yaml` 铸签（**41/41**），一遍兑换
+  Host 打印的 `--port 0` 启动 URL（**41/41**）。线缆在 `0.2.0-rc.2` 与 `0.2.1-rc.2` 之间没有动——
+  同样的斜杠端点、同样的 `/api/remote.mux`、同样的 cookie 门、同样的 13 个控制面方法、同样的 `401`
+  指纹、同样的启动 URL 形状——所以这是一段**实测过的**支持范围，不是版本号恰好对得上。
+  `npm run protocol-probe` 会把任意一个 host 的实际接口面打出来。
+
 - 默认 `dsh web` 端口 `3080`，且 host 必须位于回环地址。
 - **线缆是协商出来的，不是猜出来的。** 端点风格（`session/list` 还是 `session.list`）、
-  是否需要 cookie、事件套接字在 0.2.0-rc.2 上是 `/api/remote.mux`、旧版上是 `/api/events.mux`——都在连接时
+  是否需要 cookie、事件套接字在 0.2.1-rc.2 上是 `/api/remote.mux`、旧版上是 `/api/events.mux`——都在连接时
   自动探测，同一个构建因此能跨 host 版本工作。跑 `npm run protocol-probe` 可以看到
   你的 host 到底提供了什么。
 - **对话流量不在事件套接字上。** 在 `0.2.1-alpha.2` 上，那条复用套接字承载着**两条**词表不同的

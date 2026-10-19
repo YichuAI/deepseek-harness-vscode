@@ -159,7 +159,7 @@ Manual checks:
 unzip -l harness-connector-deepseek-<ver>.vsix
 ```
 
-Expected (v0.2.9 = 18 files, 389,153 bytes in a clean checkout, ~380 KB):
+Expected (v0.3.0 = 18 files, 389,343 bytes in a clean checkout, ~380 KB):
 
 ```
 [Content_Types].xml
@@ -532,7 +532,8 @@ Marketplace, the bytes in the Release asset and the sha256 printed in the log ar
   `readme.md`/`changelog.md`, and the `*.zh-CN.md` twins ship verbatim. So every baseline
   below belongs to one particular tree, and editing a shipped doc afterwards invalidates it.
   Re-measure; do not carry the old figure forward. Shipped bytes, as `gh release view --json
-  assets` reports them — i.e. what a user actually downloads: `v0.2.9` = 389,153 (the first baseline with the walkthrough pages in it, and the
+  assets` reports them — i.e. what a user actually downloads: `v0.3.0` = 389,343 (same 18 files as `v0.2.9`, +94 bytes: this release changed claims and comments, not the shipped set);
+  `v0.2.9` = 389,153 (the first baseline with the walkthrough pages in it, and the
   fourth file added since `v0.2.8`). That tag's own CI run is **red**, and only on the
   workflow's `-eq 14` file count — the commit that teaches CI the new number (`1b3b339`)
   lands after the tag and changes nothing that ships, so the artifact and this baseline

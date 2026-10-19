@@ -380,7 +380,7 @@ function wsReadFrames(socket: Duplex, onText: (text: string) => void): void {
 // ─── fake harness ─────────────────────────────────────────────────────────────
 type AuthMode = 'none' | 'cookie'
 /**
- * Control-surface methods that exist in 0.2.0-rc.2 (the exact `CONTROL_METHODS`
+ * Control-surface methods that exist in 0.2.1-rc.2 (the exact `CONTROL_METHODS`
  * set the client probes). Everything else is reported absent.
  */
 const PRESENT_CONTROLS = new Set<string>([

@@ -145,7 +145,7 @@ npm run package            # → harness-connector-deepseek-<版本>.vsix
 unzip -l harness-connector-deepseek-<版本>.vsix
 ```
 
-预期（v0.2.9 = 18 个文件，干净检出 389,153 字节，约 380 KB）：
+预期（v0.3.0 = 18 个文件，干净检出 389,343 字节，约 380 KB）：
 
 ```
 [Content_Types].xml
@@ -464,6 +464,7 @@ Actions → **Release** → *Run workflow* → 填 `tag: v0.2.1`。它会检出�
   `changelog.md` 的形式随包，`*.zh-CN.md` 双胞胎原样随包。所以下面每一条基线都属于某一棵
   特定的树，事后再改一个随包文档，那个数字就作废了。重新量，不要把旧数字往下带。随包发出的
   字节数（也就是 `gh release view --json assets` 报出来的、用户真正下载的那个）：
+  `v0.3.0` = 389,343（与 `v0.2.9` 同样 18 个文件，多 94 字节：这次改的是声明与注释，不是随包集合）；
   `v0.2.9` = 389,153（第一份含 walkthrough 页面的基线，比 `v0.2.8` 多四个文件）。这个 tag 自己的 CI 是**红**的，
   且只红在 workflow 里那个 `-eq 14` 文件数上——把新数字教给 CI 的那次提交（`1b3b339`）在 tag 之后，不改任何随包
   内容，所以产物与这份基线都不受影响；

@@ -229,7 +229,7 @@ export class DownlinkSocket<Frame> implements Disposable {
  * The ws:// URL for the Remote event socket on a loopback target.
  *
  * `path` comes from the negotiated WireProfile: it is `/api/remote.mux` for the
- * 0.2.0-rc.2 runtime we target. The host formatting lives in `endpoint.ts` so
+ * 0.2.1-rc.2 runtime we target. The host formatting lives in `endpoint.ts` so
  * this URL and the `Origin:` header sent alongside it are built from the same
  * string — an IPv6 literal has to be bracketed in both or in neither.
  */

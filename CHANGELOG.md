@@ -5,6 +5,43 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),  
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-10-19
+
+Tagline: **the support claim named a release two versions behind the runtime it was measured
+on — so the claim is now the measurement.**
+Tagline (ZH): **支持声明指着的那个版本，比真正测过的运行时落后两个版本——于是声明改成了实测。**
+
+### Changed
+
+- **Supported upstream is `@deepseek-ai/dsh@0.2.1-rc.2`.** That is what
+  `npm i -g @deepseek-ai/dsh` installs today. The suite was run end to end against a Host
+  started by that exact release, twice: once minting the cookie from
+  `$DSH_HOME/.credentials.yaml` (**41/41**), once redeeming the `--port 0` launch URL it
+  printed (**41/41**).
+- **Every surface that named `0.2.0-rc.2` now names `0.2.1-rc.2`** — the README badge, ten
+  architecture references, the protocol module's commentary, and the doc comments in
+  `client`/`events`/`launcher`/`wire` that say which runtime a behaviour was observed on.
+  Historical CHANGELOG entries keep their original numbers; they are history, not claims.
+
+### Verified, not assumed
+
+- **The wire did not move.** Slash endpoints, `/api/remote.mux`, the cookie gate, the
+  13-method control surface, the `401` fingerprint and the `--port 0` launch-URL shape are
+  identical between `0.2.0-rc.2` and `0.2.1-rc.2`. `scripts/protocol-probe.ts` was run
+  against both a `0.2.1-alpha.2` Host and a `0.2.1-rc.2` Host; the reports are identical
+  after normalising numbers, down to the 16/29 candidate routes that exist.
+- **What upstream added, this extension does not use**: `session/title`, `session/conflict`,
+  `settings/conflict`, `workspace/pinSession` / `unpinSession` / `rename` / `delete`, and a
+  session-format migration chain (`v3 → v4`). None is needed to read history, prompt, answer
+  approvals or review changes, so none was adopted speculatively.
+
+### Verification
+
+- Protocol assertions **533, unchanged** — a compatibility claim is not a protocol change, and
+  inventing fakes for it would have made the number grow without the coverage growing.
+- End-to-end chains **96**; version gate **52**; `tsc --noEmit` clean.
+- Live Host `0.2.1-rc.2`: **41/41** via local mint and **41/41** via launch URL.
+
 ## [0.2.9] — 2026-10-19
 
 Tagline: **the first thirty seconds were an icon and a grey line — and the live test only

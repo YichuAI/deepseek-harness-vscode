@@ -7,7 +7,7 @@
  * socket has been `/api/events.mux` then `/api/remote.mux`. Guessing is what
  * produced the broken v0.0.4 assumptions, so the wire shape is *discovered*.
  *
- * The reference runtime installed on this machine is **0.2.0-rc.2**, whose
+ * The reference runtime installed on this machine is **0.2.1-rc.2**, whose
  * contract (read from `@deepseek-ai/dsh-*`, not guessed) is:
  *
  *   1. endpoint style — `POST /api/<ns>/<method>` (slash). `session/list` is the
@@ -66,14 +66,14 @@ const CONVERTIBLE_NAMESPACES = new Set([
   'session', 'workspace', 'host', 'agentPreset', 'goal', 'llm', 'subagent', 'skill', 'settings', 'credentials', 'commands', 'fileReferences',
 ])
 
-/** Event-socket candidates, 0.2.0-rc.2 first (WS upgrade, not a GET route). */
+/** Event-socket candidates, 0.2.1-rc.2 first (WS upgrade, not a GET route). */
 const MUX_PATH_CANDIDATES = ['/api/remote.mux', '/api/events.mux'] as const
 
 /**
  * Control-surface methods, canonical `ns/method`.
  *
  * This is the superset the plugin *calls* and wants to gate the UI on. Every one
- * below actually exists in 0.2.0-rc.2 (older names like `session/command`,
+ * below actually exists in 0.2.1-rc.2 (older names like `session/command`,
  * `agentPreset/*`, `subagent/*`, `host/describe`, `workspace/list`, `llm/models`
  * do NOT, and were removed). Each is probed at connect time and the UI only
  * offers what answered.
@@ -213,7 +213,7 @@ async function postRpc(
 ): Promise<ProbeOutcome | undefined> {
   const cookie = opts.cookie()
   const rpcId = randomUUID()
-  // 0.2.0-rc.2: payload is ALWAYS { args: <inner> }.
+  // 0.2.1-rc.2: payload is ALWAYS { args: <inner> }.
   const body = JSON.stringify({ type: 'client-request', rpcId, method, payload: { args } })
   try {
     const res = await httpRequest({

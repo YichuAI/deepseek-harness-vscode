@@ -27,11 +27,11 @@ One page. Three stable boundaries: **wiring** (`extension.ts`), **orchestration*
 │ harness/auth.ts           — browser session cookie (token → cookie)│
 │ harness/http.ts           — node:http wrapper (exact Cookie/Set-Cookie)│
 │ harness/discovery.ts      — find the Host on loopback (401 fence)  │
-│ harness/protocol.ts       — wire types (mirror of 0.2.0-rc.2 Remote)│
+│ harness/protocol.ts       — wire types (mirror of 0.2.1-rc.2 Remote)│
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-- `harness/protocol.ts` is **types only** — zero runtime, zero dependencies. It mirrors the DSH **`0.2.0-rc.2`** Remote contract actually served by the host this plugin connects to: slash-style `POST /api/<ns>/<method>` with a `{ type:'client-request', payload:{ args } }` envelope, the `/api/remote.mux` bidirectional event socket (with a `ready` frame carrying `clientId` + `host.home`), `$events/result` for approvals, and `session/page` for history.
+- `harness/protocol.ts` is **types only** — zero runtime, zero dependencies. It mirrors the DSH **`0.2.1-rc.2`** Remote contract actually served by the host this plugin connects to: slash-style `POST /api/<ns>/<method>` with a `{ type:'client-request', payload:{ args } }` envelope, the `/api/remote.mux` bidirectional event socket (with a `ready` frame carrying `clientId` + `host.home`), `$events/result` for approvals, and `session/page` for history.
 - `harness/client.ts` is the **single** module allowed to make HTTP requests or open sockets. Everything above it goes through `HarnessClient`.
 - `harness/ws.ts` implements the handshake and frame codec itself rather than using the platform `WebSocket`: a browser-shaped WebSocket cannot set arbitrary request headers, and the mux upgrade now requires a `Cookie`.
 - `harness/auth.ts` is the only credential source. It takes the process token out of the `dsh web` launch URL, exchanges it via `GET /?token=…` for a `Set-Cookie`, and keeps the cookie in VS Code SecretStorage (`context.secrets`) — never in settings.json. autoSession can instead mint the same cookie locally from `$DSH_HOME/.credentials.yaml`.
@@ -76,7 +76,7 @@ Key changes:
 
 Replays are idempotent (`seq`-guarded), so reconnect → refetch history is safe.
 
-> **Assistant deltas are ordinary durable `session/event` frames.** In 0.2.0-rc.2 the
+> **Assistant deltas are ordinary durable `session/event` frames.** In 0.2.1-rc.2 the
 > streaming text arrives as `session/event` whose `event.type === 'assistant/chunk'`,
 > carrying a real `seq`, so it flows through the normal `applyEvent` fold — there is
 > no separate `assistant/stream` frame and no synthetic-seq bypass.
@@ -91,7 +91,7 @@ every connect rather than assuming a release:
 | --- | --- | --- | --- |
 | 1 | Auth | none / browser-session cookie | every probe answering 401 ⇒ cookie-gated |
 | 2 | Endpoint naming | `session.prompt` vs `session/prompt` | POST both shapes; a `server-response` wins, 404 ⇒ not this shape |
-| 3 | Event channel | `/api/remote.mux` (0.2.0-rc.2) vs `/api/events.mux` (older) | header-only GET; anything but 404 exists |
+| 3 | Event channel | `/api/remote.mux` (0.2.1-rc.2) vs `/api/events.mux` (older) | header-only GET; anything but 404 exists |
 
 A fourth axis is negotiated too: `session/list` has shipped with three different
 declared-parameter spellings (`_request`, `request`, none), so each is tried
@@ -127,7 +127,7 @@ every later request:          Cookie: dsh-auth-<b64url(sha256("<host>:<port>"))>
 
 ```jsonc
 // headers
-Cookie: dsh-auth-…=v1.…          // required on cookie-gated hosts (0.2.0-rc.2 gates /api/*)
+Cookie: dsh-auth-…=v1.…          // required on cookie-gated hosts (0.2.1-rc.2 gates /api/*)
 Content-Type: application/json
 // body: `payload` wraps the args in `{ args: … }`
 { "type": "client-request", "rpcId": "<uuid>", "method": "session/prompt",
@@ -137,7 +137,7 @@ Content-Type: application/json
 { "type": "server-response", "rpcId": "<same>", "result": { "ok": true, "value": { … } } }
 ```
 
-The endpoint is `namespace/method` **slash-style** on 0.2.0-rc.2
+The endpoint is `namespace/method` **slash-style** on 0.2.1-rc.2
 (`POST /api/session/prompt`); `harness/wire.ts` negotiates slash vs dot and renders
 every call through `HarnessClient.ep()`, so no module writes an endpoint literal.
 `payload` is `{ args: <declared-param-object> }` — this is the `client-request`
@@ -153,7 +153,7 @@ shape". HTTP status otherwise expresses only the carrier (`401` unauthenticated
 
 ### Event channel — `WS /api/remote.mux` *(bidirectional logical-stream mux)*
 
-0.2.0-rc.2 exposes a **bidirectional** WebSocket. The client opens
+0.2.1-rc.2 exposes a **bidirectional** WebSocket. The client opens
 `ws://<host>:<port>/api/remote.mux` (the path comes from `WireProfile.muxPath`,
 never a literal), then sends one `open` frame to subscribe to the `$events`
 logical stream:
@@ -254,7 +254,7 @@ Transport and messaging — always called (routed through the negotiated profile
 `session/page`, `session/modelCatalog`, `workspace/create`.
 Control surface — called only when capability probing confirmed the host serves
 them (see {@link probeCapabilities} in `harness/wire.ts`), and therefore safe to
-leave enabled against an older host. On 0.2.0-rc.2 the **present** set is:
+leave enabled against an older host. On 0.2.1-rc.2 the **present** set is:
 
 `session/fork`, `session/rename`, `session/selectModel`, `session/updateQueue`,
 `workspace/archiveSession`, `commands/execute`, `commands/list`,
@@ -297,7 +297,7 @@ fold — apply every event in order and you have the truth, whether it came from
 | `compaction/start` / `end` / `summary` | provenance + summary | compaction state |
 | `request/header` | `{ header: { config } }` | effective provider / model / effort |
 
-Write paths are split by what upstream actually exposes. On 0.2.0-rc.2 the
+Write paths are split by what upstream actually exposes. On 0.2.1-rc.2 the
 **slash-command write path** is `commands/execute` (`{agentId, line,
 submittedAttachments:[]}`) with the registry at `commands/list` — the earlier
 `session/command` RPC does not exist in rc.2. Plan mode, permission presets and
@@ -374,7 +374,8 @@ The picker runs in the extension host (the webview cannot read local disk), but
 staging happens on two completely different wires. The v0.1.0 guess — "everything
 goes through `session/attachment` as base64" — was wrong in both directions; the
 real contract was read out of `deepseek-harness@0.2.1-alpha.2`'s own source and
-then confirmed on a live host.
+then confirmed on a live host — and re-confirmed on `@deepseek-ai/dsh@0.2.1-rc.2`,
+where the whole surface below still answers exactly as described.
 
 **Images ride `session/prompt` inline.** `content` is a part union, and an image
 part is `{ type: 'image', mediaType, data, name? }` with `mediaType` one of
@@ -1075,7 +1076,7 @@ src/
 │   ├── collector.ts          # editor context (active file, selection)
 │   └── quick-task.ts         # pure: the nine right-click asks + the scheme policy
 ├── harness/
-│   ├── protocol.ts           # wire types (mirror of 0.2.0-rc.2 Remote)
+│   ├── protocol.ts           # wire types (mirror of 0.2.1-rc.2 Remote)
 │   ├── client.ts             # HarnessClient — only network edge
 │   ├── endpoint.ts           # the loopback fence + authority/origin/ws formatting
 │   ├── waterfall.ts          # pure: which session an answerable waterfall belongs to

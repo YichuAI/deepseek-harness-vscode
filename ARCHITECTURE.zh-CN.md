@@ -25,11 +25,11 @@
 │ harness/ws.ts             — 最小 RFC6455 客户端（可带 Cookie）   │
 │ harness/auth.ts           — 浏览器会话 cookie（token 换 cookie） │
 │ harness/http.ts           — node:http 封装（可控 Cookie/Set-Cookie）│
-│ harness/protocol.ts       — 线缆类型（镜像 0.2.0-rc.2 Remote 契约）│
+│ harness/protocol.ts       — 线缆类型（镜像 0.2.1-rc.2 Remote 契约）│
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-- `harness/protocol.ts` **只有类型**——零运行时、零依赖。它镜像 DSH **`0.2.0-rc.2`** 的 Remote 契约（即本插件实际连接的宿主真正提供的契约）：斜杠风格 `POST /api/<ns>/<method>`，信封为 `{ type:'client-request', payload:{ args } }`；事件通道是双向的 `/api/remote.mux`（首帧 `ready` 携带 `clientId` + `host.home`）；审批走 `$events/result`；历史走 `session/page`。
+- `harness/protocol.ts` **只有类型**——零运行时、零依赖。它镜像 DSH **`0.2.1-rc.2`** 的 Remote 契约（即本插件实际连接的宿主真正提供的契约）：斜杠风格 `POST /api/<ns>/<method>`，信封为 `{ type:'client-request', payload:{ args } }`；事件通道是双向的 `/api/remote.mux`（首帧 `ready` 携带 `clientId` + `host.home`）；审批走 `$events/result`；历史走 `session/page`。
 - `harness/client.ts` 是**唯一**允许发起 HTTP 或打开 socket 的模块。其上层所有代码都通过 `HarnessClient` 访问网络。
 - `harness/ws.ts` 自己实现握手与帧编解码，**不用**平台 `WebSocket`：浏览器形状的 WebSocket API 无法设置任意请求头，而 mux 升级现在必须带 `Cookie`。
 - `harness/auth.ts` 是唯一的凭据来源。它读取 `dsh web` 启动 URL 里的进程 token，用 `GET /?token=…` 换回 `Set-Cookie`，并把 cookie 存进 VS Code SecretStorage（`context.secrets`），不写进 settings.json。autoSession 也可改为从 `$DSH_HOME/.credentials.yaml` 本地自签同一个 cookie。
@@ -74,7 +74,7 @@ type ConversationItem =
 
 重放是幂等的（`seq` 守卫），所以断线重连 → 重新获取历史是安全的。
 
-> **助手流式增量就是普通的持久 `session/event` 帧。** 在 0.2.0-rc.2 中流式文本以
+> **助手流式增量就是普通的持久 `session/event` 帧。** 在 0.2.1-rc.2 中流式文本以
 > `session/event` 且 `event.type === 'assistant/chunk'` 的形式下发，携带真实 `seq`，
 > 因此走 `applyEvent` 的普通折叠——没有独立的 `assistant/stream` 帧，也不存在合成 seq 绕过。
 
@@ -87,7 +87,7 @@ type ConversationItem =
 | --- | --- | --- | --- |
 | 1 | 认证 | 无 / 浏览器会话 cookie | 所有探测都返回 401 ⇒ 需要 cookie |
 | 2 | 端点命名 | `session.prompt` 与 `session/prompt` | 两种都 POST，返回 `server-response` 者胜出；404 表示不是这种 |
-| 3 | 事件通道 | `/api/remote.mux`（0.2.0-rc.2）与 `/api/events.mux`（更旧） | 只读响应头的 GET；非 404 即存在 |
+| 3 | 事件通道 | `/api/remote.mux`（0.2.1-rc.2）与 `/api/events.mux`（更旧） | 只读响应头的 GET；非 404 即存在 |
 
 还有第四个维度同样协商：`session/list` 的形参名出过三种写法（`_request`、`request`、
 干脆没有），逐个尝试直到某个返回 `ok`。结果存为 `WireProfile`，一次连接内缓存，
@@ -120,7 +120,7 @@ GET /?token=<token>            → 303 See Other + Set-Cookie
 
 ```jsonc
 // 请求头
-Cookie: dsh-auth-…=v1.…          // cookie 受限的 host 必须带（0.2.0-rc.2 对 /api/* 全部鉴权）
+Cookie: dsh-auth-…=v1.…          // cookie 受限的 host 必须带（0.2.1-rc.2 对 /api/* 全部鉴权）
 Content-Type: application/json
 // 请求体：payload 把参数包在 { args: … } 里
 { "type": "client-request", "rpcId": "<uuid>", "method": "session/prompt",
@@ -130,7 +130,7 @@ Content-Type: application/json
 { "type": "server-response", "rpcId": "<相同>", "result": { "ok": true, "value": { … } } }
 ```
 
-端点在 0.2.0-rc.2 上是 **斜杠** `namespace/method`（`POST /api/session/prompt`）；`harness/wire.ts`
+端点在 0.2.1-rc.2 上是 **斜杠** `namespace/method`（`POST /api/session/prompt`）；`harness/wire.ts`
 协商 slash 与 dot 两种风格，所有调用都经 `HarnessClient.ep()` 渲染，没有任何模块写端点字面量。
 `payload` 是 `{ args: <声明的参数对象> }`——这正是 host 期望的 `client-request` 信封。
 唯一遗留的坑：`session/list` 的参数名在历史上出现过三种写法（`_request`、`request`、无），
@@ -143,7 +143,7 @@ Content-Type: application/json
 
 ### 事件通道 — `WS /api/remote.mux`（*双向逻辑流 mux*）
 
-0.2.0-rc.2 暴露的是一条**双向** WebSocket。客户端打开 `ws://<host>:<port>/api/remote.mux`
+0.2.1-rc.2 暴露的是一条**双向** WebSocket。客户端打开 `ws://<host>:<port>/api/remote.mux`
 （实际路径来自 `WireProfile.muxPath`，不写死），随后发一帧 `open` 去订阅 `$events` 逻辑流：
 
 ```jsonc
@@ -224,7 +224,7 @@ VS Code 的卡片会永远点得动。
 `session/page`、`session/modelCatalog`、`workspace/create`。
 
 控制面——**仅在能力探测确认该 host 提供时**才调用（见 `harness/wire.ts` 的
-`probeCapabilities`），因此面对旧版 host 保持开启也是安全的。在 0.2.0-rc.2 上**存在**的集合是：
+`probeCapabilities`），因此面对旧版 host 保持开启也是安全的。在 0.2.1-rc.2 上**存在**的集合是：
 
 `session/fork`、`session/rename`、`session/selectModel`、`session/updateQueue`、
 `workspace/archiveSession`、`commands/execute`、`commands/list`、
@@ -262,7 +262,7 @@ harness 把各种旋钮以持久会话事件的形式下发，而且都是**全�
 | `compaction/start` / `end` / `summary` | provenance + 摘要 | 压缩状态 |
 | `request/header` | `{ header: { config } }` | 当前生效的 provider / model / 推理强度 |
 
-写路径按上游实际提供的方式分两类。在 0.2.0-rc.2 上**命令注册表**（`session/command`）并不提供，
+写路径按上游实际提供的方式分两类。在 0.2.1-rc.2 上**命令注册表**（`session/command`）并不提供，
 因此计划模式、权限预设、压缩**仅显示（来自线缆事件），不可从 VS Code 写入**；fork / rename /
 archive / 模型选择 / 队列调速各有专用端点（`session/fork`、`session/rename`、
 `workspace/archiveSession`、`session/selectModel`、`session/updateQueue`），每个都经实时的能力探测
@@ -273,7 +273,8 @@ archive / 模型选择 / 队列调速各有专用端点（`session/fork`、`sess
 
 选文件发生在扩展宿主（webview 读不到本地磁盘），但**落地走的是两条完全不同的线**。
 v0.1.0 那个"所有东西都 base64 走 `session/attachment`"的猜测两个方向都错了；真实契约是从
-`deepseek-harness@0.2.1-alpha.2` 源码里读出来、再在真机上确认的。
+`deepseek-harness@0.2.1-alpha.2` 源码里读出来、再在真机上确认的；`@deepseek-ai/dsh@0.2.1-rc.2` 上又
+重新确认了一遍，下面这一整张接口面在新 Host 上的应答与描述完全一致。
 
 **图片直接内联在 `session/prompt` 里。** `content` 是部件联合，图片部件为
 `{ type: 'image', mediaType, data, name? }`，`mediaType` 取
@@ -812,7 +813,7 @@ src/
 │   ├── collector.ts          # 编辑器上下文（活动文件、选区）
 │   └── quick-task.ts         # 纯函数：九条右键提问 + scheme 策略
 ├── harness/
-│   ├── protocol.ts           # 线缆类型（镜像 0.2.0-rc.2 Remote）
+│   ├── protocol.ts           # 线缆类型（镜像 0.2.1-rc.2 Remote）
 │   ├── wire.ts               # 协议协商 + 能力探测
 │   ├── client.ts             # HarnessClient — 唯一网络边界
 │   ├── auth.ts               # 浏览器会话 cookie 生命周期 + 本地自签

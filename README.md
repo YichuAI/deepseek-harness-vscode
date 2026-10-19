@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/dsh-0.2.0--rc.2-2f6feb?style=flat-square" alt="dsh 0.2.0-rc.2">
+  <img src="https://img.shields.io/badge/dsh-0.2.1--rc.2-2f6feb?style=flat-square" alt="dsh 0.2.1-rc.2">
   <img src="https://img.shields.io/badge/setup-attach--only-1a7f37?style=flat-square" alt="setup: attach-only">
   <img src="https://img.shields.io/badge/ui-no%20webview-8250df?style=flat-square" alt="ui: no webview">
   <img src="https://img.shields.io/badge/VS%20Code-%E2%89%A5%201.85-007ACC?style=flat-square" alt="VS Code 1.85 or later">
@@ -57,7 +57,7 @@
 | **What it needs** | VS Code ≥ 1.85, and a Harness on the **same machine** as the window. That is the one hard constraint; see [Remote development](#remote-development). |
 | **Install** | `code --install-extension lucasliang.harness-connector-deepseek` |
 
-**Jump to:** [What it does](#what-it-does) · [What's new](#whats-new-in-v029) · [Quick start](#quick-start) · [Configuration](#configuration) · [Commands](#commands) · [Remote development](#remote-development) · [Limitations](#limitations) · [Development](#development) · [Design](#design-dsh-owns-the-write-the-plugin-observes-and-tells)
+**Jump to:** [What it does](#what-it-does) · [What's new](#whats-new-in-v030) · [Quick start](#quick-start) · [Configuration](#configuration) · [Commands](#commands) · [Remote development](#remote-development) · [Limitations](#limitations) · [Development](#development) · [Design](#design-dsh-owns-the-write-the-plugin-observes-and-tells)
 
 ## What it does
 
@@ -96,43 +96,37 @@ VS Code reads the workspaces and sessions the browser already has, and continues
 
 *Top left: the same session at the same moment in two clients — nothing imported, mirrored or forked. Top right: "Diff" is VS Code's own diff editor, not a webview imitation — the left side is the text the plugin captured before the change. Bottom left: the conversation lives in the sidebar, tool rows and changed-files card included. Bottom right: the browser side, untouched.*
 
-## What's new in v0.2.9
+## What's new in v0.3.0
 
-**It was invisible during the only thirty seconds that decide whether it gets used.**
+**The upstream it advertised was two releases behind the one it was tested on.**
 
-Installing this put an icon in the activity bar and said nothing else. If the automatic connect worked, the panel was an empty transcript reading "Disconnected. Click Connect above." — accurate, and useless to somebody who has never heard of a Host, does not know whether they are meant to start one, and has no idea what will happen to their files.
-
-| | |
-| --- | --- |
-| **A walkthrough, opened by VS Code itself** | `contributes.walkthroughs`. VS Code opens the Getting Started page when an extension that ships one is installed — the one moment it has the user's attention. Four steps: where the panel is, what the status row means, what the composer can do, and the difference between an approval and a review. |
-| **A first-run card where the grey line was** | Until something has connected once, the empty panel says what happens next and carries the single button that starts it. After the first connect it goes back to one line: by then the status row is the actionable part, and a second copy of it here would be noise. |
-
-The walkthrough does **not** use `viewsWelcome`, and that is a decision rather than an omission. Welcome content applies to empty **tree** views only — [the docs](https://code.visualstudio.com/api/references/contribution-points) say so, and [the issue that settled it](https://github.com/microsoft/vscode/issues/105832) is explicit — and this panel is a webview. Contributing it would have added a fifth dead field to a release whose entire point was that the fourth one now does something. What a webview can do is draw its own welcome, which is the second row above.
-
-Every reference in a walkthrough is checked rather than trusted, because a dangling one fails silently: VS Code renders the step, and the button does nothing. Nine gate assertions resolve each `command:` link against `contributes.commands`, each `completionEvents` value against the commands and views that exist, and each `media.markdown` against a file on disk that is not empty.
-
-**And the live test stopped assuming it was running on Windows.**
-
-`integration-test.ts` defaulted its workspace to `e:\deepseek\workspace_test`, then asserted that the Host already knew that directory. It passed on one machine and failed at step 5 on Linux, where the path matched no workspace. Nothing was wrong with the extension: the test had baked in one machine's history, and would fail the same way on a fresh Host anywhere.
+The badge said `dsh 0.2.0-rc.2`. What `npm i -g @deepseek-ai/dsh` actually installs is
+`0.2.1-rc.2`, and its release notes never mention this extension — so "does it still work?"
+was a question every user had to answer by trying. This release answers it with measurements
+instead of a version string.
 
 | | |
 | --- | --- |
-| **The workspace belongs to the run** | `TEST_CWD` when the caller has an opinion, otherwise a directory created under the system temp dir and removed on success. Step 5 now passes against a Host that has never seen the path. |
-| **The derived registry is asserted in the right order** | There is no `workspace/list` RPC — `listWorkspaces()` folds the registry out of `session/list` — so "the workspace is known" is checked *after* a session exists, instead of demanding that some earlier run had made one. |
-| **One definition of "same path"** | The comparison moved to `harness/path-identity.ts`, where the launcher's `PATH` de-duplication already needed exactly this rule. Five assertions pin it for both platforms — Windows ignores case and both separators, POSIX ignores neither — and they run on Linux in CI too, which is the platform that could not see the bug. |
+| **Declared: `0.2.1-rc.2`** | Every claim in this repository now names that release — the badge, the protocol commentary, the architecture notes. |
+| **Measured, both ways in** | Against a Host started by that exact npm release: **41/41** with the cookie minted from `$DSH_HOME/.credentials.yaml`, and **41/41** again redeeming the `--port 0` launch URL it printed. Two authentication paths, the same 41 checks. |
+| **The wire did not move** | Slash endpoints, `/api/remote.mux`, the cookie gate, the 13-method control surface, the `401` fingerprint and the launch-URL shape are unchanged from `0.2.0-rc.2`. That is the finding, not the assumption: every route this client depends on was re-probed against the new Host. |
+
+What upstream did add is surface this extension does not use: `session/title`,
+`session/conflict`, `settings/conflict`, `workspace/pinSession` / `unpinSession` / `rename` /
+`delete`, and a session-format migration chain (`v3 → v4`). None of it is needed to keep
+reading a session, prompting, answering approvals or reviewing changes.
 
 Verification:
 
 | Gate | Result |
 | --- | --- |
-| Protocol assertions (fake Harness, no `dsh` needed) | **533 assertions** — 523 in v0.2.8 |
-| End-to-end chains | **96** across 3 of 5 chains; the other two still print as unwritten rather than being quietly omitted |
-| Live Host (`0.2.1-alpha.2`, `127.0.0.1:3080`) | **41/41**, in a workspace created for the run |
+| Protocol assertions | **533 assertions** — unchanged, because compatibility is not a protocol change; the compatibility claim is carried by the live runs below, not by new fakes |
+| End-to-end chains | **96** across 3 of 5 chains |
+| Live Host (`0.2.1-rc.2`), local mint | **41/41** |
+| Live Host (`0.2.1-rc.2`), launch URL | **41/41** |
 | Version gate | **52** checks |
 
-Ten of the new assertions are about whether the walkthrough renders at all and whether the first-run card carries a button that really posts a connect. That second one is not ceremony: a card rebuilt on every render would still draw its button, and pressing it would do nothing — which is precisely what the protocol test now rules out.
-
-The version before this one — v0.2.8 — made the default able to start a Host at all. v0.2.7 fixed the same class of mistake in a different command: `Open Web UI` was reading the mode as a boolean about minting, which is `false` for two modes whose remedies are opposites. v0.2.6 made that command offer to start a Host at all. Their notes, and every earlier release's, are in [CHANGELOG.md](./CHANGELOG.md).
+The version before this one — v0.2.9 — built the first-run path: a walkthrough VS Code opens on install, and a card in the empty panel that says what will happen next. v0.2.7 fixed the same class of mistake in a different command: `Open Web UI` was reading the mode as a boolean about minting, which is `false` for two modes whose remedies are opposites. v0.2.6 made that command offer to start a Host at all. Their notes, and every earlier release's, are in [CHANGELOG.md](./CHANGELOG.md).
 
 ## Requirements
 
@@ -172,7 +166,7 @@ The version before this one — v0.2.8 — made the default able to start a Host
    Or install the VSIX from [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases):
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.2.9.vsix
+   code --install-extension harness-connector-deepseek-0.3.0.vsix
    ```
 
 3. Nothing to configure. The default `sessionMode: "auto"` first does what
@@ -437,7 +431,7 @@ did not start until v0.1.1, and "Allow" never actually allowed until later, and 
 test would have been green through both. They are possible because `HarnessClient` and
 `BrowserSessionAuth` **import no `vscode`** — so `test/e2e/fake-host.ts` is a real
 `http.Server` with a hand-written WebSocket, and the two chains run in plain Node with no
-Extension Host at all. The fake Host is deliberately `0.2.0-rc.2`-shaped including its
+Extension Host at all. The fake Host is deliberately `0.2.1-rc.2`-shaped including its
 fences: a POST route that forgot to require the cookie would answer the wire-negotiation
 probe with `200` instead of `401`, and the test would then be measuring the wrong
 classifier. Its waterfall emitter takes the frame's scope as an argument, so chain 4 can
@@ -471,7 +465,7 @@ npm run typecheck
 npm run check-versions   # every version surface must agree with package.json
 npm run protocol-test    # 533 protocol assertions against a fake harness
 npm run protocol-probe   # report what your real dsh web exposes
-npm run package          # → harness-connector-deepseek-0.2.9.vsix
+npm run package          # → harness-connector-deepseek-0.3.0.vsix
 ```
 
 Press `F5` in VS Code to launch an Extension Development Host with the extension loaded.
@@ -514,10 +508,19 @@ What is ruled out is as much a part of the design as what is included:
 
 ## Verified against
 
+- **Upstream `@deepseek-ai/dsh@0.2.1-rc.2`, from npm, both ways in.** The suite runs end to end
+  against a Host started by that exact release twice: once where the extension mints the cookie
+  from `$DSH_HOME/.credentials.yaml` (**41/41**), once where it redeems the `--port 0` launch URL
+  the Host printed (**41/41**). The wire did not move between `0.2.0-rc.2` and `0.2.1-rc.2` —
+  same slash endpoints, same `/api/remote.mux`, same cookie gate, same 13-method control surface,
+  same `401` fingerprint, same launch-URL shape — so this is a measured support range rather than
+  a version string that happens to match. `npm run protocol-probe` prints the whole surface for
+  whatever host you point it at.
+
 - Default `dsh web` port `3080`; the host must be on loopback.
 - **The wire is negotiated, not assumed.** Endpoint style (`session/list` vs
   `session.list`), cookie gating, and the event socket (`/api/remote.mux` on
-  0.2.0-rc.2, `/api/events.mux` on older hosts) are all discovered at connect
+  0.2.1-rc.2, `/api/events.mux` on older hosts) are all discovered at connect
   time, so one build works across host releases. Run `npm run protocol-probe` to
   see what your host actually serves.
 - **Conversation traffic is not on the event socket.** On `0.2.1-alpha.2` the

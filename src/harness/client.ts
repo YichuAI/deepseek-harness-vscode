@@ -431,7 +431,7 @@ export class HarnessClient implements Disposable {
 
   /** Workspace list — derived from `session/list` projections; see listSessions.
    *
-   *  0.2.0-rc.2 has **no** `workspace/list` RPC (verified: HTTP 404 on a live
+   *  0.2.1-rc.2 has **no** `workspace/list` RPC (verified: HTTP 404 on a live
    *  host, and zero occurrences in the harness source). Workspaces are however
    *  observable: every `session/list` row carries a host-canonical `cwd`, and
    *  those directories are 1:1 with the workspace registry (a workspace is
@@ -483,7 +483,7 @@ export class HarnessClient implements Disposable {
   }
 
   /**
-   * Read one opening history window. `session.page` is the unary RPC in 0.2.0-rc.2
+   * Read one opening history window. `session.page` is the unary RPC in 0.2.1-rc.2
    * (there is no `session.history`):
    *   POST /api/session/page  payload { args:{ request:{ address, throughSeq, beforeSeq?, maxMessages? } } }
    * → { records:[{type:'event',event}], hasMore }.

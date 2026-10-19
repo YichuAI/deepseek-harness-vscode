@@ -1,7 +1,7 @@
 /**
  * Wire protocol types — a faithful, dependency-free mirror of the DeepSeek
  * Harness Remote contract as implemented by the installed `dsh web` runtime
- * (observed against the bundled `@deepseek-ai/dsh-*` 0.2.0-rc.2 packages).
+ * (observed against the bundled `@deepseek-ai/dsh-*` 0.2.1-rc.2 packages).
  *
  * This file is the single source of truth for everything that crosses the
  * network. Authoritative shapes (read from the installed runtime, not guessed):
@@ -27,7 +27,7 @@
  *      Host pushes frames `{ type:'item'|'end'|'error', streamId, value }`; for
  *      the `$events` stream each `item.value` is a MuxFrame. The FIRST item's
  *      value is `{ type:'ready', clientId, host:{ home } }` — that is the only
- *      host-identity frame; there is NO `host.describe` in 0.2.0-rc.2.
+ *      host-identity frame; there is NO `host.describe` in 0.2.1-rc.2.
  *   4. Approvals arrive as `approval/request` (a "waterfall" event) and are
  *      answered by the unary RPC `POST /api/$events/result` with
  *      `{ clientId, eventId, outcome }` — NOT by `POST /api/respond`.
@@ -78,7 +78,7 @@ export interface RpcError {
 
 // ─── harness identity ────────────────────────────────────────────────────────
 /**
- * What the plugin knows about the host. 0.2.0-rc.2 supplies this from the
+ * What the plugin knows about the host. 0.2.1-rc.2 supplies this from the
  * `ready` frame only (`host.home` + `clientId`). `version` is a build-time
  * constant the host never transmits; `provider`/`model` are per-session and are
  * best-effort populated from `session/list` projections when present.
@@ -88,7 +88,7 @@ export interface HarnessInfo {
   home: string
   /** Opaque id of this client event generation (from the `ready` frame). */
   clientId?: string
-  /** Unavailable in 0.2.0-rc.2 (host never sends it); kept optional. */
+  /** Unavailable in 0.2.1-rc.2 (host never sends it); kept optional. */
   version?: string
   provider?: string
   model?: string
@@ -300,7 +300,7 @@ export interface SessionForkValue {
   sessionId: SessionId
 }
 
-/** Request of `session/page` (unary RPC in 0.2.0-rc.2). */
+/** Request of `session/page` (unary RPC in 0.2.1-rc.2). */
 export interface SessionPageRequest {
   address: SessionAddress
   throughSeq: number
@@ -314,7 +314,7 @@ export interface SessionPageRecord {
   event: SessionEvent
 }
 
-/** `session.page` response value (unary RPC in 0.2.0-rc.2). */
+/** `session.page` response value (unary RPC in 0.2.1-rc.2). */
 export interface SessionPageValue {
   records: readonly SessionPageRecord[]
   hasMore: boolean

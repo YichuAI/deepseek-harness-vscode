@@ -40,6 +40,7 @@ import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { access } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { posix, win32 } from 'node:path'
+import { pathKey } from './path-identity.ts'
 
 /**
  * The `dsh web` launch line.
@@ -133,9 +134,9 @@ export function envWithAugmentedPath(
 ): NodeJS.ProcessEnv {
   const separator = delimiterFor(platform)
   const current = (env['PATH'] ?? '').split(separator).filter((p) => p !== '')
-  const seen = new Set(current.map((p) => (platform === 'win32' ? p.toLowerCase() : p)))
+  const seen = new Set(current.map((p) => pathKey(p, platform)))
   const extra = pathAugmentations(platform, env).filter((p) => {
-    const key = platform === 'win32' ? p.toLowerCase() : p
+    const key = pathKey(p, platform)
     if (seen.has(key)) return false
     seen.add(key)
     return true

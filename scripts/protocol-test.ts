@@ -70,6 +70,7 @@ import {
   findLaunchUrl, launchPlan, redactLaunchUrl, usesNpx,
 } from '../src/harness/launcher.ts'
 import { waterfallSession } from '../src/harness/waterfall.ts'
+import { pathKey, samePath } from '../src/harness/path-identity.ts'
 import { ReviewStore } from '../src/review/store.ts'
 import type { HunkState } from '../src/review/types.ts'
 import { applyUndo, rebuild } from '../src/review/patch.ts'
@@ -1840,6 +1841,36 @@ async function main(): Promise<void> {
     check('the no-markdown-it fallback still boots the panel', degraded.handlerRegistered, degraded.error)
     eq('the fallback still renders Connected', degraded.statusText, 'Connected')
 
+    // ─── G1b. the first-run card ────────────────────────────────────────────
+    // A freshly installed extension has nothing in the transcript, and the only
+    // thing it used to say was "Disconnected. Click Connect above" — true, and
+    // no help at all to somebody who does not yet know what a Host is. The card
+    // exists to answer that, and its button has to actually ask to connect.
+    const fresh = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, { connection: 'disconnected' })
+    const freshText = stubText(fresh.el('messages'))
+    check('a disconnected panel explains what will happen', freshText.includes('Approve, then review'),
+      freshText.slice(0, 90))
+    const freshGo = stubButtons(fresh.el('messages'))
+      .find((b) => String(b['textContent']) === 'Connect')
+    check('...and offers a Connect button rather than only naming the state', freshGo !== undefined,
+      `${String(stubButtons(fresh.el('messages')).length)} button(s)`)
+    if (freshGo) fire(freshGo, 'click')
+    check('...which asks the controller to connect',
+      fresh.actions.some((a) => a['type'] === 'connect'), JSON.stringify(fresh.actions))
+
+    // Re-rendered on every state push, and the card must not be rebuilt: the
+    // listener lives on the node, so a fresh one per render would leave a card
+    // whose button does nothing.
+    const nodesBefore = fresh.stats.nodes
+    fresh.push({ connection: 'disconnected' })
+    check('...and is built once, not on every render', fresh.stats.nodes === nodesBefore,
+      `${String(nodesBefore)} → ${String(fresh.stats.nodes)} node(s)`)
+
+    const idleNoSnap = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, { connection: 'connected' })
+    check('a connected panel with nothing to show keeps the one-line message',
+      !stubText(idleNoSnap.el('messages')).includes('Approve, then review'),
+      stubText(idleNoSnap.el('messages')).slice(0, 90))
+
     // ─── G2. the pending panel: approvals + ask_user_question ───────────────
     // Both block the Host, and a question used to be dropped on the floor by the
     // controller, so the agent's tool call waited on an answer nobody could give.
@@ -3399,6 +3430,20 @@ async function main(): Promise<void> {
           .split(';').map((p) => p.toLowerCase())
         return parts.filter((p) => p === 'c:\\program files\\nodejs').length === 1
       })())
+    // Path identity. The live integration test used to own a second copy of this
+    // rule and got it wrong in a way only Linux could show, so the rule lives in
+    // one place and the assertions that pin it run on every platform — the
+    // `platform` argument is what makes that possible from one machine.
+    check('Windows treats both separators as separators, and case as noise',
+      samePath('C:\\a\\b', 'c:/a/b', 'win32') && samePath('C:\\a\\\\b', 'C:/a/b/', 'win32'))
+    check('POSIX keeps case, because the filesystem does',
+      !samePath('/tmp/A', '/tmp/a', 'linux'))
+    check('...and a trailing separator is never meaning',
+      samePath('/tmp/a', '/tmp/a/', 'linux'))
+    check('...while a backslash stays an ordinary character in a filename',
+      !samePath('/tmp/a\\b', '/tmp/a/b', 'linux'))
+    eq('the key is stable across the two spellings of one Windows path',
+      pathKey('C:\\Work\\Repo\\', 'win32'), pathKey('c:/work/repo', 'win32'))
     // Linux has no desktop package at all, and offering a path that never exists
     // would make the "is it installed?" answer permanently wrong.
     eq('a desktop install path is only offered where a desktop build exists',

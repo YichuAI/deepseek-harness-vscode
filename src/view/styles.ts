@@ -178,6 +178,22 @@ textarea { resize: none; min-height: 60px; max-height: 200px; width: 100%; }
 #open-web a:hover { text-decoration: underline; }
 .empty { text-align: center; color: var(--vscode-descriptionForeground); padding: 24px 12px; font-size: 12px; }
 
+/* First-run card. Replaces the one-line empty state until something has
+   connected once: same slot, but it can be read by somebody who has never seen
+   this extension before. */
+.first-run { padding: 18px 12px; font-size: 12px; color: var(--vscode-foreground); }
+.first-run .fr-step { display: flex; gap: 8px; margin-bottom: 10px; }
+.first-run .fr-n {
+  flex: 0 0 18px; height: 18px; line-height: 18px; border-radius: 50%;
+  text-align: center; font-size: 10px; font-weight: bold;
+  background: var(--vscode-badge-background, rgba(128,128,128,.25));
+  color: var(--vscode-badge-foreground, var(--vscode-foreground));
+}
+.first-run .fr-body { flex: 1 1 auto; min-width: 0; }
+.first-run .fr-title { font-weight: bold; }
+.first-run .fr-note { color: var(--vscode-descriptionForeground); line-height: 1.45; }
+.first-run .fr-actions { margin-top: 14px; }
+
 /* Context injection UI */
 .context-bar { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 0; align-items: center; }
 .ctx-chip {

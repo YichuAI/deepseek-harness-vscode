@@ -57,7 +57,7 @@
 | **What it needs** | VS Code ≥ 1.85, and a Harness on the **same machine** as the window. That is the one hard constraint; see [Remote development](#remote-development). |
 | **Install** | `code --install-extension lucasliang.harness-connector-deepseek` |
 
-**Jump to:** [What it does](#what-it-does) · [What's new](#whats-new-in-v028) · [Quick start](#quick-start) · [Configuration](#configuration) · [Commands](#commands) · [Remote development](#remote-development) · [Limitations](#limitations) · [Development](#development) · [Design](#design-dsh-owns-the-write-the-plugin-observes-and-tells)
+**Jump to:** [What it does](#what-it-does) · [What's new](#whats-new-in-v029) · [Quick start](#quick-start) · [Configuration](#configuration) · [Commands](#commands) · [Remote development](#remote-development) · [Limitations](#limitations) · [Development](#development) · [Design](#design-dsh-owns-the-write-the-plugin-observes-and-tells)
 
 ## What it does
 
@@ -96,40 +96,43 @@ VS Code reads the workspaces and sessions the browser already has, and continues
 
 *Top left: the same session at the same moment in two clients — nothing imported, mirrored or forked. Top right: "Diff" is VS Code's own diff editor, not a webview imitation — the left side is the text the plugin captured before the change. Bottom left: the conversation lives in the sidebar, tool rows and changed-files card included. Bottom right: the browser side, untouched.*
 
-## What's new in v0.2.8
+## What's new in v0.2.9
 
-**The default was a valid credential for a Host that did not exist.**
+**It was invisible during the only thirty seconds that decide whether it gets used.**
 
-`deepseekHarness.sessionMode` defaulted to `credentials`, which answers one question — who you are — and says nothing about whether anything is listening. On a machine where nobody had run `dsh web`, the first connect failed, and the status row answered with a paragraph that ended in "or set `sessionMode` to …". The extension knew what was wrong and could have fixed it with the click that was already on screen.
+Installing this put an icon in the activity bar and said nothing else. If the automatic connect worked, the panel was an empty transcript reading "Disconnected. Click Connect above." — accurate, and useless to somebody who has never heard of a Host, does not know whether they are meant to start one, and has no idea what will happen to their files.
 
 | | |
 | --- | --- |
-| **`auto` is the default** | Mint from `$DSH_HOME/.credentials.yaml` when it is readable, and start a Host when nothing answers. Authentication and reachability were being treated as one question; they are two. |
-| **The repair is a button now** | `ConnectionHint.repair` has been defined since the failure classifier was written, filled in by every hint, and asserted by the protocol test — and never drawn. The panel rendered `install` and a line of prose, so the remedy was a sentence about a setting rather than a control that changes it. |
+| **A walkthrough, opened by VS Code itself** | `contributes.walkthroughs`. VS Code opens the Getting Started page when an extension that ships one is installed — the one moment it has the user's attention. Four steps: where the panel is, what the status row means, what the composer can do, and the difference between an approval and a review. |
+| **A first-run card where the grey line was** | Until something has connected once, the empty panel says what happens next and carries the single button that starts it. After the first connect it goes back to one line: by then the status row is the actionable part, and a second copy of it here would be noise. |
 
-`auto` is safe to be the default because of the order it runs in: the mint happens first, so an already-running Host is adopted with exactly the cookie earlier versions sent, byte for byte. Only a port with nothing on it reaches the launcher. For a working setup, nothing changes.
+The walkthrough does **not** use `viewsWelcome`, and that is a decision rather than an omission. Welcome content applies to empty **tree** views only — [the docs](https://code.visualstudio.com/api/references/contribution-points) say so, and [the issue that settled it](https://github.com/microsoft/vscode/issues/105832) is explicit — and this panel is a webview. Contributing it would have added a fifth dead field to a release whose entire point was that the fourth one now does something. What a webview can do is draw its own welcome, which is the second row above.
 
-For a broken one it is the difference between reading a diagnosis and pressing it:
+Every reference in a walkthrough is checked rather than trusted, because a dangling one fails silently: VS Code renders the step, and the button does nothing. Nine gate assertions resolve each `command:` link against `contributes.commands`, each `completionEvents` value against the commands and views that exist, and each `media.markdown` against a file on disk that is not empty.
 
-| `sessionMode` | The repair button | Why that one |
-| --- | --- | --- |
-| `credentials` | **Switch to auto** | It cannot start a Host by design, so "Retry" would offer the one action guaranteed not to help. |
-| `paste` | **Paste launch URL** | Being asked is the mode, not a fallback. |
-| `auto`, `managed` | **Retry** | The launcher was already tried; there is no setting left to change. |
+**And the live test stopped assuming it was running on Windows.**
 
-An explicit `credentials` on disk is still honoured rather than migrated — it is the right mode on a machine that always has a Host running, and a release should not overrule somebody who chose it.
+`integration-test.ts` defaulted its workspace to `e:\deepseek\workspace_test`, then asserted that the Host already knew that directory. It passed on one machine and failed at step 5 on Linux, where the path matched no workspace. Nothing was wrong with the extension: the test had baked in one machine's history, and would fail the same way on a fresh Host anywhere.
+
+| | |
+| --- | --- |
+| **The workspace belongs to the run** | `TEST_CWD` when the caller has an opinion, otherwise a directory created under the system temp dir and removed on success. Step 5 now passes against a Host that has never seen the path. |
+| **The derived registry is asserted in the right order** | There is no `workspace/list` RPC — `listWorkspaces()` folds the registry out of `session/list` — so "the workspace is known" is checked *after* a session exists, instead of demanding that some earlier run had made one. |
+| **One definition of "same path"** | The comparison moved to `harness/path-identity.ts`, where the launcher's `PATH` de-duplication already needed exactly this rule. Five assertions pin it for both platforms — Windows ignores case and both separators, POSIX ignores neither — and they run on Linux in CI too, which is the platform that could not see the bug. |
 
 Verification:
 
 | Gate | Result |
 | --- | --- |
-| Protocol assertions (fake Harness, no `dsh` needed) | **523 assertions** — 512 in v0.2.7, 504 in v0.2.6, 493 in v0.2.5 |
+| Protocol assertions (fake Harness, no `dsh` needed) | **533 assertions** — 523 in v0.2.8 |
 | End-to-end chains | **96** across 3 of 5 chains; the other two still print as unwritten rather than being quietly omitted |
-| Live Host (`0.2.0-rc.2`, `127.0.0.1:3080`) | **41/41** |
+| Live Host (`0.2.1-alpha.2`, `127.0.0.1:3080`) | **41/41**, in a workspace created for the run |
+| Version gate | **52** checks |
 
-The eleven new assertions are about the default and about the button existing at all: that `auto` is both halves, that an unknown or absent setting falls back to the mode that can start something, that an explicit `credentials` is not silently rewritten, that each failure names the repair which can actually help it, and that every repair carries a label — because the button shows nothing else.
+Ten of the new assertions are about whether the walkthrough renders at all and whether the first-run card carries a button that really posts a connect. That second one is not ceremony: a card rebuilt on every render would still draw its button, and pressing it would do nothing — which is precisely what the protocol test now rules out.
 
-The version before this one — v0.2.7 — fixed the same class of mistake in a different command: `Open Web UI` was reading the mode as a boolean about minting, which is `false` for two modes whose remedies are opposites. v0.2.6 made that command offer to start a Host at all. Their notes, and every earlier release's, are in [CHANGELOG.md](./CHANGELOG.md).
+The version before this one — v0.2.8 — made the default able to start a Host at all. v0.2.7 fixed the same class of mistake in a different command: `Open Web UI` was reading the mode as a boolean about minting, which is `false` for two modes whose remedies are opposites. v0.2.6 made that command offer to start a Host at all. Their notes, and every earlier release's, are in [CHANGELOG.md](./CHANGELOG.md).
 
 ## Requirements
 
@@ -169,7 +172,7 @@ The version before this one — v0.2.7 — fixed the same class of mistake in a 
    Or install the VSIX from [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases):
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.2.8.vsix
+   code --install-extension harness-connector-deepseek-0.2.9.vsix
    ```
 
 3. Nothing to configure. The default `sessionMode: "auto"` first does what
@@ -349,7 +352,7 @@ that implements the `0.2.1-alpha.2` server half exactly — so no `dsh web` is
 needed:
 
 ```bash
-npm run protocol-test    # 523 assertions: the two-stream transport split
+npm run protocol-test    # 533 assertions: the two-stream transport split
                          # ($events allowlist vs session/follow), wire negotiation
                          # (dot/slash, cookie gating, event socket), auth and cookie
                          # derivation, {args} payloads (wrapped vs bare), the approval
@@ -466,9 +469,9 @@ npm run build            # esbuild → dist/extension.js
 npm run watch            # rebuild on change
 npm run typecheck
 npm run check-versions   # every version surface must agree with package.json
-npm run protocol-test    # 523 protocol assertions against a fake harness
+npm run protocol-test    # 533 protocol assertions against a fake harness
 npm run protocol-probe   # report what your real dsh web exposes
-npm run package          # → harness-connector-deepseek-0.2.8.vsix
+npm run package          # → harness-connector-deepseek-0.2.9.vsix
 ```
 
 Press `F5` in VS Code to launch an Extension Development Host with the extension loaded.
@@ -581,7 +584,7 @@ That leaves four arrangements, and the honest state of each:
 
 | Scenario | State | What it means |
 | --- | --- | --- |
-| **Local window** | ✅ **Measured** | The supported arrangement and the only one exercised here: **41/41** integration assertions against a live Host on `127.0.0.1:3080`, on top of the 523 protocol and 96 end-to-end assertions. |
+| **Local window** | ✅ **Measured** | The supported arrangement and the only one exercised here: **41/41** integration assertions against a live Host on `127.0.0.1:3080`, on top of the 533 protocol and 96 end-to-end assertions. |
 | **Remote-SSH** | ⚠️ **Not measured** — this machine has no SSH server (`localhost:22` refuses) | Works when the Harness runs **on the remote host**. The extension declares `extensionKind: "workspace"`, so in a remote window its extension host runs on the remote machine: it reads that machine's `$DSH_HOME`, probes that machine's listener table, and talks to that machine's loopback. A Harness on your laptop is unreachable from there — and should be, since the workspace it would edit is not the one you have open. |
 | **WSL** | ⚠️ **Not measured** — `wsl.exe` is on this sandbox's program blacklist, so it could not be launched at all | Same shape as Remote-SSH: run `dsh web` inside the distro. VS Code hands WSL over as an ordinary remote, so nothing WSL-specific is needed. |
 | **Dev container** | ⚠️ **Not measured** — `docker` is not installed here | Same shape again: run `dsh web` inside the container. The container's own `$DSH_HOME/.credentials.yaml` is what gets read, not the host's. |

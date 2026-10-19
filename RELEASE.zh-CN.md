@@ -52,7 +52,7 @@ npm run check-versions     # → 全部检查通过；加 --online 会把已发�
 npm run build              # → dist/extension.js
 
 # 1.4 协议测试（假 harness——不需要 dsh web）
-npm run protocol-test      # → 全部 523 项断言 ✓
+npm run protocol-test      # → 全部 533 项断言 ✓
 
 # 1.5 端到端链路（真实文件系统；会自己报告覆盖情况）
 npm run e2e-test           # → 5 条链路里已写 3 条、未写 2 条；已编写的
@@ -90,7 +90,7 @@ npm run package            # → harness-connector-deepseek-<版本>.vsix
       不是每次发版再临时判断的事。
 - [ ] `CHANGELOG.md` 与 `ARCHITECTURE.md` 里的断言数与 `npm run protocol-test`
       的**当前**输出一致（它已历经 50 → 64 → 98 → 83 → 156 → 178 → 180 → 190 →
-      211 → 231 → 243 → 268 → 295 → 312 → 342 → 381 → 461 → 493 → 504 → 512 → 523，其中 rc.2 重写用新假
+      211 → 231 → 243 → 268 → 295 → 312 → 342 → 381 → 461 → 493 → 504 → 512 → 523 → 533，其中 rc.2 重写用新假
       harness 替换了 rc.6 的那套，waterfall／待处理面板两组随之落地，v0.2.2 又加上了
       会话模式词表、分平台安装路线和启动器的两个纯函数，v0.2.3 再加上了逐 hunk 手术、
       那九条右键提问和回环围栏，v0.2.4 再加上了 waterfall 的归属规则、启动计划
@@ -145,7 +145,7 @@ npm run package            # → harness-connector-deepseek-<版本>.vsix
 unzip -l harness-connector-deepseek-<版本>.vsix
 ```
 
-预期（v0.2.8 = 14 个文件，干净检出 380,195 字节，约 371 KB）：
+预期（v0.2.9 = 18 个文件，干净检出 389,153 字节，约 380 KB）：
 
 ```
 [Content_Types].xml
@@ -464,6 +464,7 @@ Actions → **Release** → *Run workflow* → 填 `tag: v0.2.1`。它会检出�
   `changelog.md` 的形式随包，`*.zh-CN.md` 双胞胎原样随包。所以下面每一条基线都属于某一棵
   特定的树，事后再改一个随包文档，那个数字就作废了。重新量，不要把旧数字往下带。随包发出的
   字节数（也就是 `gh release view --json assets` 报出来的、用户真正下载的那个）：
+  `v0.2.9` = 389,153（第一份含 walkthrough 页面的基线，比 `v0.2.8` 多四个文件）；
   `v0.2.8` = 380,195（`.gitattributes` 让它与机器无关）；
   `v0.2.7` = 376,628；
   `v0.2.6` = 372,811；

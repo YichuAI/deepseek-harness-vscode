@@ -2,7 +2,7 @@
   "name": "harness-connector-deepseek",
   "displayName": "DeepSeek Harness Connector",
   "description": "Native VS Code client for DeepSeek Harness. Connect to your existing local Harness instance and continue the same workspaces and sessions directly inside VS Code.",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "publisher": "lucasliang",
   "license": "MIT",
   "repository": {
@@ -55,6 +55,53 @@
         }
       ]
     },
+    "walkthroughs": [
+      {
+        "id": "deepseekHarness.getStarted",
+        "title": "Get started with DeepSeek Harness",
+        "description": "Point VS Code at a Harness Host, then chat, approve, and review without leaving the editor.",
+        "steps": [
+          {
+            "id": "openPanel",
+            "title": "Open the panel",
+            "description": "The icon on the far left. It is already connecting on its own: in the default **auto** mode the extension reuses your local Harness credentials, and starts a Host when nothing is listening. [Open the panel](command:workbench.view.extension.deepseek-harness)",
+            "media": {
+              "markdown": "media/walkthrough/open-panel.md"
+            },
+            "completionEvents": [
+              "onView:deepseekHarness.sessionView"
+            ]
+          },
+          {
+            "id": "connected",
+            "title": "Reach a connected status",
+            "description": "**Connected** in the status row means there is nothing left to do. If it says otherwise, press Connect; when the extension recognises a specific cause, the same row offers **Fix** and runs exactly that repair. [Connect](command:deepseekHarness.connect)",
+            "media": {
+              "markdown": "media/walkthrough/connect.md"
+            },
+            "completionEvents": [
+              "onCommand:deepseekHarness.connect"
+            ]
+          },
+          {
+            "id": "firstPrompt",
+            "title": "Ask for something",
+            "description": "Type in the box at the bottom and press Enter. No setup step in between: the workspace and the session are created on your first send.",
+            "media": {
+              "markdown": "media/walkthrough/first-prompt.md"
+            }
+          },
+          {
+            "id": "approveAndReview",
+            "title": "Approve, then review",
+            "description": "Harness writes to your files directly and the extension never buffers them. Approvals are how you say go ahead; review cards are how you undo what happened.",
+            "media": {
+              "markdown": "media/walkthrough/approve-review.md"
+            }
+          }
+        ]
+      }
+    ],
     "commands": [
       {
         "command": "deepseekHarness.connect",

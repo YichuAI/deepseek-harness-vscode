@@ -38,6 +38,10 @@ export const CLIENT_SCRIPT = /* js */ `
   });
 
   let lastRenderVersion = -1;
+  // Whether the first-run card is the thing currently in #messages. The
+  // transcript and the empty state share that container, so somebody has to
+  // remember which one put it there.
+  let firstRunShown = false;
   // Incremental transcript state. itemNodes maps an item's key to the element
   // already drawn for it and the signature it was drawn from; transcriptEmpty
   // remembers whether the placeholder is the thing on screen. Together they let
@@ -104,6 +108,56 @@ export const CLIENT_SCRIPT = /* js */ `
     try { return JSON.stringify(JSON.parse(raw), null, 2); } catch { return raw; }
   }
   function post(action) { vscode.postMessage(action); }
+
+  /**
+   * The card a freshly installed extension shows before anything has connected.
+   *
+   * This used to be one grey line ("Disconnected. Click Connect above"), which
+   * is accurate and useless: somebody who just installed this has no idea what
+   * a Host is, whether they need to start one, or what happens to their files.
+   * Three sentences answer that, and the button is the whole next step.
+   *
+   * Built node by node rather than as markup, like every other card in here: a
+   * string would put the button beyond reach of a listener, and the protocol
+   * test could then only assert that it was drawn.
+   */
+  function firstRunCard() {
+    var rows = [
+      ['Connect', 'Reuses the credentials DeepSeek Harness already stored, and starts a Host when none is running.'],
+      ['Type below', 'A workspace and a session are created on your first send.'],
+      ['Approve, then review', 'Approvals come before it acts; review cards undo what it wrote.']
+    ];
+    var root = document.createElement('div');
+    root.className = 'first-run';
+    for (var i = 0; i < rows.length; i++) {
+      var step = document.createElement('div');
+      step.className = 'fr-step';
+      var num = document.createElement('span');
+      num.className = 'fr-n';
+      num.textContent = String(i + 1);
+      var body = document.createElement('div');
+      body.className = 'fr-body';
+      var title = document.createElement('div');
+      title.className = 'fr-title';
+      title.textContent = rows[i][0];
+      var note = document.createElement('div');
+      note.className = 'fr-note';
+      note.textContent = rows[i][1];
+      body.appendChild(title);
+      body.appendChild(note);
+      step.appendChild(num);
+      step.appendChild(body);
+      root.appendChild(step);
+    }
+    var actions = document.createElement('div');
+    actions.className = 'fr-actions';
+    var go = document.createElement('button');
+    go.textContent = 'Connect';
+    go.addEventListener('click', function () { post({ type: 'connect' }) });
+    actions.appendChild(go);
+    root.appendChild(actions);
+    return root;
+  }
 
   function setDot(kind) {
     const dot = $('dot');
@@ -271,6 +325,7 @@ export const CLIENT_SCRIPT = /* js */ `
     if (snap && snap.renderVersion !== lastRenderVersion) {
       lastRenderVersion = snap.renderVersion;
       renderTranscript(msgs, snap, state.activeSessionId);
+      firstRunShown = false;
     } else if (!snap) {
       // No snapshot — show contextual empty state based on connection.
       // This branch runs every render when there's no snap, so the message
@@ -287,8 +342,24 @@ export const CLIENT_SCRIPT = /* js */ `
       } else {
         emptyMsg = 'Disconnected. Click Connect above, or Reconnect in the panel header.';
       }
-      var expected = '<div class="empty">' + escapeText(emptyMsg) + '</div>';
-      if (msgs.innerHTML !== expected) msgs.innerHTML = expected;
+      // Before the first successful connect the panel has nothing to show and
+      // the user has nothing to go on, so explain the thing instead of naming
+      // the state. Past that point the status row above carries the actionable
+      // part, and a one-line message is the right amount of ink.
+      var firstRun = state.connection === 'disconnected';
+      if (firstRun) {
+        // Built once: this branch runs on every render, and rebuilding the card
+        // would discard the node the click listener is attached to.
+        if (!firstRunShown) {
+          msgs.innerHTML = '';
+          msgs.appendChild(firstRunCard());
+          firstRunShown = true;
+        }
+      } else {
+        var want = '<div class="empty">' + escapeText(emptyMsg) + '</div>';
+        if (msgs.innerHTML !== want) msgs.innerHTML = want;
+        firstRunShown = false;
+      }
       itemNodes = new Map();
       transcriptEmpty = false;
     }

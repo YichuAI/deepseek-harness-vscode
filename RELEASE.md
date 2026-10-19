@@ -55,7 +55,7 @@ npm run check-versions     # → all checks pass; add --online to include the
 npm run build              # → dist/extension.js
 
 # 1.4 protocol test (fake harness — no dsh web needed)
-npm run protocol-test      # → all 523 assertions ✓
+npm run protocol-test      # → all 533 assertions ✓
 
 # 1.5 end-to-end chains (real filesystem; reports its own coverage)
 npm run e2e-test           # → 3 of 5 chains covered, 2 not written; every
@@ -88,7 +88,7 @@ Manual checks:
       twin. This is a standing rule, not a per-release judgement call.
 - [ ] `CHANGELOG.md` and `ARCHITECTURE.md` still quote the **current** assertion
       count from `npm run protocol-test` (it has grown 50 → 64 → 98 → 83 → 156 →
-      178 → 180 → 190 → 211 → 231 → 243 → 268 → 295 → 312 → 342 → 381 → 461 → 493 → 504 → 512 → 523 as
+      178 → 180 → 190 → 211 → 231 → 243 → 268 → 295 → 312 → 342 → 381 → 461 → 493 → 504 → 512 → 523 → 533 as
       the rc.2 rewrite replaced the rc.6 fake harness, the waterfall/pending-panel
       groups landed, v0.2.2 added the session-mode vocabulary, the per-platform
       install routing and the launcher's pure functions, and v0.2.3 added the
@@ -159,7 +159,7 @@ Manual checks:
 unzip -l harness-connector-deepseek-<ver>.vsix
 ```
 
-Expected (v0.2.8 = 14 files, 380,195 bytes in a clean checkout, ~371 KB):
+Expected (v0.2.9 = 18 files, 389,153 bytes in a clean checkout, ~380 KB):
 
 ```
 [Content_Types].xml
@@ -532,8 +532,9 @@ Marketplace, the bytes in the Release asset and the sha256 printed in the log ar
   `readme.md`/`changelog.md`, and the `*.zh-CN.md` twins ship verbatim. So every baseline
   below belongs to one particular tree, and editing a shipped doc afterwards invalidates it.
   Re-measure; do not carry the old figure forward. Shipped bytes, as `gh release view --json
-  assets` reports them — i.e. what a user actually downloads: `v0.2.8` = 380,195 (the figure
-  `.gitattributes` now makes machine-independent);
+  assets` reports them — i.e. what a user actually downloads: `v0.2.9` = 389,153 (the first baseline with the walkthrough pages in it, and the
+  fourth file added since `v0.2.8`);
+  `v0.2.8` = 380,195 (the figure `.gitattributes` now makes machine-independent);
   `v0.2.7` = 376,628;
   `v0.2.6` = 372,811;
   `v0.2.5` = 368,277; `v0.2.4` = 363,809; `v0.2.2` = 331,706;

@@ -820,6 +820,7 @@ src/
 │   ├── waterfall.ts          # 纯函数：一条可答瀑布属于哪个会话
 │   ├── local-credentials.ts  # 读取 $DSH_HOME/.credentials.yaml（autoSession）
 │   ├── launcher.ts           # 托管启动：命令计划、子进程、启动 URL
+│   ├── path-identity.ts      # 纯函数：两个字符串何时是同一条路径（启动器与实机测试都要问）
 │   ├── install.ts            # 在扩展宿主里跑安装（在远程就是装在远程）
 │   ├── discovery.ts          # 找 Host：profile 里钉的端口 + 401 栅栏指纹
 │   ├── events.ts             # RemoteMuxSocket (WS) + EventBuffer (30ms)
@@ -834,10 +835,11 @@ src/
 media/
 ├── icon.png                  # Marketplace + webview 品牌图标
 ├── icon.svg                  # 活动栏图标（currentColor）
+├── walkthrough/              # 入门页，一步一个 markdown
 ├── origin.png                # 源材料（VSIX 排除）
 └── markdown-it.umd.min.js    # VSIX 打包用（114 KB）
 scripts/
-├── protocol-test.ts          # 假 harness 协议测试，523 项断言（无需 dsh web）
+├── protocol-test.ts          # 假 harness 协议测试，533 项断言（无需 dsh web）
 ├── protocol-probe.ts         # 向真实 `dsh web` 询问它实际提供什么
 ├── check-versions.ts         # 每一个版本展示面都必须和 package.json 一致
 ├── integration-test.ts       # 针对真实 dsh 的闭环测试

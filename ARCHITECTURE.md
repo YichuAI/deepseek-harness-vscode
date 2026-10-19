@@ -1085,6 +1085,7 @@ src/
 │   ├── ws.ts                 # hand-written WebSocket client
 │   ├── wire.ts               # endpoint-style negotiation + error classification
 │   ├── launcher.ts           # managed launch: the command plan, the child, the URL
+│   ├── path-identity.ts      # pure: when two strings name one path (the launcher and the live test both ask)
 │   ├── install.ts            # run an install in the extension host (i.e. on a remote)
 │   ├── discovery.ts          # find the Host: pinned ports + the 401 fence fingerprint
 │   └── events.ts             # RemoteMuxSocket (WS) + EventBuffer (30ms)
@@ -1098,9 +1099,10 @@ media/
 ├── icon.png                  # Marketplace + webview brand icon
 ├── icon.svg                  # Activity Bar icon (currentColor)
 ├── origin.png                # source material (excluded from VSIX)
-└── markdown-it.umd.min.js    # bundled for VSIX (114 KB)
+├── markdown-it.umd.min.js    # bundled for VSIX (114 KB)
+└── walkthrough/              # Getting Started pages, one per step (markdown)
 scripts/
-├── protocol-test.ts          # fake-harness protocol test, 523 assertions (no dsh web)
+├── protocol-test.ts          # fake-harness protocol test, 533 assertions (no dsh web)
 ├── protocol-probe.ts         # asks a live `dsh web` what it actually serves
 ├── check-versions.ts         # every version surface must agree with package.json
 ├── integration-test.ts       # closed-loop test against real dsh

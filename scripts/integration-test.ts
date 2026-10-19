@@ -19,7 +19,7 @@
  */
 
 import { createServer } from 'node:http'
-import { rmSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -27,13 +27,28 @@ import { HarnessClient } from '../src/harness/client.ts'
 import { BrowserSessionAuth } from '../src/harness/auth.ts'
 import { discoverHosts, probeHost } from '../src/harness/discovery.ts'
 import { nonLoopbackRefusal } from '../src/harness/endpoint.ts'
+import { samePath } from '../src/harness/path-identity.ts'
 import { ConversationModel } from '../src/conversation/model.ts'
 import type { ConversationItem } from '../src/conversation/types.ts'
 
 const HOST = process.env.DSH_HOST ?? '127.0.0.1'
 const PORT = Number(process.env.DSH_PORT ?? 3080)
 const LAUNCH_URL = process.env.DSH_LAUNCH_URL ?? ''
-const TEST_CWD = process.env.TEST_CWD ?? 'e:\\deepseek\\workspace_test'
+
+/**
+ * The directory this run writes into.
+ *
+ * This used to default to `e:\deepseek\workspace_test`, which quietly made the
+ * test single-platform: step 5 asserts that the directory is already a known
+ * workspace, and that was true on one box and false everywhere else. It was
+ * true there only because earlier runs had seeded it, so a fresh Host fails the
+ * same way on any OS. `TEST_CWD` still wins when the caller has an opinion;
+ * otherwise make a throwaway directory under the system temp dir — writable by
+ * construction, empty by construction, and belonging to this run alone.
+ */
+const TEST_CWD = process.env.TEST_CWD ?? mkdtempSync(join(tmpdir(), 'dsh-itest-'))
+/** True when the path above is ours to delete afterwards. */
+const TEMP_CWD = process.env.TEST_CWD === undefined
 
 const log: string[] = []
 /** The test owns no VS Code SecretStorage; the cookie lives in this run only. */
@@ -57,7 +72,8 @@ function check(name: string, ok: boolean, detail = ''): void {
 }
 
 async function main(): Promise<void> {
-  console.log(`\nDeepSeek Harness Connector integration test → http://${HOST}:${PORT}\n`)
+  console.log(`\nDeepSeek Harness Connector integration test → http://${HOST}:${PORT}`)
+  console.log(`workspace: ${TEST_CWD}${TEMP_CWD ? ' (temporary, removed on success)' : ' (from TEST_CWD)'}\n`)
 
   // Authentication. A launch URL, when the caller has one, still exercises the
   // token-exchange path (auth.ts keeps it, and it is worth a smoke test). Without
@@ -115,21 +131,18 @@ async function main(): Promise<void> {
 
   // 03. Workspace resolution is two steps, and both matter.
   //
-  //     (a) `listWorkspaces()` derives the registry from `session/list` — there is
-  //         no `workspace/list` RPC. The `workspaceId` it hands back is therefore a
-  //         *path*, not a host-issued id.
-  //     (b) `workspace/create` normalizes that path into a real workspace record.
-  //         An existing path answers `created:false` but still yields a host-issued
-  //         id, which is what `session/create` requires.
+  //     (a) `workspace/create` normalizes a path into a real workspace record.
+  //         A path that already exists answers `created:false` but still yields a
+  //         host-issued id, which is what `session/create` requires — the id is
+  //         not the path.
+  //     (b) `listWorkspaces()` is derived, not stored: there is no
+  //         `workspace/list` RPC, so the registry is folded out of `session/list`.
+  //         The invariant worth testing is that one leads to the other, which is
+  //         why (b) is asserted *after* a session exists rather than before it.
   //
-  //     Skipping (b) is exactly what broke here once listWorkspaces() stopped
-  //     returning an empty array: session/create rejected the path-shaped id and
-  //     the failure surfaced as "this harness does not serve session/create".
-  const { items } = await client.listWorkspaces()
-  const derived = items.find(w => w.path.toLowerCase().replace(/\//g, '\\') === TEST_CWD.toLowerCase())
-  check('workspace discovered by derived path', derived !== undefined,
-    derived?.path ?? `none of ${String(items.length)} derived workspace(s) match ${TEST_CWD}`)
-
+  //     Requiring (b) first used to make this test platform- and history-bound:
+  //     it demanded a directory some earlier run had already seeded, on a machine
+  //     that happened to have it.
   const confirmed = await client.createWorkspace(TEST_CWD)
   const ws = confirmed.workspace
   check('workspace normalized to a host-issued record', ws.workspaceId !== ws.path,
@@ -140,7 +153,13 @@ async function main(): Promise<void> {
   const sessionId = created.sessionId
   check('create session', true, `id=${sessionId.replace(/^session-/, '').slice(0, 8)}`)
 
-  // 05. Load history (empty for a brand-new session) and subscribe.
+  // 05. The derived registry now knows the workspace the test just created.
+  const { items } = await client.listWorkspaces()
+  const derived = items.find(w => samePath(w.path, TEST_CWD))
+  check('workspace discovered by derived path', derived !== undefined,
+    derived?.path ?? `none of ${String(items.length)} derived workspace(s) match ${TEST_CWD}`)
+
+  // 06. Load history (empty for a brand-new session) and subscribe.
   const model = new ConversationModel(sessionId)
   const history = await client.getHistory(sessionId, { maxMessages: 50 })
   model.loadHistory(history.events.map(e => e.event))
@@ -575,6 +594,13 @@ async function main(): Promise<void> {
 
   sub.dispose()
   client.dispose()
+
+  // The throwaway workspace is this run's litter, not the machine's: remove it
+  // once the Host has nothing left to say about it. The session record outlives
+  // the directory either way, so this changes nothing for the next run.
+  if (TEMP_CWD) {
+    try { rmSync(TEST_CWD, { recursive: true, force: true }) } catch { /* best effort */ }
+  }
 
   console.log('\n────────────────────────────────────────')
   console.log('  integration test passed — ConversationModel closed loop OK')

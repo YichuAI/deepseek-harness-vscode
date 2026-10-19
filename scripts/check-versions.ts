@@ -287,6 +287,121 @@ if (anchor !== undefined) {
   eq('RELEASE.zh-CN.md’s growth trail ends on that count', trailEnd(releaseZh), anchor)
 }
 
+// ─── 8b. the walkthrough only points at things that exist
+
+/**
+ * A walkthrough is the one surface a user sees without asking for it, and every
+ * way it can break is a dangling reference: a `media.markdown` naming a file
+ * that was never created, a `command:` link to a command that is not declared.
+ * None of those fail loudly — VS Code renders the step and the link does
+ * nothing, or the panel comes up empty. So they are checked here instead.
+ */
+type WalkthroughStep = {
+  id?: string
+  title?: string
+  description?: string
+  media?: { markdown?: string; image?: string; altText?: string }
+  completionEvents?: string[]
+}
+type Walkthrough = {
+  id?: string
+  title?: string
+  description?: string
+  steps?: WalkthroughStep[]
+}
+
+const full = JSON.parse(read('package.json')) as {
+  contributes?: {
+    commands?: { command: string }[]
+    views?: Record<string, { id: string }[]>
+    viewsContainers?: { activitybar?: { id: string }[] }
+    walkthroughs?: Walkthrough[]
+  }
+}
+
+const declaredCommands = new Set((full.contributes?.commands ?? []).map((c) => c.command))
+const declaredViews = new Set(Object.values(full.contributes?.views ?? {}).flat().map((v) => v.id))
+const containerIds = (full.contributes?.viewsContainers?.activitybar ?? []).map((c) => c.id)
+const walkthroughs = full.contributes?.walkthroughs ?? []
+
+check('package.json contributes a walkthrough', walkthroughs.length > 0,
+  `${String(walkthroughs.length)} walkthrough(s)`)
+
+const incomplete = walkthroughs
+  .filter((w) => !w.id || !w.title || !w.description || (w.steps ?? []).length === 0)
+  .map((w) => w.id ?? '(no id)')
+check('every walkthrough has an id, a title, a description and steps', incomplete.length === 0,
+  incomplete.join(', ') || `${String(walkthroughs.length)} complete`)
+
+const wIds = walkthroughs.map((w) => w.id ?? '')
+check('walkthrough ids are unique', new Set(wIds).size === wIds.length, wIds.join(', '))
+
+const allSteps = walkthroughs.flatMap((w) => w.steps ?? [])
+const thinSteps = allSteps
+  .filter((s) => {
+    const hasMarkdown = typeof s.media?.markdown === 'string'
+    const hasImage = typeof s.media?.image === 'string'
+    // Exactly one kind of media: both would be ambiguous, neither renders blank.
+    return !s.id || !s.title || !s.description || hasMarkdown === hasImage
+  })
+  .map((s) => s.id ?? '(no id)')
+check('every step has an id, a title, a description and exactly one kind of media', thinSteps.length === 0,
+  thinSteps.join(', ') || `${String(allSteps.length)} step(s)`)
+
+const stepIds = allSteps.map((s) => s.id ?? '')
+check('step ids are unique', new Set(stepIds).size === stepIds.length, stepIds.join(', '))
+
+// The media files themselves: a step whose markdown is missing renders as blank
+// space in the middle of the Getting Started page.
+const mediaRefs = allSteps.flatMap((s) => [s.media?.markdown, s.media?.image])
+  .filter((p): p is string => typeof p === 'string')
+const missingMedia: string[] = []
+for (const rel of mediaRefs) {
+  let body = ''
+  try { body = read(rel) } catch { missingMedia.push(`${rel} (no such file)`); continue }
+  if (body.trim() === '') missingMedia.push(`${rel} (empty)`)
+}
+check('every walkthrough media file exists and is not empty', missingMedia.length === 0,
+  missingMedia.join(', ') || `${String(mediaRefs.length)} file(s)`)
+
+// `command:` links and `completionEvents` are the two places a walkthrough names
+// code. Built-ins are allowed by prefix — `workbench.view.extension.<container>`
+// is how a contributed view gets focused, and it has no declaration to match.
+const builtIn = (id: string): boolean => id.startsWith('workbench.') || id.startsWith('vscode.')
+
+const commandLinks = new Set<string>()
+const descriptionText = [
+  ...allSteps.map((s) => s.description ?? ''),
+  ...mediaRefs.filter((p) => p.endsWith('.md')).map((p) => { try { return read(p) } catch { return '' } }),
+].join('\n')
+for (const m of descriptionText.matchAll(/command:([A-Za-z0-9_.\-]+)/g)) commandLinks.add(m[1]!)
+
+const danglingCommands = [...commandLinks].filter((id) => !builtIn(id) && !declaredCommands.has(id))
+check('every command a walkthrough links to is contributed', danglingCommands.length === 0,
+  danglingCommands.join(', ') || `${String(commandLinks.size)} link(s)`)
+
+const events = allSteps.flatMap((s) => s.completionEvents ?? [])
+const badEvents = events.filter((e) => {
+  const sep = e.indexOf(':')
+  if (sep < 0) return true
+  const kind = e.slice(0, sep)
+  const value = e.slice(sep + 1)
+  if (kind === 'onCommand') return !builtIn(value) && !declaredCommands.has(value)
+  if (kind === 'onView') return !declaredViews.has(value)
+  // onSettingChanged / onContext / onLink / extensionInstalled carry values that
+  // are not declared anywhere this script can read; they are taken on trust.
+  return !['onSettingChanged', 'onContext', 'onLink', 'extensionInstalled'].includes(kind)
+})
+check('every completionEvent names something that exists', badEvents.length === 0,
+  badEvents.join(', ') || `${String(events.length)} event(s)`)
+
+// The container a walkthrough focuses by hand: if its id ever drifts, the first
+// step's button opens nothing.
+const focusLinks = [...commandLinks].filter((id) => id.startsWith('workbench.view.extension.'))
+const staleFocus = focusLinks.filter((id) => !containerIds.some((c) => id === `workbench.view.extension.${c}`))
+check('the walkthrough focuses a view container that is actually contributed', staleFocus.length === 0,
+  staleFocus.join(', ') || focusLinks.join(', ') || 'no focus link')
+
 // ─── 9. tags
 
 function git(...argv: string[]): string {

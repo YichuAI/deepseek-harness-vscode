@@ -5,6 +5,58 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),  
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.9] — 2026-10-19
+
+Tagline: **the first thirty seconds were an icon and a grey line — and the live test only
+passed on the machine that had already been running it.**
+Tagline (ZH): **头三十秒只有一个图标和一行灰字——而实机测试只在那台一直在跑它的机器上通过。**
+
+### Added
+
+- **A walkthrough, contributed so VS Code opens it on install.** Four steps — where the panel
+  is, what the status row is telling you, what the composer can do, and the difference between
+  an approval and a review — each with a markdown page under `media/walkthrough/`. Step one
+  completes on `onView:deepseekHarness.sessionView`, step two on
+  `onCommand:deepseekHarness.connect`, so the ticks track something the user actually did
+  rather than something we hoped they read.
+- **A first-run card in place of the one grey line.** Until a connection has succeeded once, the
+  empty panel says what happens next and carries the button that starts it. After that it falls
+  back to the single line it always was: the status row is the actionable part by then.
+- **Deliberately no `viewsWelcome` contribution.** Welcome content applies to empty *tree* views
+  only (VS Code docs; microsoft/vscode#105832 settled it), and this panel is a `"type": "webview"`
+  view. Contributing it would have added a second dead contribution point to a project that just
+  spent a release making the first one work. The webview draws its own welcome instead.
+
+### Fixed
+
+- **The live integration test no longer assumes it is running on Windows.** Its workspace defaulted
+  to `e:\deepseek\workspace_test`, and step 5 asserted that the Host already knew that directory.
+  On Linux the path matched no workspace, so the suite failed at 41-assertion step 5 with nothing
+  wrong with the extension. The workspace is now `TEST_CWD` when the caller sets one, otherwise a
+  directory created under the system temp dir and removed on success. Step 5 passes against a Host
+  that has never seen the path — which it also would not have done on a fresh Windows box, since
+  the old default only worked because earlier runs had seeded it there.
+- **The derived-registry assertion runs in the order the RPCs allow.** There is no `workspace/list`
+  — `listWorkspaces()` folds the registry out of `session/list` — so "this workspace is known" is
+  now checked after a session exists, instead of demanding that some previous run had created one.
+- **One definition of "same path".** The comparison moved to `harness/path-identity.ts`, where
+  `envWithAugmentedPath` was already spelling the same rule inline twice. Windows ignores case and
+  treats both separators as separators; POSIX ignores neither and keeps `\\` as a filename
+  character. The `platform` argument means both halves are asserted on one machine, and those
+  assertions run on Linux in CI — the platform where the old rule could not be tested.
+
+### Verification
+
+- Protocol assertions **523 → 533**: five on the first-run card (it explains, its button posts
+  `connect`, it is built once rather than per render, and a connected panel does not show it) and
+  five on path identity across both platforms.
+- Version gate **43 → 52**: nine checks that a walkthrough only references things that exist —
+  media files present and non-empty, every `command:` link contributed, every `completionEvents`
+  value resolvable, step and walkthrough ids unique, and the focused view container really one of
+  ours.
+- `tsc --noEmit` clean; e2e **96**; live Host **41/41** in a workspace created for the run;
+  `check-versions` green.
+
 ## [0.2.8] — 2026-10-18
 
 Tagline: **the default mode was a valid credential for a Host that did not exist — and the

@@ -533,7 +533,10 @@ Marketplace, the bytes in the Release asset and the sha256 printed in the log ar
   below belongs to one particular tree, and editing a shipped doc afterwards invalidates it.
   Re-measure; do not carry the old figure forward. Shipped bytes, as `gh release view --json
   assets` reports them — i.e. what a user actually downloads: `v0.2.9` = 389,153 (the first baseline with the walkthrough pages in it, and the
-  fourth file added since `v0.2.8`);
+  fourth file added since `v0.2.8`). That tag's own CI run is **red**, and only on the
+  workflow's `-eq 14` file count — the commit that teaches CI the new number (`1b3b339`)
+  lands after the tag and changes nothing that ships, so the artifact and this baseline
+  stand;
   `v0.2.8` = 380,195 (the figure `.gitattributes` now makes machine-independent);
   `v0.2.7` = 376,628;
   `v0.2.6` = 372,811;

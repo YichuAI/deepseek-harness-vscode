@@ -137,6 +137,14 @@ export interface OpenWebUiInput {
   mode: SessionMode
   /** Whether a usable cookie for the configured Host exists at all. */
   authenticated: boolean
+  /**
+   * Whether this window is talking to a Host right now.
+   *
+   * A cookie proves identity, not that anything is listening. The bridge only
+   * makes sense against a Host that is up; a dead port would show the browser a
+   * connection error, which is worse than the sentence we can say instead.
+   */
+  connected: boolean
   /** `vscode.env.remoteName`: set when the window is not the local machine. */
   remoteName: string | undefined
 }
@@ -149,6 +157,11 @@ export type OpenWebUiPlan =
   | { kind: 'ask-launch-url' }
   /** `auto` / `managed`: start the Host, then read the URL it printed. */
   | { kind: 'start-managed' }
+  /**
+   * No URL, but a cookie the Host accepts: hand it to the browser through a
+   * one-shot loopback redirect. See `app/web-ui-bridge.ts`.
+   */
+  | { kind: 'open-with-cookie' }
   /** A Host started here would land on a loopback this browser cannot reach. */
   | { kind: 'explain-remote'; reason: 'minted' | 'startsHost' }
 
@@ -189,6 +202,13 @@ export function planOpenWebUi(input: OpenWebUiInput): OpenWebUiPlan {
   if (input.remoteName !== undefined) {
     return { kind: 'explain-remote', reason: traits.startsHost ? 'startsHost' : 'minted' }
   }
+
+  // A Host is up and we hold a cookie it accepts. That is strictly better than
+  // starting a second Host: the browser can be given this cookie, and the URL we
+  // would otherwise compose (`/?token=…`) does not exist for a Host we did not
+  // start. Until v0.3.1 this case fell through to `start-managed`, which moved
+  // the window onto a brand-new Host — same feature, wrong session.
+  if (input.connected && input.authenticated) return { kind: 'open-with-cookie' }
 
   if (traits.startsHost) return { kind: 'start-managed' }
 
@@ -231,6 +251,10 @@ export const OPEN_WEB_UI_TEXT = {
     action: 'Paste launch URL',
     dismiss: 'Not now',
   },
+  /** When the cookie is there but the browser could not be handed it. */
+  cookieBridgeFailed:
+    'The browser could not be opened with this session. Run `dsh web` yourself and use "DeepSeek '
+    + 'Harness: Use Launch URL" — that line carries a token a browser can use directly.',
   explainRemote: {
     minted:
       'This session was minted from $DSH_HOME/.credentials.yaml, which does no token exchange, so '

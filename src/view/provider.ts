@@ -17,9 +17,29 @@ import * as vscode from 'vscode'
 import type { HarnessClient, ConnectionState } from '../harness/client.ts'
 import type { MuxStatus } from '../harness/events.ts'
 import type { SessionSummary, WorkspaceView } from '../harness/protocol.ts'
+import type { ConversationItem, SessionSnapshot } from '../conversation/types.ts'
 import { STYLES } from './styles.ts'
 import { HTML_SKELETON } from './html.ts'
 import { CLIENT_SCRIPT } from './client.ts'
+import { computeSnapshotDelta, needsFullSnapshot, sentFrom, type SentTranscript } from './snapshot-delta.ts'
+
+/**
+ * What changed in the transcript since the previous push.
+ *
+ * `items` are the ones whose `rev` moved (edits and appends alike); `removed`
+ * are uids that no longer exist. Both are keyed by `uid`, the same identity the
+ * renderer reconciles on, so the client can merge without re-deriving anything.
+ */
+export interface SnapshotDelta {
+  sessionId: string
+  title?: string
+  running: boolean
+  renderVersion: number
+  /** Mirrors `SessionSnapshot.systemMessageCount`, which the badge reads. */
+  systemMessageCount: number
+  items: ConversationItem[]
+  removed: string[]
+}
 
 /** UI state pushed to the webview (full snapshot each time). */
 export interface UiState {
@@ -62,6 +82,15 @@ export interface UiState {
   refQuery?: string
   /** Auto-approve incoming approval requests (setting mirror). */
   autoApprove: boolean
+  /**
+   * The part of `snapshot` that changed since the last push.
+   *
+   * Present instead of `snapshot` once both sides agree on a session: the
+   * transcript is 93% of a push and grows without bound, so re-sending all of it
+   * for one streamed delta cost 82 KB at 40 turns. The webview keeps its own
+   * copy and applies this.
+   */
+  snapshotDelta?: SnapshotDelta
   renderVersion: number
 }
 
@@ -210,6 +239,15 @@ export interface ProviderDeps {
 export class HarnessWebviewViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'deepseekHarness.sessionView'
   private view: vscode.WebviewView | undefined
+  /**
+   * What this webview already holds: sessionId plus item uid → the `rev` it was
+   * sent with.
+   *
+   * Kept on the provider rather than derived per push, because the whole point
+   * is to avoid walking and serialising the transcript on every delta. Reset
+   * whenever the view is recreated, since the new webview has nothing.
+   */
+  private sent: SentTranscript = { sessionId: undefined, items: new Map() }
   private brandIconUri: string | undefined
   /** Cached markdown-it UMD source (loaded once on first resolve). */
   private markdownItSource: string | undefined
@@ -234,14 +272,63 @@ export class HarnessWebviewViewProvider implements vscode.WebviewViewProvider {
       }
       this.deps.dispatch(msg)
     })
-    view.onDidDispose(() => { this.view = undefined })
+    view.onDidDispose(() => {
+      this.view = undefined
+      // The next webview starts with nothing; a delta against a cache that no
+      // longer exists would render a one-item conversation.
+      this.sent = { sessionId: undefined, items: new Map() }
+    })
     this.deps.onState((s) => this.postState(s))
     this.postState(this.deps.getState())
   }
 
   private postState(state: UiState): void {
     const withIcon: UiState = this.brandIconUri ? { ...state, brandIconUri: this.brandIconUri } : state
-    void this.view?.webview.postMessage({ kind: 'state', state: withIcon })
+    const view = this.view
+    if (view === undefined) return
+
+    const snap = state.snapshot
+    if (snap === undefined) {
+      this.sent = { sessionId: undefined, items: new Map() }
+      void view.webview.postMessage({ kind: 'state', state: withIcon })
+      return
+    }
+
+    // A first paint, or a different session: nothing in common with what the
+    // webview holds, so send the whole thing and start tracking from it.
+    if (needsFullSnapshot(this.sent, snap)) {
+      this.sent = sentFrom(snap)
+      void view.webview.postMessage({ kind: 'state', state: withIcon })
+      return
+    }
+
+    const { changed, removed, next } = computeSnapshotDelta(this.sent, snap)
+    this.sent = next
+
+    // The rest of the state still goes out every time — status, approvals,
+    // usage — but the transcript only does when it actually moved. When nothing
+    // moved, the message carries no transcript at all and the webview keeps the
+    // copy it already has.
+    void view.webview.postMessage({
+      kind: 'state',
+      state: {
+        ...withIcon,
+        snapshot: undefined,
+        ...(changed.length === 0 && removed.length === 0
+          ? {}
+          : {
+            snapshotDelta: {
+              sessionId: snap.sessionId,
+              title: snap.title,
+              running: snap.running,
+              renderVersion: snap.renderVersion,
+              systemMessageCount: snap.systemMessageCount,
+              items: changed,
+              removed,
+            } satisfies SnapshotDelta,
+          }),
+      },
+    })
   }
 
   /** Send an arbitrary message to the webview (e.g. appendInput from menu commands). */

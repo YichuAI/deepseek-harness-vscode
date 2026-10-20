@@ -65,6 +65,8 @@ import {
 import { findHarnessWorkspace } from '../src/workspace/binding.ts'
 import { buildDiagnosticsReport, NPM_INSTALL_COMMAND, classifyConnectFailure, installGuidanceFor, redact } from '../src/app/diagnosis.ts'
 import { AUTO_SESSION_COMMAND, DEFAULT_SESSION_MODE, OPEN_WEB_UI_TEXT, SESSION_MODES, USE_LAUNCH_URL_COMMAND, parseSessionMode, planOpenWebUi, traitsOf, type SessionMode } from '../src/app/session-mode.ts'
+import { listenHostFor, openWebUiWithCookie, splitCookie, targetUrl } from '../src/app/web-ui-bridge.ts'
+import { computeSnapshotDelta, needsFullSnapshot, sentFrom } from '../src/view/snapshot-delta.ts'
 import {
   DEFAULT_LAUNCH_COMMAND, NPX_FALLBACK_COMMAND, desktopInstallCandidates, envWithAugmentedPath,
   findLaunchUrl, launchPlan, redactLaunchUrl, usesNpx,
@@ -1871,6 +1873,68 @@ async function main(): Promise<void> {
       !stubText(idleNoSnap.el('messages')).includes('Approve, then review'),
       stubText(idleNoSnap.el('messages')).slice(0, 90))
 
+    // ─── G1c. incremental transcript pushes ─────────────────────────────────
+    // A transcript grows without bound and used to be re-sent whole on every
+    // streamed delta: 82 KB per push at 40 turns, 93% of it this array. The host
+    // now sends only what moved; these assertions pin both halves of that
+    // contract, because a delta the client cannot merge is worse than no delta.
+    const itemAt = (uid: number, rev: number, text: string): Record<string, unknown> =>
+      ({ kind: 'assistant', seq: uid, uid, rev, text })
+    const snapOf = (items: Record<string, unknown>[]): Record<string, unknown> =>
+      ({ sessionId: 's-1', running: false, items, renderVersion: 1, systemMessageCount: 0 })
+
+    check('the first push has nothing to diff against',
+      needsFullSnapshot({ sessionId: undefined, items: new Map() }, snapOf([]) as never))
+    const baseSnap = snapOf([itemAt(1, 1, 'one'), itemAt(2, 1, 'two')])
+    const sent = sentFrom(baseSnap as never)
+    eq('an unchanged transcript sends nothing',
+      (() => { const d = computeSnapshotDelta(sent, baseSnap as never); return [d.changed.length, d.removed.length] })(),
+      [0, 0])
+    eq('an edited item is the only thing sent',
+      computeSnapshotDelta(sent, snapOf([itemAt(1, 1, 'one'), itemAt(2, 2, 'two!')]) as never)
+        .changed.map((i) => i.uid),
+      [2])
+    eq('a dropped item is named as removed',
+      computeSnapshotDelta(sent, snapOf([itemAt(1, 1, 'one')]) as never).removed,
+      ['2'])
+    check('...and a different session is never diffed',
+      needsFullSnapshot(sent, { sessionId: 's-2', running: false, items: [], renderVersion: 2, systemMessageCount: 0 }))
+
+    // The client half: merge it, do not require the host to repeat itself.
+    // Assistant rows render markdown into innerHTML, and the stub stores that as a
+    // plain string with no children — so the text has to be read from both.
+    const visibleText = (el: StubEl): string =>
+      walk(el).map((n) => String(n['textContent'] ?? '') + ' ' + String(n['innerHTML'] ?? '')).join(' ')
+    const deltaBoot = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, {
+      snapshot: snapOf([itemAt(1, 1, 'alpha'), itemAt(2, 1, 'beta')]),
+    })
+    check('the first paint renders both rows',
+      visibleText(deltaBoot.el('messages')).includes('alpha')
+      && visibleText(deltaBoot.el('messages')).includes('beta'))
+    deltaBoot.push({
+      snapshot: undefined,
+      snapshotDelta: {
+        sessionId: 's-1', running: false, renderVersion: 9, systemMessageCount: 0,
+        items: [itemAt(2, 2, 'beta-updated'), itemAt(3, 1, 'gamma')], removed: [],
+      },
+    })
+    const merged = visibleText(deltaBoot.el('messages'))
+    check('a delta updates the row it names', merged.includes('beta-updated'))
+    check('...keeps the rows it did not mention', merged.includes('alpha'))
+    check('...and appends the new one', merged.includes('gamma'))
+    check('...without leaving the old text behind', !merged.includes('beta '))
+
+    // The point of all of it, in bytes: one row of a 40-row conversation.
+    const many = Array.from({ length: 40 }, (_, i) => itemAt(i + 1, 1, 'z'.repeat(500)))
+    const fullBytes = JSON.stringify({ kind: 'state', state: { snapshot: snapOf(many) } }).length
+    const deltaBytes = JSON.stringify({
+      kind: 'state',
+      state: { snapshot: undefined, snapshotDelta: { sessionId: 's-1', running: false, renderVersion: 2, systemMessageCount: 0, items: [itemAt(40, 2, 'z'.repeat(500))], removed: [] } },
+    }).length
+    check('one changed row costs a fraction of a 40-row push',
+      deltaBytes * 20 < fullBytes,
+      `${String(deltaBytes)} B vs ${String(fullBytes)} B`)
+
     // ─── G2. the pending panel: approvals + ask_user_question ───────────────
     // Both block the Host, and a question used to be dropped on the floor by the
     // controller, so the agent's tool call waited on an answer nobody could give.
@@ -1900,24 +1964,68 @@ async function main(): Promise<void> {
     eq('Deny posts a rejected RESULT, not a transport error',
       lastOf(ap.actions), { type: 'approvalRespond', rpcId: 'wf-1', outcome: 'rejected' })
 
-    // Risk gate: an escalation the sidebar refuses to grant must still be
-    // visible, and must offer a way forward rather than a dead button or nothing.
+    // Risk MARKING, not a veto. This used to be a refusal ("use the Web UI"),
+    // which made the sidebar a second-class client of a Host whose own Web UI
+    // answers the same waterfall with one button — and left the user stuck when
+    // that browser could not reach the Host. The marker stays: red card, the
+    // Host's own wording, and one button.
     const risky = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, {
       approvals: [{
         rpcId: 'wf-2', approvalId: 'wf-2', sessionId: 'session-1', toolName: 'pwsh',
         reason: 'escalate sandbox to danger-full-access: probe', state: 'pending',
-        canAllow: false, blockedBy: 'high-risk', createdAt: 1,
+        canAllow: true, highRisk: true, createdAt: 1,
       }],
     })
-    check('a refused approval is still shown, with the reason',
+    check('an escalation is still shown, with the reason',
       stubText(risky.panel).includes('danger-full-access'))
-    check('...and offers no Allow button at all',
-      stubButtons(risky.panel).every((b) => String(b['textContent']) !== 'Allow once'))
-    const handOff = stubButtons(risky.panel).find((b) => String(b['textContent']).indexOf('Answer in Web UI') === 0)
-    check('...but does offer the hand-off', handOff !== undefined)
-    fire(handOff, 'click')
+    check('...and is described as unrestricted rather than refused',
+      stubText(risky.panel).includes('unrestricted access')
+      && !stubText(risky.panel).includes('will not grant'))
+    const riskyAllow = stubButtons(risky.panel).find((b) => String(b['textContent']) === 'Allow once')
+    check('...and offers Allow once, because the Web UI does', riskyAllow !== undefined)
+    if (riskyAllow) fire(riskyAllow, 'click')
+    eq('...posting the one outcome the Host understands',
+      lastOf(risky.actions), { type: 'approvalRespond', rpcId: 'wf-2', outcome: 'allowed-once' })
+    // The hand-off survives for the case that really is unanswerable from here:
+    // an approval belonging to a session that is not the one on screen.
+    const foreign = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, {
+      approvals: [{
+        rpcId: 'wf-3', approvalId: 'wf-3', sessionId: 'session-9', toolName: 'pwsh',
+        reason: 'escalate sandbox to danger-full-access: probe', state: 'pending',
+        canAllow: false, blockedBy: 'session', highRisk: true, createdAt: 1,
+      }],
+    })
+    const handOff = stubButtons(foreign.panel)
+      .find((b) => String(b['textContent']).indexOf('Answer in Web UI') === 0)
+    check('an approval for another session offers the hand-off instead of a dead end',
+      handOff !== undefined)
+    if (handOff) fire(handOff, 'click')
     eq('the hand-off posts a delegation, not an answer',
-      lastOf(risky.actions), { type: 'waterfallDelegate', rpcId: 'wf-2' })
+      lastOf(foreign.actions), { type: 'waterfallDelegate', rpcId: 'wf-3' })
+
+    // The store half of the same rule: a person may grant it, the auto-approve
+    // setting may not. That split is the only thing standing between "I clicked
+    // allow" and "a setting I turned on last month quietly escalated every call".
+    const riskStore = new ApprovalStore()
+    riskStore.upsert({
+      rpcId: 'wf-risk', sessionId: 'session-1', approvalId: 'wf-risk',
+      toolName: 'pwsh', reason: 'escalate sandbox to danger-full-access: probe',
+    })
+    const riskyPending = riskStore.getByRpcId('wf-risk')
+    check('the store flags an escalation', riskyPending !== undefined && riskStore.isHighRisk(riskyPending))
+    check('...while still allowing a human to answer it',
+      riskyPending !== undefined && riskStore.canAllow(riskyPending, 'session-1'))
+    eq('...and never blocking it on risk grounds',
+      riskyPending === undefined ? 'missing' : riskStore.blockReason(riskyPending, 'session-1'), undefined)
+    eq('a plain approval is not flagged as risky',
+      (() => {
+        riskStore.upsert({
+          rpcId: 'wf-plain', sessionId: 'session-1', approvalId: 'wf-plain',
+          toolName: 'fs_write', reason: 'writes outside the workspace',
+        })
+        const plain = riskStore.getByRpcId('wf-plain')
+        return plain === undefined ? 'missing' : riskStore.isHighRisk(plain)
+      })(), false)
 
     // Single-select: one question, one choice, so choosing IS answering.
     const oneQ = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, {
@@ -3211,6 +3319,10 @@ async function main(): Promise<void> {
       adoptedUrl: undefined as string | undefined,
       mode: 'credentials' as SessionMode,
       authenticated: true,
+      // Defaults to "not connected" so the mode-based assertions below keep
+      // describing the case they were written for; the connected case has its
+      // own block, because it is the one that changed.
+      connected: false,
       remoteName: undefined as string | undefined,
     }
 
@@ -3285,6 +3397,65 @@ async function main(): Promise<void> {
     eq('a remote paste window is still just asked for the URL',
       planOpenWebUi({ ...openInput, mode: 'paste', remoteName: 'ssh-remote' }),
       { kind: 'ask-launch-url' })
+
+    // v0.3.1: a Host that is up and a cookie we hold. This used to fall through
+    // to `start-managed`, which started a *second* Host and moved the window onto
+    // it — the feature worked, the session was the wrong one. The fix is not a
+    // better message, it is putting the cookie in the browser.
+    eq('a connected window opens with the cookie it already holds',
+      planOpenWebUi({ ...openInput, mode: 'auto', connected: true }),
+      { kind: 'open-with-cookie' })
+    eq('...and the same for the minted route',
+      planOpenWebUi({ ...openInput, mode: 'credentials', connected: true }),
+      { kind: 'open-with-cookie' })
+    eq('a Host that is not up still gets started',
+      planOpenWebUi({ ...openInput, mode: 'auto', connected: false }),
+      { kind: 'start-managed' })
+    eq('the remote check still wins over the bridge',
+      planOpenWebUi({ ...openInput, mode: 'auto', connected: true, remoteName: 'ssh-remote' }),
+      { kind: 'explain-remote', reason: 'startsHost' })
+    eq('a URL we hold still wins over the bridge',
+      planOpenWebUi({ ...openInput, connected: true, adoptedUrl: 'http://127.0.0.1:3081/?token=b' }),
+      { kind: 'open', url: 'http://127.0.0.1:3081/?token=b' })
+
+    // The bridge itself. Cookies are scoped by host and not by port, which is
+    // the whole reason a listener on another loopback port can install one for
+    // the Host — so this is asserted over a real socket rather than reasoned about.
+    eq('a cookie pair splits at the first =',
+      splitCookie('dsh-auth-x=v1.abc=='), { name: 'dsh-auth-x', value: 'v1.abc==' })
+    eq('a string that is not a pair is refused', splitCookie('nonsense'), undefined)
+    eq('the browser is sent to the authority that was configured',
+      targetUrl('127.0.0.1', 3080), 'http://127.0.0.1:3080/')
+    eq('...with an IPv6 literal kept in brackets', targetUrl('::1', 3080), 'http://[::1]:3080/')
+    eq('localhost is served from the IPv4 loopback', listenHostFor('localhost'), '127.0.0.1')
+
+    let sawStatus = 0
+    let sawCookie = ''
+    let sawLocation = ''
+    const bridgeResult = await openWebUiWithCookie({
+      host: '127.0.0.1',
+      port: 3080,
+      cookie: 'dsh-auth-probe=v1.test',
+      timeoutMs: 5000,
+      openExternal: async (opener) => {
+        await new Promise<void>((resolve) => {
+          const req = http.get(opener, (res) => {
+            sawStatus = res.statusCode ?? 0
+            sawCookie = String(res.headers['set-cookie'] ?? '')
+            sawLocation = String(res.headers['location'] ?? '')
+            res.resume()
+            res.on('end', () => { resolve() })
+          })
+          req.on('error', () => { resolve() })
+        })
+        return true
+      },
+    })
+    eq('the bridge hands the browser a URL', bridgeResult, 'opened')
+    eq('...which answers with a redirect', sawStatus, 302)
+    eq('...setting the Host cookie host-only and path-wide',
+      sawCookie, 'dsh-auth-probe=v1.test; Path=/; HttpOnly; SameSite=Lax')
+    eq('...and landing on the configured Host', sawLocation, 'http://127.0.0.1:3080/')
 
     // The copy is the part the user actually reads, and the wording is what made
     // the old command look broken: it described the constraint perfectly and

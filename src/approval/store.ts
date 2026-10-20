@@ -22,20 +22,21 @@ import type {
 } from './types.ts'
 
 /**
- * Approval reasons too dangerous to grant from the sidebar.
+ * Reasons that mean "this call asks for unrestricted access".
  *
  * This replaces an earlier tool-NAME allowlist (`write`, `edit`, `grep`, …).
  * That list was wrong twice over: it named tools this Host does not have (the
- * shell tool is `pwsh`/`bash`, so every real escalation was refused), and it
- * gated on the least informative field in the request — a name says nothing
- * about how much power the call is asking for, while the reason says exactly
- * that ("escalate sandbox to danger-full-access: …"). Nothing was lost by
- * dropping it: the reason is the Host's own statement of the risk, and it is
- * displayed verbatim next to the buttons.
+ * shell tool is `pwsh`/`bash`), and it gated on the least informative field in
+ * the request — a name says nothing about how much power the call is asking
+ * for, while the reason says exactly that ("escalate sandbox to danger-full-access: …").
  *
- * Fail-closed direction is preserved — an unrecognised reason with no
- * escalation wording is still allow-able, but nothing *dangerous* slips
- * through on a name we happened to forget to add.
+ * What changed in v0.3.1: this no longer *refuses* the approval, only marks it.
+ * The sidebar and the Web UI answer the same waterfall on the same Host, and
+ * the Web UI presents this exact reason with a single "Allow once" button. A
+ * panel that instead said "use the Web UI" made the two clients unequal, and
+ * left a user whose browser could not open (see `open-with-cookie`) with no way
+ * to continue at all. The marker still drives the risk styling, and it is the
+ * one class of approval that `autoApproveApprovals` will never answer.
  */
 const HIGH_RISK_PATTERNS = [
   'danger-full-access',
@@ -155,6 +156,7 @@ export class ApprovalStore {
       outcome: a.outcome,
       canAllow: this.canAllow(a, activeSessionId),
       blockedBy: this.blockReason(a, activeSessionId),
+      highRisk: this.isHighRisk(a),
       createdAt: a.createdAt,
     }))
   }
@@ -277,6 +279,17 @@ export class ApprovalStore {
   }
 
   /**
+   * The Host says this call asks for unrestricted access.
+   *
+   * Read by the UI for styling and by the auto-approve path as a veto. Not a
+   * veto for a human click: see the note on {@link HIGH_RISK_PATTERNS}.
+   */
+  isHighRisk(approval: PendingApproval): boolean {
+    const reason = (approval.reason ?? '').toLowerCase()
+    return HIGH_RISK_PATTERNS.some((pattern) => reason.includes(pattern))
+  }
+
+  /**
    * The single source of truth behind {@link canAllow}, returning WHY instead of
    * a bare boolean. The UI needs the reason: a disabled Allow button with no
    * explanation is the exact dead end this gate is supposed to avoid.
@@ -290,11 +303,6 @@ export class ApprovalStore {
     if (!activeSessionId || approval.sessionId !== activeSessionId) return 'session'
     // 2. Must still be answerable.
     if (approval.state !== 'pending') return 'settled'
-    // 3. Reason gate (see HIGH_RISK_PATTERNS).
-    const reason = (approval.reason ?? '').toLowerCase()
-    for (const pattern of HIGH_RISK_PATTERNS) {
-      if (reason.includes(pattern)) return 'high-risk'
-    }
     return undefined
   }
 }

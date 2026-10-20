@@ -989,16 +989,21 @@ export class AppController {
       this.pushReviewApprovalState()
       // F2: auto-approve — answer the waterfall immediately when the setting is
       // on and this approval is answerable from VS Code. Mirrors Copilot's
-      // /autoApprove and Claude Code's /yolo, scoped to what canAllow permits.
+      // /autoApprove and Claude Code's /yolo, scoped to what canAllow permits
+      // and never to an escalation: a human may grant unrestricted access in one
+      // click, but a setting must not grant it while nobody is looking.
       if (this.d.getState().autoApprove === true) {
         const approval = this.approvalStore.getByRpcId(eventId)
-        if (approval && this.approvalStore.canAllow(approval, this.activeSessionId)) {
+        if (approval && this.approvalStore.canAllow(approval, this.activeSessionId)
+          && !this.approvalStore.isHighRisk(approval)) {
           this.d.log.info(`Auto-approving: ${f.toolName ?? 'unknown'} (autoApprove setting)`)
           void this.respondApproval(eventId, 'allowed-once')
         } else if (approval) {
           this.d.log.info(
-            `Not auto-approving: ${f.toolName ?? 'unknown'} blocked by `
-            + `${this.approvalStore.blockReason(approval, this.activeSessionId) ?? 'policy'}`,
+            `Not auto-approving: ${f.toolName ?? 'unknown'} — `
+            + (this.approvalStore.isHighRisk(approval)
+              ? 'it asks for unrestricted access, so it waits for a person'
+              : `${this.approvalStore.blockReason(approval, this.activeSessionId) ?? 'policy'}`),
           )
         }
       }
@@ -1051,9 +1056,15 @@ export class AppController {
       this.d.notifyError('Approval not found or already resolved.')
       return
     }
-    // Security: double-check canAllow before sending allow
+    // Still double-checked: an approval for a session that is not the one on
+    // screen, or one that has already been answered, must not be sent. Risk is
+    // not checked here any more — a person deciding is the whole point of the
+    // button, and the auto-approve path is where that distinction belongs.
     if (outcome === 'allowed-once' && !this.approvalStore.canAllow(approval, this.activeSessionId)) {
-      this.d.notifyError('This approval cannot be allowed from VS Code. Please review in the Harness Web UI.')
+      const why = this.approvalStore.blockReason(approval, this.activeSessionId)
+      this.d.notifyError(why === 'session'
+        ? 'This approval belongs to a session that is not the one on screen.'
+        : 'This approval has already been answered.')
       return
     }
     this.approvalStore.setResponding(eventId)

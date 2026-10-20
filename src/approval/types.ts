@@ -39,14 +39,22 @@ export interface ApprovalSummary {
   reason?: string
   state: ApprovalState
   outcome?: string
-  /** Whether VS Code-side Allow is permitted (safety allowlist). */
+  /** Whether VS Code-side Allow is permitted: right session, still answerable. */
   canAllow: boolean
   /**
-   * Why `canAllow` is false, when it is a policy refusal rather than "wrong
-   * session" or "already answered". Rendered so a disabled Allow button is
-   * never a dead end.
+   * Why `canAllow` is false, when it is "wrong session" or "already answered".
+   * Rendered so a disabled Allow button is never a dead end.
    */
-  blockedBy?: 'high-risk' | 'session' | 'settled'
+  blockedBy?: 'session' | 'settled'
+  /**
+   * The Host's own reason says this call asks for unrestricted access.
+   *
+   * Informational, and deliberately not a veto: the side panel and the Web UI
+   * are two clients of one Host, and a request the browser can grant with one
+   * click must be grantable here with one click too. It still drives the risk
+   * styling, and it is the one thing auto-approve refuses to answer.
+   */
+  highRisk: boolean
   createdAt: number
 }
 

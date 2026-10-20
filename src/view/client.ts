@@ -164,6 +164,60 @@ export const CLIENT_SCRIPT = /* js */ `
     dot.className = 'dot ' + kind;
   }
 
+  // The transcript this panel is holding. The host sends the whole thing on a
+  // first paint and on a session change, and only the moved items afterwards —
+  // at 40 turns a full push was 82 KB, 93% of it this array.
+  let knownSnapshot = null;
+
+  function mergeSnapshot(state) {
+    if (state.snapshot) {
+      knownSnapshot = state.snapshot;
+      return knownSnapshot;
+    }
+    var delta = state.snapshotDelta;
+    if (!delta) return knownSnapshot;
+    // A delta against a session we never saw is unusable; showing nothing is
+    // better than showing the wrong conversation.
+    if (!knownSnapshot || knownSnapshot.sessionId !== delta.sessionId) return null;
+
+    var byUid = new Map();
+    var i;
+    for (i = 0; i < knownSnapshot.items.length; i++) byUid.set(knownSnapshot.items[i].uid, knownSnapshot.items[i]);
+    for (i = 0; i < delta.items.length; i++) byUid.set(delta.items[i].uid, delta.items[i]);
+    var removed = delta.removed || [];
+    for (i = 0; i < removed.length; i++) byUid.delete(removed[i]);
+
+    // Order follows the previous array so rows do not jump, and anything new is
+    // appended in the order the host sent it.
+    var order = [];
+    var seen = new Set();
+    for (i = 0; i < knownSnapshot.items.length; i++) {
+      var uid = knownSnapshot.items[i].uid;
+      if (!byUid.has(uid) || seen.has(uid)) continue;
+      seen.add(uid);
+      order.push(uid);
+    }
+    for (i = 0; i < delta.items.length; i++) {
+      var nuid = delta.items[i].uid;
+      if (seen.has(nuid) || !byUid.has(nuid)) continue;
+      seen.add(nuid);
+      order.push(nuid);
+    }
+
+    var items = [];
+    for (i = 0; i < order.length; i++) items.push(byUid.get(order[i]));
+
+    knownSnapshot = {
+      sessionId: delta.sessionId,
+      title: delta.title,
+      running: delta.running,
+      renderVersion: delta.renderVersion,
+      systemMessageCount: delta.systemMessageCount,
+      items: items,
+    };
+    return knownSnapshot;
+  }
+
   // ─── main render entry point ────────────────────────────────────────────────
   function render(state) {
     currentState = state;
@@ -321,7 +375,7 @@ export const CLIENT_SCRIPT = /* js */ `
     // Messages — reconcile on renderVersion change, or reset when there is no
     // snapshot at all (the connection state may have changed).
     const msgs = $('messages');
-    const snap = state.snapshot;
+    const snap = mergeSnapshot(state);
     if (snap && snap.renderVersion !== lastRenderVersion) {
       lastRenderVersion = snap.renderVersion;
       renderTranscript(msgs, snap, state.activeSessionId);
@@ -549,7 +603,7 @@ export const CLIENT_SCRIPT = /* js */ `
 
   function renderApprovalPending(ap) {
     const card = document.createElement('div');
-    card.className = 'pending-card' + (ap.canAllow ? '' : ' risk') + (ap.state === 'responding' ? ' responding' : '');
+    card.className = 'pending-card' + (ap.highRisk ? ' risk' : '') + (ap.state === 'responding' ? ' responding' : '');
     const kind = document.createElement('div');
     kind.className = 'pending-kind';
     kind.textContent = '⚠ Approval required';
@@ -566,10 +620,14 @@ export const CLIENT_SCRIPT = /* js */ `
       reason.textContent = ap.reason;
       card.appendChild(reason);
     }
-    if (ap.blockedBy === 'high-risk') {
+    if (ap.highRisk) {
+      // Informative, not a refusal. The Web UI shows the same reason next to the
+      // same single "Allow once" button; a panel that answered with "use the Web
+      // UI" would be a second class client, and a dead end whenever that browser
+      // cannot reach the Host.
       const note = document.createElement('div');
       note.className = 'pending-note';
-      note.textContent = 'The sidebar will not grant this one — it asks for unrestricted access. Use the Web UI.';
+      note.textContent = 'This call asks for unrestricted access. The reason above is the Host’s own wording.';
       card.appendChild(note);
     }
     const actions = document.createElement('div');

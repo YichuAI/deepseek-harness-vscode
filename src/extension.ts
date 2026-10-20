@@ -31,6 +31,7 @@ import {
   USE_LAUNCH_URL_COMMAND,
   type SessionMode,
 } from './app/session-mode.ts'
+import { openWebUiWithCookie } from './app/web-ui-bridge.ts'
 import { DSH_REVIEW_SCHEME } from './review/virtualDocument.ts'
 import type { PendingAttachmentPayload, WebviewAction } from './view/provider.ts'
 import { HarnessWebviewViewProvider, type UiState } from './view/provider.ts'
@@ -335,6 +336,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       adoptedUrl: adopted,
       mode: cfg.sessionMode,
       authenticated: auth.isReady(),
+      connected: getState().connection === 'connected',
       remoteName: vscode.env.remoteName,
     })
 
@@ -343,6 +345,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         log.info('openWebUI: reopening the launch URL this session was adopted from')
       }
       await vscode.env.openExternal(vscode.Uri.parse(plan.url))
+      return
+    }
+
+    // The case that used to be a dead end: a Host we did not start, a cookie we
+    // do hold. The Host accepts that cookie at `/` — measured, not assumed — so
+    // the only missing piece is putting it in the browser's jar.
+    if (plan.kind === 'open-with-cookie') {
+      const cookie = auth.cookieHeader()
+      if (cookie === undefined) {
+        void vscode.window.showWarningMessage(OPEN_WEB_UI_TEXT.cookieBridgeFailed)
+        return
+      }
+      const result = await openWebUiWithCookie({
+        host: target.host,
+        port: target.port,
+        cookie,
+        openExternal: (url) => vscode.env.openExternal(vscode.Uri.parse(url)),
+        log: (m) => log.info(m),
+      })
+      if (result === 'failed') {
+        void vscode.window.showWarningMessage(OPEN_WEB_UI_TEXT.cookieBridgeFailed)
+      }
       return
     }
 

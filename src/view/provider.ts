@@ -83,6 +83,22 @@ export interface UiState {
   /** Auto-approve incoming approval requests (setting mirror). */
   autoApprove: boolean
   /**
+   * The knobs, as the configuration currently has them.
+   *
+   * Read on every push rather than mirrored by hand: six values that can drift
+   * from `settings.json` is exactly how a panel ends up advertising a value the
+   * extension is not using.
+   */
+  settings?: {
+    host: string
+    port: number
+    sessionMode: string
+    autoApprove: boolean
+    showSystemMessages: boolean
+    autoDiscover: boolean
+    launchCommand: string
+  }
+  /**
    * The part of `snapshot` that changed since the last push.
    *
    * Present instead of `snapshot` once both sides agree on a session: the
@@ -186,6 +202,23 @@ export type WebviewAction =
    * already decided on".
    */
   | { type: 'runRepair' }
+  // ─── settings panel ─────────────────────────────────────────
+  /**
+   * Write one configuration value.
+   *
+   * The KEY is a closed union and the VALUE is a scalar: the webview can change
+   * a setting the panel knows about, and cannot name an arbitrary key, a nested
+   * path, or a value of its own shape.
+   */
+  | {
+    type: 'setConfig'
+    key: 'host' | 'port' | 'sessionMode' | 'autoApproveApprovals' | 'showSystemMessages' | 'autoDiscover' | 'launchCommand'
+    value: string | number | boolean
+  }
+  | { type: 'showDiagnostics' }
+  | { type: 'showLogs' }
+  /** Reconnect, and look for a Host on another loopback port when this one is silent. */
+  | { type: 'findHost' }
   // ─── `@` completion (host-served fileReferences/list) ──────
   | { type: 'refsQuery'; query: string }
   // ─── composer attachments (images ride the prompt; files are staged) ──

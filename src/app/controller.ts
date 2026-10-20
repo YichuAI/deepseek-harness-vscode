@@ -98,6 +98,8 @@ export interface ControllerDeps {
   /** Put text on the clipboard (the Linux/macOS install commands). */
   copyToClipboard?: (text: string) => Promise<void>
   openHarnessHome: () => void
+  /** Write one setting to the real configuration. Implemented in extension.ts. */
+  applySetting?: (key: string, value: string | number | boolean) => Promise<void>
   moveToSecondarySideBar: () => Promise<void>
   log: { info: (m: string) => void; error: (m: string) => void }
   provider?: HarnessWebviewViewProvider
@@ -397,6 +399,27 @@ export class AppController {
       case 'openWebUI': this.d.openHarnessHome(); break
       case 'toggleSystemMessages': this.toggleSystemMessages(); break
       case 'moveToSecondarySideBar': void this.d.moveToSecondarySideBar(); break
+      // Settings panel. The write goes back through the extension so there is
+      // one implementation of "change a setting" for the panel, the palette and
+      // settings.json — and so the existing config-change handler is what reacts
+      // to it (it reconnects for host/port/mode, and nothing for the rest).
+      case 'setConfig':
+        try {
+          await this.d.applySetting?.(action.key, action.value)
+        } catch (e) {
+          this.d.notifyError(`Could not save ${action.key}: ${e instanceof Error ? e.message : String(e)}`)
+        }
+        break
+      case 'showDiagnostics':
+        await this.d.vscodeAPI.commands.executeCommand('deepseekHarness.diagnostics')
+        break
+      case 'showLogs':
+        await this.d.vscodeAPI.commands.executeCommand('deepseekHarness.showLogs')
+        break
+      // "Find Host" is a forced reconnect: discovery already runs when the
+      // configured port answers nothing, and forcing it is what makes the button
+      // do something the user can watch happen.
+      case 'findHost': await this.doConnect({ force: true }); break
       // Review cards report a mutation the tool ALREADY made. There is no
       // accept step any more: "accept" was a no-op with a button, because the
       // change was on disk before the card could be drawn. What is left is the

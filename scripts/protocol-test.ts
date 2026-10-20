@@ -1935,6 +1935,55 @@ async function main(): Promise<void> {
       deltaBytes * 20 < fullBytes,
       `${String(deltaBytes)} B vs ${String(fullBytes)} B`)
 
+    // ─── G1d. settings and help ─────────────────────────────────────────────
+    // The knobs used to exist only in the command palette and settings.json:
+    // changeable, but not inspectable, and with no sentence anywhere saying what
+    // any of them did. One row per knob, with its explanation.
+    const cfgBoot = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, {
+      settings: {
+        host: '127.0.0.1', port: 3080, sessionMode: 'auto', autoApprove: false,
+        showSystemMessages: false, autoDiscover: true, launchCommand: 'dsh web --port 0',
+      },
+    })
+    fire(cfgBoot.el('btn-settings'), 'click')
+    check('the gear opens the settings panel',
+      (cfgBoot.el('settings-panel')['style'] as Record<string, string>)['display'] !== 'none')
+    const cfgText = stubText(cfgBoot.el('settings-body'))
+    check('...with a row and an explanation for the session mode',
+      cfgText.includes('Session mode') && cfgText.includes('mints from'))
+    check('...and for host, port and the behaviour switches',
+      cfgText.includes('Host') && cfgText.includes('Port') && cfgText.includes('Auto-approve'))
+    check('...warning that auto-approve never covers unrestricted access',
+      cfgText.includes('unrestricted access'))
+    // The answer to "why is it installing at me": installing is a button here,
+    // and only a failed launch still offers it inline.
+    check('the install affordance lives in the panel', cfgText.includes('Install Host'))
+    const applyHost = stubButtons(cfgBoot.el('settings-body'))
+      .find((b) => String(b['textContent']) === 'Apply')
+    check('the host row has an Apply button', applyHost !== undefined)
+    if (applyHost) fire(applyHost, 'click')
+    check('...which posts the current value under a known key',
+      cfgBoot.actions.some((a) => a['type'] === 'setConfig' && a['key'] === 'host' && a['value'] === '127.0.0.1'),
+      JSON.stringify(cfgBoot.actions))
+    const installHere = stubButtons(cfgBoot.el('settings-body'))
+      .find((b) => String(b['textContent']) === 'Install Host')
+    if (installHere) fire(installHere, 'click')
+    check('...and the install button asks the extension to do it',
+      installHere === undefined || cfgBoot.actions.some((a) => a['type'] === 'install'),
+      JSON.stringify(cfgBoot.actions))
+
+    // A starter prompt on the empty panel: "what do I type" is the question right
+    // after "how do I connect", and an empty box is a bad answer to it.
+    const starter = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, { connection: 'disconnected' })
+    const tryBtn = stubButtons(starter.el('messages'))
+      .find((b) => String(b['textContent']).indexOf('Try:') === 0)
+    check('the first-run card offers a starter prompt', tryBtn !== undefined)
+    if (tryBtn) fire(tryBtn, 'click')
+    check('...which fills the composer rather than sending anything',
+      String(starter.el('input')['value']).length > 20
+      && starter.actions.every((a) => a['type'] !== 'sendPrompt'),
+      String(starter.el('input')['value']).slice(0, 40))
+
     // ─── G2. the pending panel: approvals + ask_user_question ───────────────
     // Both block the Host, and a question used to be dropped on the floor by the
     // controller, so the agent's tool call waited on an answer nobody could give.
@@ -3509,8 +3558,17 @@ async function main(): Promise<void> {
     // The button is a claim about somebody's machine, so these are the
     // expensive assertions: it must not appear when nothing is actually missing.
     const bare = { host: '127.0.0.1', port: 3080, platform: 'win32', arch: 'x64' }
-    check('nothing listening offers exactly one install route',
-      classifyConnectFailure('fetch failed', bare).install?.route === 'desktop')
+    // "Nothing at this port" is not "nothing installed": the desktop app starts
+    // its Host on a port it picks, and a `dsh web` in another terminal does the
+    // same. Offering an install here is the extension insisting on something the
+    // user may already have, so the offer lives in the settings panel instead.
+    check('nothing listening does not offer an install',
+      classifyConnectFailure('fetch failed', bare).install === undefined)
+    check('...and points at how to get a Host instead',
+      /desktop app|dsh web/.test(classifyConnectFailure('fetch failed', bare).fix))
+    check('a launch that could not find the command still offers it',
+      classifyConnectFailure('fetch failed',
+        { ...bare, managedAttempted: 'not-found' }).install?.route === 'desktop')
     check('the install button is withheld when the desktop app is already installed',
       classifyConnectFailure('fetch failed',
         { ...bare, desktopInstalled: 'C:\\Program Files\\DeepSeek Harness.exe' }).install === undefined)

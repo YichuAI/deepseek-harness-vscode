@@ -139,6 +139,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   function bump(): void { state.renderVersion++ }
   function pushState(): void {
     bump()
+    // Re-read rather than mirror: a mirror of six settings is a thing that goes
+    // stale, and a panel advertising a value the extension is not using is worse
+    // than a panel with no values at all.
+    state.settings = {
+      host: cfg.host,
+      port: cfg.port,
+      sessionMode: cfg.sessionMode,
+      autoApprove: cfg.autoApproveApprovals,
+      showSystemMessages: cfg.showSystemMessages,
+      autoDiscover: cfg.autoDiscover,
+      launchCommand: cfg.launchCommand,
+    }
     for (const l of stateListeners) { try { l(state) } catch { /* swallow listener errors */ } }
   }
 
@@ -193,6 +205,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // resolved at click time, which is why referring to a `const` declared
     // further down this function is correct rather than a mistake.
     openHarnessHome: () => { void openWebUi() },
+    /**
+     * One writer for every setting, whichever surface asked.
+     *
+     * Global target on purpose: these describe this machine's Host, not a
+     * repository, and a workspace-scoped override would make the panel show a
+     * value that only applies in one folder.
+     */
+    applySetting: async (key: string, value: string | number | boolean) => {
+      log.info(`config: ${key} = ${String(value)} (from the panel)`)
+      await vscode.workspace.getConfiguration(SECTION)
+        .update(key, value, vscode.ConfigurationTarget.Global)
+    },
     moveToSecondarySideBar: async () => {
       try {
         await vscode.commands.executeCommand('workbench.action.moveViews', {

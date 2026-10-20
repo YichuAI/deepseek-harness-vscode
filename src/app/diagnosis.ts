@@ -385,9 +385,9 @@ export function classifyConnectFailure(message: string, ctx: ConnectFailureConte
         ? `Start the Host on that machine — a terminal there running "dsh web" — or set `
           + 'deepseekHarness.sessionMode to "auto" and this extension starts it on the remote for you.'
         : 'Open the desktop app, or run "dsh web" in a terminal.'
-      // The repair is the *specific* next step, not "try the thing that just
-      // failed". `credentials` cannot start a Host by design, so a Retry button
-      // there offers the one action guaranteed not to help.
+      // The specific next step, not "try the thing that just failed".
+      // `credentials` cannot start a Host by design, so a Retry button there
+      // offers the one action guaranteed not to help.
       const repair = ctx.sessionMode === 'paste'
         ? { command: USE_LAUNCH_URL_COMMAND, label: 'Paste launch URL' }
         : ctx.sessionMode === 'credentials'
@@ -401,7 +401,13 @@ export function classifyConnectFailure(message: string, ctx: ConnectFailureConte
           `Nothing is listening on ${where}.${credentials}${paste} ` +
           `${howToStart} ${alternatives(ctx.sessionMode)}`,
         repair,
-        ...(install !== undefined ? { install } : {}),
+        // No install offer here. Nothing at the configured port does not mean
+        // nothing is installed: the desktop app starts its Host on an OS-assigned
+        // port, and a `dsh web` in another terminal does the same if it was asked
+        // to. A button that reads "Get Harness" in that situation is the
+        // extension insisting on an install the user does not need. Installing is
+        // a deliberate action in the settings panel, and only a launch that
+        // actually failed to find the command offers it inline.
       }
     }
 

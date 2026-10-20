@@ -363,6 +363,28 @@ textarea { resize: none; min-height: 60px; max-height: 200px; width: 100%; }
 .subpanel-head button { margin-left: 0; flex: 0 0 auto; }
 .subpanel-head button + button { margin-left: auto; }
 .subpanel-head span:first-child { flex: 1; }
+
+/* Settings and help. One row per knob: what it is, what it does, and the control
+   — because the alternative was a list of command-palette entries with no way to
+   see what any of them were set to. */
+.set-group {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--vscode-descriptionForeground); margin: 12px 0 4px;
+}
+.set-group:first-child { margin-top: 2px; }
+.set-row { display: flex; gap: 8px; align-items: flex-start; padding: 7px 0; border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,.22)); }
+.set-group + .set-row { border-top: 0; }
+.set-label { flex: 0 0 86px; font-size: 11px; font-weight: 600; padding-top: 3px; }
+.set-main { flex: 1 1 auto; min-width: 0; }
+.set-note { color: var(--vscode-descriptionForeground); font-size: 10.5px; line-height: 1.45; margin-top: 3px; }
+.set-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.set-actions button { margin: 0; }
+.set-inline { display: flex; gap: 4px; }
+.set-inline input { flex: 1 1 auto; min-width: 0; }
+.set-inline input[type="number"] { flex: 0 0 78px; }
+.set-check { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+.set-check input { flex: 0 0 auto; }
+#settings-body { max-height: 340px; overflow-y: auto; }
 .subpanel .row { display: flex; gap: 6px; margin-bottom: 5px; }
 .subpanel .row input { flex: 1; }
 .muted.warn { color: var(--vscode-charts-yellow, #ca9c2e); }

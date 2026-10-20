@@ -155,8 +155,204 @@ export const CLIENT_SCRIPT = /* js */ `
     go.textContent = 'Connect';
     go.addEventListener('click', function () { post({ type: 'connect' }) });
     actions.appendChild(go);
+    // A starter prompt, because "what do I even type" is the next question after
+    // "how do I connect", and an empty box is a bad answer to it.
+    var starter = document.createElement('button');
+    starter.className = 'secondary';
+    starter.textContent = 'Try: explain this workspace';
+    starter.title = 'Put a first prompt in the box — edit it before sending';
+    starter.addEventListener('click', function () {
+      fillComposer('Summarise this workspace: what is it, how is it built, and where should I start?');
+    });
+    actions.appendChild(starter);
     root.appendChild(actions);
     return root;
+  }
+
+  function fillComposer(text) {
+    var ta = $('input');
+    if (ta.value.trim() === '') ta.value = text;
+    else {
+      var sep = ta.value.endsWith(' ') ? '' : ' ';
+      ta.value += sep + text;
+    }
+    ta.focus();
+    closeAt();
+    updateContextPreview();
+  }
+
+  // ─── settings panel ─────────────────────────────────────────────────────────
+  // The knobs used to live only in the command palette and in settings.json:
+  // you could change them, but you could not see what any of them were set to
+  // or what they did. One row per knob, with the sentence that explains it.
+  var settingsSig = null;
+
+  function settingsOpen() {
+    // Open is the empty string — which is also what a DOM stub that never parsed
+    // the inline style reports as its default (undefined, not 'none'). Testing
+    // for '' gets both right; testing "not none" closes the panel instead.
+    return $('settings-panel').style.display === '';
+  }
+
+  function toggleSettings(open) {
+    $('settings-panel').style.display = open ? '' : 'none';
+    // Force a rebuild on open: the panel may have been closed while a setting
+    // changed, and a stale checkbox is worse than a redraw.
+    settingsSig = null;
+    if (open) renderSettings(currentState);
+  }
+
+  function setGroup(text) {
+    var g = document.createElement('div');
+    g.className = 'set-group';
+    g.textContent = text;
+    return g;
+  }
+
+  function setRow(label, note, control) {
+    var row = document.createElement('div');
+    row.className = 'set-row';
+    var name = document.createElement('div');
+    name.className = 'set-label';
+    name.textContent = label;
+    var main = document.createElement('div');
+    main.className = 'set-main';
+    if (control) main.appendChild(control);
+    if (note) {
+      var n = document.createElement('div');
+      n.className = 'set-note';
+      n.textContent = note;
+      main.appendChild(n);
+    }
+    row.appendChild(name);
+    row.appendChild(main);
+    return row;
+  }
+
+  function setText(key, value, numeric) {
+    var wrap = document.createElement('div');
+    wrap.className = 'set-inline';
+    var input = document.createElement('input');
+    input.type = numeric ? 'number' : 'text';
+    input.value = String(value == null ? '' : value);
+    var apply = document.createElement('button');
+    apply.className = 'secondary';
+    apply.textContent = 'Apply';
+    apply.addEventListener('click', function () {
+      var v = numeric ? Number(input.value) : input.value;
+      if (numeric && !isFinite(v)) return;
+      post({ type: 'setConfig', key: key, value: v });
+    });
+    wrap.appendChild(input);
+    wrap.appendChild(apply);
+    return wrap;
+  }
+
+  function setCheck(key, value) {
+    var label = document.createElement('label');
+    label.className = 'set-check';
+    var box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = !!value;
+    box.addEventListener('change', function () {
+      post({ type: 'setConfig', key: key, value: box.checked });
+    });
+    var text = document.createElement('span');
+    text.textContent = box.checked ? 'on' : 'off';
+    box.addEventListener('change', function () { text.textContent = box.checked ? 'on' : 'off' });
+    label.appendChild(box);
+    label.appendChild(text);
+    return label;
+  }
+
+  function setMode(value) {
+    var sel = document.createElement('select');
+    var modes = [
+      ['auto', 'auto — mint, or start a Host'],
+      ['credentials', 'credentials — mint only'],
+      ['managed', 'managed — start a Host only'],
+      ['paste', 'paste — ask for a launch URL']
+    ];
+    for (var i = 0; i < modes.length; i++) {
+      var opt = document.createElement('option');
+      opt.value = modes[i][0];
+      opt.textContent = modes[i][1];
+      if (modes[i][0] === value) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.addEventListener('change', function () {
+      post({ type: 'setConfig', key: 'sessionMode', value: sel.value });
+    });
+    return sel;
+  }
+
+  function setButtons(buttons) {
+    var row = document.createElement('div');
+    row.className = 'set-actions';
+    for (var i = 0; i < buttons.length; i++) {
+      (function (b) {
+        var el = document.createElement('button');
+        el.className = 'secondary';
+        el.textContent = b.label;
+        if (b.title) el.title = b.title;
+        el.addEventListener('click', function () { post({ type: b.action }) });
+        row.appendChild(el);
+      })(buttons[i]);
+    }
+    return row;
+  }
+
+  function renderSettings(state) {
+    var s = (state && state.settings) || {};
+    var sig = [s.host, s.port, s.sessionMode, s.autoApprove, s.showSystemMessages, state && state.connection].join('|');
+    if (sig === settingsSig) return;
+    settingsSig = sig;
+
+    var body = $('settings-body');
+    body.innerHTML = '';
+
+    body.appendChild(setGroup('Connection'));
+    body.appendChild(setRow('Host', 'Loopback only. The Host must run on the same machine as this window.',
+      setText('host', s.host, false)));
+    body.appendChild(setRow('Port', 'Default 3080. A desktop-app Host uses a port it picks itself — "Find Host" below handles that.',
+      setText('port', s.port, true)));
+    body.appendChild(setRow('Session mode',
+      'How the extension gets a session. "auto" mints from $DSH_HOME/.credentials.yaml and starts a Host when nothing is listening.',
+      setMode(s.sessionMode)));
+    body.appendChild(setRow('Find Host',
+      'Reconnect now, and look on other loopback ports when this one answers nothing.',
+      setButtons([{ label: 'Find running Host', action: 'findHost' }])));
+    body.appendChild(setRow('Discovery',
+      'Look for a Host on another loopback port when the one above is silent. This is what makes a desktop-app Host findable at all.',
+      setCheck('autoDiscover', s.autoDiscover)));
+
+    body.appendChild(setGroup('Behaviour'));
+    body.appendChild(setRow('Auto-approve',
+      'Answers approvals without asking. Never applies to a request for unrestricted access — those always wait for you.',
+      setCheck('autoApproveApprovals', s.autoApprove)));
+    body.appendChild(setRow('System messages',
+      'Show runtime context and plugin injections in the transcript, collapsed.',
+      setCheck('showSystemMessages', s.showSystemMessages)));
+
+    body.appendChild(setGroup('Host software'));
+    body.appendChild(setRow('Install Host',
+      'Only needed on a machine with neither the dsh command nor the desktop app. Runs the npm install where the extension host is.',
+      setButtons([{ label: 'Install Host', action: 'install', title: 'Install the Harness CLI on this machine' }])));
+    body.appendChild(setRow('Launch command',
+      'What "auto" and "managed" run when nothing is listening. Leave it alone unless you know which flag you need.',
+      setText('launchCommand', s.launchCommand, false)));
+
+    body.appendChild(setGroup('Help'));
+    body.appendChild(setRow('Diagnose',
+      'Connection state, target, classified reason, and the capabilities the Host reported.',
+      setButtons([
+        { label: 'Diagnostics', action: 'showDiagnostics' },
+        { label: 'Show logs', action: 'showLogs' },
+        { label: 'Open Web UI', action: 'openWebUI' }
+      ])));
+    body.appendChild(setRow('Shortcuts',
+      'Enter sends · Shift+Enter newline · / commands · @ file references · F6 search · F7 inspector · F8 attach',
+      null));
   }
 
   function setDot(kind) {
@@ -435,6 +631,7 @@ export const CLIENT_SCRIPT = /* js */ `
     renderPendingPanel(state);
     renderSearch(state);
     renderInspector(state);
+    if (settingsOpen()) renderSettings(state);
   }
 
   // ─── composer attachments ──────────────────────────────────────────────────
@@ -1976,6 +2173,10 @@ export const CLIENT_SCRIPT = /* js */ `
   $('ctl-head').addEventListener('click', () => $('control').classList.toggle('open'));
 
   // ─── F6/F7/F8 toolbar ────────────────────────────────────────────────────────
+  $('btn-settings').addEventListener('click', () => {
+    toggleSettings(!settingsOpen());
+  });
+  $('settings-close').addEventListener('click', () => { toggleSettings(false); });
   $('btn-search').addEventListener('click', () => {
     const p = $('search-panel');
     const open = p.style.display === 'none';

@@ -242,8 +242,18 @@ export function launchPlan(command: string): LaunchStep[] {
 export function desktopInstallCandidates(platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env): string[] {
   const join = joinFor(platform)
   if (platform === 'win32') {
-    const local = env['LOCALAPPDATA']
-    return local === undefined ? [] : [join(local, 'Programs', 'DeepSeek Harness', 'DeepSeek Harness.exe')]
+    // Per-user first (what the installer defaults to), then the machine-wide
+    // locations an enterprise or winget install lands in. One miss here is not
+    // cosmetic: a missed desktop app turns "open the app you already have" into
+    // "install this", which is how the panel ends up insisting on an install
+    // nobody needs.
+    const dirs = [
+      env['LOCALAPPDATA'] === undefined ? '' : join(env['LOCALAPPDATA'], 'Programs'),
+      env['ProgramFiles'] === undefined ? '' : env['ProgramFiles'],
+      env['ProgramFiles(x86)'] === undefined ? '' : env['ProgramFiles(x86)'],
+      env['ProgramW6432'] === undefined ? '' : env['ProgramW6432'],
+    ].filter((d) => d !== '')
+    return dirs.map((dir) => join(dir, 'DeepSeek Harness', 'DeepSeek Harness.exe'))
   }
   if (platform === 'darwin') {
     return ['/Applications/DeepSeek Harness.app', join(homedir(), 'Applications', 'DeepSeek Harness.app')]

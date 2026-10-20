@@ -263,6 +263,10 @@ authority that minted it).
 
 ## Configuration
 
+Everything below is also editable from the panel: **⚙ Settings & help** lists each knob with the sentence that
+explains it, and carries the actions that used to live only in the command palette — *Find running Host*, *Install Host*,
+*Diagnostics*, *Show logs* and *Open Web UI*.
+
 | Setting | Default | Notes |
 | --- | --- | --- |
 | `deepseekHarness.host` | `127.0.0.1` | Exactly three values are accepted — `127.0.0.1`, `localhost`, `::1`. Any other value is refused before a socket is opened. See [Remote development](#remote-development). |

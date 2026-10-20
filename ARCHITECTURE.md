@@ -220,6 +220,15 @@ the whole contract:
 The vocabulary is `'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'`; the
 UI can only produce the first two (typed as `ApprovalDecision`).
 
+**Risk is marked, not vetoed (v0.4.0).** A reason naming `danger-full-access` or
+`escalation` used to make `ApprovalStore` refuse the click and point at the Web UI.
+The Web UI answers the same waterfall with one "Allow once" button, so the refusal
+made this a second-class client of the same Host — and a dead end whenever that
+browser could not open. The reason now sets `highRisk`, which draws a red card with
+the Host's own wording and leaves the button alone. What it still blocks is
+`autoApproveApprovals`: a person may grant unrestricted access, a setting may not
+grant it while nobody is looking.
+
 The `approval/request` frame carries a `sessionId` + `eventId` (the waterfall
 event, observed on the mux); `respondApproval()` looks it up and POSTs the pair
 together with our `clientId`. `agentId` *is* the SessionId upstream, which is what
@@ -882,13 +891,12 @@ Two smaller contributors to the same class of bug went with it:
 - **The session `<select>` was rebuilt on every push.** Recreating the options
   discarded the user's selection mid-interaction. It is signature-guarded.
 
-#### Known remaining cost
+#### A cost that was left, and then paid (v0.4.0)
 
-The transcript is still shipped whole on every streaming push: ~52 KB per push on
-a 40-turn session, cloned across `postMessage`. The renderer no longer rebuilds
-it, so the constant is small, but its size still tracks the conversation. Cutting
-it needs a per-item delta on the wire (`UiState.snapshotPatch` or similar), which
-is a protocol change and is not in 0.1.7.
+Through v0.3.0 the transcript was still shipped whole on every streaming push —
+82.5 KB on a 40-turn session, cloned across `postMessage` — because cutting it
+needs a per-item delta on the wire. v0.4.0 is that change; the section below has
+the shape and the numbers.
 
 #### Measured and deliberately not changed
 
@@ -899,6 +907,31 @@ Measured: **~1.2 µs** for a typical `assistant/stream` delta and **~47 µs** fo
 cadence of ~33 frames/s. Computing the raw lazily would mean retaining up to 300
 live frame objects instead of 300 truncated 2 KB strings, trading bounded memory
 for a rounding error. Left alone.
+
+### Incremental transcript transfer (v0.4.0)
+
+The renderer stopped rebuilding the transcript in v0.1.7, but the wire still carried it:
+`pushState` runs on every streamed chunk and every push serialised all items. At 40 turns that
+is **82.5 KB per push, 93% of it the transcript**, cloned across `postMessage`.
+
+A push now carries the difference instead. The provider keeps `uid → rev` per webview — the
+arithmetic lives in `view/snapshot-delta.ts` so it can be asserted without a VS Code host — and
+sends only the items whose `rev` moved (exactly the rows the renderer would redraw), plus the
+uids that no longer exist. When nothing in the transcript moved — a push driven by usage,
+approvals or status — no transcript field is sent at all.
+
+A first paint, a session change and a re-created webview still send everything. A delta is only
+meaningful against a transcript both ends agree on, and the webview answers a delta for a session
+it never saw by rendering nothing rather than the wrong conversation.
+
+Measured on the same 40-turn transcript: **3.6 KB, 4.4%** of the previous push. What is left is
+the session list and the fixed part of `UiState`, which change rarely enough that a second cache
+contract would cost more than it saves.
+
+Group G1c of `scripts/protocol-test.ts` asserts both halves — the computation (one edited item →
+one item; a dropped item → `removed`; an unchanged transcript → nothing) and the merge (a delta
+updates the row it names, keeps the rows it does not, appends new ones, leaves no stale text) —
+plus a byte-ratio guard, so the win cannot quietly regress.
 
 ## Reconnect
 
@@ -1055,6 +1088,7 @@ src/
 │   ├── controller.ts         # AppController — orchestration
 │   ├── state.ts              # UiState shape + mapping helpers
 │   ├── session-mode.ts       # pure: the auto/credentials/managed/paste traits
+│   ├── web-ui-bridge.ts      # one-shot loopback redirect: hands the browser its cookie
 │   └── diagnosis.ts          # pure: classify a failure, build the redacted report
 ├── conversation/
 │   ├── model.ts              # ConversationModel fold
@@ -1094,6 +1128,7 @@ src/
     ├── provider.ts           # webview composition (HTML + CSP + state bridge)
     ├── styles.ts             # CSS
     ├── html.ts               # HTML skeleton
+    ├── snapshot-delta.ts     # pure: which transcript items moved since the last push
     ├── client.ts             # webview-side JS (render + markdown + actions)
     └── toolPresentation.ts   # tool name → human title
 media/
@@ -1103,7 +1138,7 @@ media/
 ├── markdown-it.umd.min.js    # bundled for VSIX (114 KB)
 └── walkthrough/              # Getting Started pages, one per step (markdown)
 scripts/
-├── protocol-test.ts          # fake-harness protocol test, 533 assertions (no dsh web)
+├── protocol-test.ts          # fake-harness protocol test, 576 assertions (no dsh web)
 ├── protocol-probe.ts         # asks a live `dsh web` what it actually serves
 ├── check-versions.ts         # every version surface must agree with package.json
 ├── integration-test.ts       # closed-loop test against real dsh

@@ -19,6 +19,41 @@ git tag v<版本> && git push origin v<版本>
 
 ---
 
+## SOP —— 一页，按顺序
+
+下面的检查清单解释每一步**为什么**存在。这一份是执行顺序，写给未来直接照做、不需要重新推导的人。
+
+| # | 步骤 | 命令 / 检查 | 完成的标志 |
+| --- | --- | --- | --- |
+| 0 | 定版本号 | `git log --oneline $(git describe --tags --abbrev=0)..HEAD` | 能用一句话说清楚用户得到了什么。契约变化（协议、上游支持面、审批策略、UI 行为）走 minor；只有修复走 patch。 |
+| 1 | 改齐所有版本面 | `package.json`、`package-lock.json`（根部**两处**）、`README*` 里的 `.vsix` 名、CHANGELOG 标题 | `npm run check-versions` 通过。它会点名不同意的那个面——改那个面，永远不要改门禁。 |
+| 2 | 写文档 | README「新特性」（双语）、CHANGELOG 条目（双语）、契约变了就改 ARCHITECTURE、断言数 | README / ARCHITECTURE / RELEASE 里的数字都等于测试打印出来的那个。 |
+| 3 | 跑门禁 | `npm run typecheck` → `npm run protocol-test` → `npm run e2e-test` → `npm run check-versions` | 全绿。`--online` 可选，在有代理的机器上会卡在徽章探测阶段；它前面那些版本面结论才是要的。 |
+| 4 | 实机 Host | `curl --noproxy '*' http://127.0.0.1:3080/` → 期望 `401` + 那句鉴权提示，然后 `DSH_PORT=3080 npm run integration-test` | `41/41`。**干净的** Host home 也行——测试会自己建工作区。 |
+| 5 | 打包并量字节 | `npm run build && npx vsce package --no-dependencies` | 记下**文件数与确切字节**，写进 `RELEASE*`：当前基线行和已发布字节清单。 |
+| 6 | 复跑门禁 | `npm run check-versions` | 改完基线**之后**仍绿。此后只要动一个随包文件，字节就变——回到第 5 步。 |
+| 7 | 提交与打标签 | `git commit -F <文件>`、`git tag -a v<版本> -m …`、`git push origin HEAD --follow-tags` | 标签上的 CI 与 E2E 全绿。 |
+| 8 | 看 Release 任务 | `gh run list`、`gh release view v<版本> --json assets` | 附件字节 = 打包字节。Marketplace 那步预期是红的（`Trusted Publishing is not supported`）——已知限制，不是这个版本的错。 |
+| 9 | Open VSX **最后发** | `npx ovsx publish --packagePath <vsix> --pat <token>` | 约 90 秒–2 分钟后 `/api/<ns>/<ext>` 显示该版本，且下载回来逐条目比对（CRC + 长度）一致。 |
+| 10 | Marketplace | 手动上传同一个 VSIX | 唯一没有工作流能代劳的一步。传**最新的**那个版本：它覆盖所有跳过的版本。 |
+| 11 | 三处核对 | GitHub Release、Open VSX、Marketplace | 三处版本号与字节一致。到这一步才算发完。 |
+| 12 | 留记录 | 字节基线、哪里出了问题、代价是什么 | 下一个版本从事实出发，而不是从记忆。 |
+
+### 真正踩过的坑
+
+- **打包字节是某一棵树的属性。** 打包之后再改 `README`、`CHANGELOG`、`ARCHITECTURE` 或
+  `package.json`，那个测量就作废了。重新量，绝不把旧数字往下带。
+- **增删一个随包文件要改三处**：`.vscodeignore`（它是排除表，顶层新文件默认随包）、
+  `ci.yml` 里的期望文件数、`RELEASE*` 基线。漏掉中间那个，CI 会因为一个看起来毫不相干的数字变红。
+- **不会挂的断言不算断言。** 写完一条，把它描述的那件事破坏一次，看着它红。`check-versions.ts`
+  里有几条就是因为「静默失败」已经发生过才存在的。
+- **Open VSX 的版本号是永久消耗品。** 被它接受的号没法通过 API 删除。这就是它排在第 9 步而不是第 3 步的原因。
+- **永远不要移动已发布的标签。** 标签上 CI 红了，就往前修一个新提交；用户下载的就是那个标签的产物，
+  重写标签会让产物和它对不上。
+- **CHANGELOG 不是发布。** 有条目没标签是承诺；标签才是交付。
+
+---
+
 ## 0. 前置条件
 
 - Node.js ≥ 20（推荐 Node 22+——集成测试使用全局 `WebSocket`）。
@@ -52,7 +87,7 @@ npm run check-versions     # → 全部检查通过；加 --online 会把已发�
 npm run build              # → dist/extension.js
 
 # 1.4 协议测试（假 harness——不需要 dsh web）
-npm run protocol-test      # → 全部 533 项断言 ✓
+npm run protocol-test      # → 全部 576 项断言 ✓
 
 # 1.5 端到端链路（真实文件系统；会自己报告覆盖情况）
 npm run e2e-test           # → 5 条链路里已写 3 条、未写 2 条；已编写的
@@ -90,7 +125,7 @@ npm run package            # → harness-connector-deepseek-<版本>.vsix
       不是每次发版再临时判断的事。
 - [ ] `CHANGELOG.md` 与 `ARCHITECTURE.md` 里的断言数与 `npm run protocol-test`
       的**当前**输出一致（它已历经 50 → 64 → 98 → 83 → 156 → 178 → 180 → 190 →
-      211 → 231 → 243 → 268 → 295 → 312 → 342 → 381 → 461 → 493 → 504 → 512 → 523 → 533，其中 rc.2 重写用新假
+      211 → 231 → 243 → 268 → 295 → 312 → 342 → 381 → 461 → 493 → 504 → 512 → 523 → 533 → 576，其中 rc.2 重写用新假
       harness 替换了 rc.6 的那套，waterfall／待处理面板两组随之落地，v0.2.2 又加上了
       会话模式词表、分平台安装路线和启动器的两个纯函数，v0.2.3 再加上了逐 hunk 手术、
       那九条右键提问和回环围栏，v0.2.4 再加上了 waterfall 的归属规则、启动计划
@@ -145,7 +180,7 @@ npm run package            # → harness-connector-deepseek-<版本>.vsix
 unzip -l harness-connector-deepseek-<版本>.vsix
 ```
 
-预期（v0.3.0 = 18 个文件，干净检出 389,343 字节，约 380 KB）：
+预期（v0.4.0 = 18 个文件，干净检出 401,427 字节，约 392 KB）：
 
 ```
 [Content_Types].xml
@@ -464,7 +499,8 @@ Actions → **Release** → *Run workflow* → 填 `tag: v0.2.1`。它会检出�
   `changelog.md` 的形式随包，`*.zh-CN.md` 双胞胎原样随包。所以下面每一条基线都属于某一棵
   特定的树，事后再改一个随包文档，那个数字就作废了。重新量，不要把旧数字往下带。随包发出的
   字节数（也就是 `gh release view --json assets` 报出来的、用户真正下载的那个）：
-  `v0.3.0` = 389,343（与 `v0.2.9` 同样 18 个文件，多 94 字节：这次改的是声明与注释，不是随包集合）；
+  `v0.4.0` = 401,427（同样 18 个文件；多出的约 12 KB 是随包文档与代码：设置面板、增量管道，以及两节新契约）；
+  `v0.3.0` = 389,343（与 `v0.2.9` 同样 18 个文件，多 94 字节：那次改的是声明与注释，不是随包集合）；
   `v0.2.9` = 389,153（第一份含 walkthrough 页面的基线，比 `v0.2.8` 多四个文件）。这个 tag 自己的 CI 是**红**的，
   且只红在 workflow 里那个 `-eq 14` 文件数上——把新数字教给 CI 的那次提交（`1b3b339`）在 tag 之后，不改任何随包
   内容，所以产物与这份基线都不受影响；

@@ -5,6 +5,77 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),  
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-10-20
+
+Tagline: **the extension knew enough to act in three places and refused — and it re-sent the
+whole conversation for every streamed token.**
+Tagline (ZH): **有三处，扩展知道的足够多却选择了拒绝——而且每个流式 token 都会把整段对话重发一遍。**
+
+### Fixed
+
+- **`Open Web UI` opens when the Host was started somewhere else.** The command refused because
+  the launch token is a per-process `randomBytes` kept in a WeakMap — true, and not the whole
+  question: the cookie this extension mints is accepted at `/` (measured: `200 text/html`). What
+  no API can do is put a cookie into another process's browser, so the extension now runs a
+  one-shot loopback redirect: host-only `Set-Cookie`, then `302` to the Host. Cookies are scoped
+  by host and not by port (RFC 6265 §8.5), which is what makes a listener on another loopback
+  port able to install one for the Host. Bound to loopback, one nonce path, one use, 20 s, and
+  the value is never logged.
+- **The same change removed a worse bug.** In `auto` mode with a live Host, the command fell
+  through to `start-managed`, which started a *second* Host and moved the window onto it. The
+  feature worked; the session was the wrong one. A connected window now takes the cookie route
+  before the launcher is ever considered.
+- **A privileged approval is answerable from VS Code.** `ApprovalStore` refused to grant any
+  request whose reason mentioned `danger-full-access` or `escalation`, and the card told the user
+  to use the Web UI — which serves the same waterfall with one "Allow once" button. Two clients of
+  one Host, unequal, and a dead end whenever that browser could not open. The reason now marks the
+  card (red, verbatim) instead of vetoing the click.
+- **`autoApproveApprovals` still refuses those.** The distinction is deliberate: a person may
+  grant unrestricted access in one click; a setting may not grant it while nobody is looking. The
+  veto moved from "can this be allowed" to "can this be allowed without a human", which is where
+  it belonged.
+- **Installing is a button, not a prompt.** `runtime-not-running` carried the same install
+  guidance as a genuinely missing command, so a running desktop app — which starts its Host on an
+  OS-assigned port — produced a `Get Harness` button. Nothing at the configured port is not
+  evidence of anything missing. The inline offer now survives only when a launch actually failed
+  to find the command (`managedAttempted: 'not-found'`).
+- **Desktop detection looks in more places.** `Program Files`, `Program Files (x86)` and
+  `ProgramW6432` are checked after the per-user install, because one missed path turns "open the
+  app you already have" into "install this".
+
+### Added
+
+- **⚙ Settings & help**, in the panel. Every knob that used to live only in the command palette
+  and in `settings.json`, one row each with the sentence that explains it: host, port, session
+  mode, discovery, auto-approve, system messages, launch command. Plus the actions — Find running
+  Host, Install Host, Diagnostics, Show logs, Open Web UI — and a shortcut line. Values are read
+  from the configuration on every push rather than mirrored, and written through one extension-side
+  writer (Global target), so the existing config-change handler stays the only thing that reacts.
+- **A starter prompt.** The first-run card offers "Try: explain this workspace", which fills the
+  composer and does not send — answering "what do I even type" without deciding it for the user.
+- **`view/snapshot-delta.ts`** — the pure half of the incremental transcript, so the arithmetic
+  can be asserted without a VS Code host.
+
+### Changed
+
+- **The transcript is sent once, then only what moved.** A 40-turn conversation pushed 82.5 KB on
+  every render, 93% of it the transcript, and streaming bumps `renderVersion` per delta. The
+  provider now tracks `uid → rev` per webview and sends the changed items plus a removal list; the
+  webview merges them into the copy it holds. Same push, same 40 turns: **3.6 KB, 4.4%**. A first
+  paint and a session change still send everything, because a delta against a transcript the other
+  side does not have renders a one-item conversation.
+
+### Verification
+
+- Protocol assertions **533 → 576**: the cookie bridge over a real socket (302, the cookie, the
+  redirect target), approvals offered rather than refused and still refused by auto-approve, delta
+  computation and client merge, the settings panel's rows and wiring, and the install offer's
+  presence only where the evidence supports it.
+- `tsc --noEmit` clean; e2e **96**; live Host `0.2.1-rc.2` **41/41**; version gate **52**.
+- Measured, not assumed: `GET /` with a minted cookie answers `200 text/html`; the bridge's
+  redirect was followed end to end and landed on that 200; a 40-turn transcript's delta payload is
+  3.6 KB against a full push of 82.5 KB.
+
 ## [0.3.0] — 2026-10-19
 
 Tagline: **the support claim named a release two versions behind the runtime it was measured

@@ -22,6 +22,46 @@ not any more — see "Appendix — SSH setup" at the end.
 
 ---
 
+## SOP — one page, in order
+
+The checklist below this section explains *why* each step exists. This is the order to run them,
+written so a future session can follow it without re-deriving anything.
+
+| # | Step | Command / check | Done when |
+| --- | --- | --- | --- |
+| 0 | Decide the version | `git log --oneline $(git describe --tags --abbrev=0)..HEAD` | You can say in one sentence what a user gets. Contract changes (protocol, upstream support, approval policy, UI behaviour) → minor; fixes only → patch. |
+| 1 | Bump every surface | `package.json`, `package-lock.json` (root **twice**), `README* .vsix` names, CHANGELOG heading | `npm run check-versions` passes. It names the surface that disagrees — fix that surface, never the gate. |
+| 2 | Write the docs | README "What's new" (both languages), CHANGELOG entry (both), ARCHITECTURE if a contract moved, assertion counts | Counts in README/ARCHITECTURE/RELEASE all equal the ones the tests print. |
+| 3 | Run the gates | `npm run typecheck` → `npm run protocol-test` → `npm run e2e-test` → `npm run check-versions` | All green. `--online` is optional and hangs in its badge-probe phase behind a proxy; the version checks before it are the ones that matter. |
+| 4 | Live Host | `curl --noproxy '*' http://127.0.0.1:3080/` → expect `401` + the auth sentence, then `DSH_PORT=3080 npm run integration-test` | `41/41`. A **fresh** Host home is fine — the test creates its own workspace. |
+| 5 | Package and measure | `npm run build && npx vsce package --no-dependencies` | Record **file count and exact bytes**. Write them into `RELEASE*`: the current baseline line and the shipped-assets list. |
+| 6 | Re-run the gate | `npm run check-versions` | Green **after** the baseline edit. If you touch any shipped file afterwards, the bytes change: go back to step 5. |
+| 7 | Commit and tag | `git commit -F <file>`, `git tag -a v<ver> -m …`, `git push origin HEAD --follow-tags` | CI and E2E green on the tag. |
+| 8 | Watch the Release job | `gh run list`, `gh release view v<ver> --json assets` | Asset bytes equal the packaged bytes. The Marketplace step is expected red (`Trusted Publishing is not supported`) — that is a known limitation, not this release's fault. |
+| 9 | Open VSX **last** | `npx ovsx publish --packagePath <vsix> --pat <token>` | Version shows on `/api/<ns>/<ext>` after ~90 s–2 min, and the downloaded file matches entry-for-entry (CRC + length). |
+| 10 | Marketplace | Upload the same VSIX by hand | The only step no workflow can do. Upload **the newest** version: it covers every skipped one. |
+| 11 | Verify three channels | GitHub Release, Open VSX, Marketplace | All three name the same version and the same bytes. Only then is it released. |
+| 12 | Record | Byte baseline, what went wrong, what it cost | Next release starts from facts, not memory. |
+
+### Traps that have actually bitten
+
+- **The packaged bytes are a property of one tree.** Any edit to `README`, `CHANGELOG`,
+  `ARCHITECTURE` or `package.json` after packaging invalidates the measurement. Re-measure; never
+  carry the old number forward.
+- **Adding or removing a shipped file needs three edits**: `.vscodeignore` (it is an exclusion list,
+  so a new top-level file ships by default), the expected count in `ci.yml`, and the `RELEASE*`
+  baseline. Miss the middle one and CI fails on a number that looks unrelated.
+- **A gate that cannot fail is not a gate.** After writing an assertion, break the thing it
+  describes once and watch it go red. Two of the checks in `check-versions.ts` exist because a
+  silent failure had already shipped.
+- **Version numbers on Open VSX are consumed permanently.** A number accepted there cannot be
+  deleted through the API. That is why Open VSX is step 9 and not step 3.
+- **Never move a released tag.** If CI is red on the tag, fix forward with a new commit; the tag's
+  artifact is what users downloaded, and rewriting the tag makes the artifact stop matching it.
+- **The changelog is not the release.** An entry with no tag is a promise; the tag is the delivery.
+
+---
+
 ## 0. Prerequisites
 
 - Node.js ≥ 20 (Node 22+ recommended — the integration test uses the global `WebSocket`).
@@ -55,7 +95,7 @@ npm run check-versions     # → all checks pass; add --online to include the
 npm run build              # → dist/extension.js
 
 # 1.4 protocol test (fake harness — no dsh web needed)
-npm run protocol-test      # → all 533 assertions ✓
+npm run protocol-test      # → all 576 assertions ✓
 
 # 1.5 end-to-end chains (real filesystem; reports its own coverage)
 npm run e2e-test           # → 3 of 5 chains covered, 2 not written; every
@@ -88,7 +128,7 @@ Manual checks:
       twin. This is a standing rule, not a per-release judgement call.
 - [ ] `CHANGELOG.md` and `ARCHITECTURE.md` still quote the **current** assertion
       count from `npm run protocol-test` (it has grown 50 → 64 → 98 → 83 → 156 →
-      178 → 180 → 190 → 211 → 231 → 243 → 268 → 295 → 312 → 342 → 381 → 461 → 493 → 504 → 512 → 523 → 533 as
+      178 → 180 → 190 → 211 → 231 → 243 → 268 → 295 → 312 → 342 → 381 → 461 → 493 → 504 → 512 → 523 → 533 → 576 as
       the rc.2 rewrite replaced the rc.6 fake harness, the waterfall/pending-panel
       groups landed, v0.2.2 added the session-mode vocabulary, the per-platform
       install routing and the launcher's pure functions, and v0.2.3 added the
@@ -159,7 +199,7 @@ Manual checks:
 unzip -l harness-connector-deepseek-<ver>.vsix
 ```
 
-Expected (v0.3.0 = 18 files, 389,343 bytes in a clean checkout, ~380 KB):
+Expected (v0.4.0 = 18 files, 401,427 bytes in a clean checkout, ~392 KB):
 
 ```
 [Content_Types].xml
@@ -532,7 +572,9 @@ Marketplace, the bytes in the Release asset and the sha256 printed in the log ar
   `readme.md`/`changelog.md`, and the `*.zh-CN.md` twins ship verbatim. So every baseline
   below belongs to one particular tree, and editing a shipped doc afterwards invalidates it.
   Re-measure; do not carry the old figure forward. Shipped bytes, as `gh release view --json
-  assets` reports them — i.e. what a user actually downloads: `v0.3.0` = 389,343 (same 18 files as `v0.2.9`, +94 bytes: this release changed claims and comments, not the shipped set);
+  assets` reports them — i.e. what a user actually downloads: `v0.4.0` = 401,427 (the same 18 files; +12 KB of
+  shipped docs and code: the settings panel, the delta plumbing and the two new contract sections);
+  `v0.3.0` = 389,343 (same 18 files as `v0.2.9`, +94 bytes: this release changed claims and comments, not the shipped set);
   `v0.2.9` = 389,153 (the first baseline with the walkthrough pages in it, and the
   fourth file added since `v0.2.8`). That tag's own CI run is **red**, and only on the
   workflow's `-eq 14` file count — the commit that teaches CI the new number (`1b3b339`)

@@ -194,6 +194,12 @@ Content-Type: application/json
 词表为 `'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'`；UI 只能产出前两个
 （类型上叫 `ApprovalDecision`）。
 
+**风险是标记，不是否决（v0.4.0）。** 以前理由里带 `danger-full-access` 或 `escalation` 时，
+`ApprovalStore` 会拒绝这次点击并让用户去 Web UI。而 Web UI 对同一条瀑布只给一个「Allow once」——
+那个拒绝让这边成了同一个 Host 的二等客户端，且只要浏览器打不开就彻底断路。现在理由只置 `highRisk`，
+画一张红卡片、原文展示，按钮照常。它仍然拦住的是 `autoApproveApprovals`：人可以授予无限制权限，
+设置不能在人不在场时授予。
+
 `approval/request` 帧携带 `sessionId` + `eventId`（瀑布事件，在 mux 上已被观察到）；
 `respondApproval()` 据此查帧，连同我们的 `clientId` 一起 POST 出去。上游 `agentId` 就是 SessionId，
 所以能做会话级过滤。
@@ -644,11 +650,10 @@ review（`reviewSigFor`），因为 review 卡片是画在工具行**内部**的
   且只在 `model.version` 真的动了时投影——调用方本来每批只发布一次，两个计数从此对齐。
 - **会话 `<select>` 每次推送都重建。** 重建选项会在用户操作途中把选择丢掉。现在加了签名守卫。
 
-#### 已知的剩余代价
+#### 一笔留下、后来还清的代价（v0.4.0）
 
-流式推送仍然整份发送对话流：40 轮会话约 **52 KB/次**，跨 `postMessage` 做结构化克隆。渲染端
-已不再重建它，所以常数不大，但它的体积仍随对话增长。要砍掉它需要在协议层做按条目的增量
-（`UiState.snapshotPatch` 之类），那是协议变更，不在 0.1.7 里。
+到 v0.3.0 为止，流式推送仍然整份发送对话流——40 轮会话 **82.5 KB/次**，跨 `postMessage` 做结构化克隆——
+因为砍掉它需要在协议层做按条目的增量。v0.4.0 就是那次变更；形状与数字见下面一节。
 
 #### 已实测、并有意不改的地方
 
@@ -667,6 +672,25 @@ review（`reviewSigFor`），因为 review 卡片是画在工具行**内部**的
 1,318,580 字节），去喂一个默认关着、根本不读它的面板。打开面板时会把攒下的缓冲一次性发布，
 所以历史当场就在。另外列表渲染改为**整体重建**而不是追加：缓冲区是环形的、头部会移动，
 每次追加整个数组会每帧多堆一份全部行，无限增长。
+
+### 对话流增量传输（v0.4.0）
+
+渲染端在 v0.1.7 就不再重建对话流了，但线缆上仍然整份带着它：`pushState` 每个流式分片都跑，
+每次推送都把全部条目序列化一遍。40 轮时那是**每次 82.5 KB，其中 93% 是对话流**，跨 `postMessage` 克隆。
+
+现在推送带的是差量。provider 按 webview 记 `uid → rev`——算术在 `view/snapshot-delta.ts` 里，
+所以不需要 VS Code 宿主也能断言——只发 `rev` 变了的条目（正好是渲染端要重画的那几行），
+外加已不存在的 uid。对话流一个字都没动时（推送由用量、审批或状态驱动），一个对话流字段都不发。
+
+首帧、切会话、webview 重建仍然发全量：差量只对「两端都认可的那份对话流」有意义，而 webview 收到
+一个自己从没见过的会话的差量时，选择什么都不画，而不是画出另一个会话。
+
+同样 40 轮实测：**3.6 KB，是原来的 4.4%**。剩下的是会话列表与 `UiState` 的固定部分——它们变得够少，
+再为它们立一套缓存契约，成本大于收益。
+
+`scripts/protocol-test.ts` 的 G1c 组把两半都钉住——计算（改一条→发一条；删一条→进 `removed`；
+没动→什么都不发）与合并（差量更新它点名的那行、保留没点名的、追加新的、不留旧文本）——
+再加一条字节比守卫，让这个收益不能悄悄退化。
 
 ## 重连
 
@@ -791,6 +815,7 @@ src/
 │   ├── controller.ts         # AppController — 编排
 │   ├── state.ts              # UiState 形状 + 映射辅助
 │   ├── session-mode.ts       # 纯函数：auto/credentials/managed/paste 四种模式的性状
+│   ├── web-ui-bridge.ts      # 一次性 loopback 跳转：把 cookie 交给浏览器
 │   └── diagnosis.ts          # 纯函数：失败分类 + 脱敏诊断报告
 ├── conversation/
 │   ├── model.ts              # ConversationModel 折叠（"它说了什么"）
@@ -831,6 +856,7 @@ src/
     ├── provider.ts           # webview 组合（HTML + CSP + 状态桥接）
     ├── styles.ts             # CSS
     ├── html.ts               # HTML 骨架
+    ├── snapshot-delta.ts     # 纯函数：上一推送之后哪些对话条目真的动了
     ├── client.ts             # webview 侧 JS（渲染 + markdown + 动作）
     └── toolPresentation.ts   # 工具名 → 人类可读标题
 media/
@@ -840,7 +866,7 @@ media/
 ├── origin.png                # 源材料（VSIX 排除）
 └── markdown-it.umd.min.js    # VSIX 打包用（114 KB）
 scripts/
-├── protocol-test.ts          # 假 harness 协议测试，533 项断言（无需 dsh web）
+├── protocol-test.ts          # 假 harness 协议测试，576 项断言（无需 dsh web）
 ├── protocol-probe.ts         # 向真实 `dsh web` 询问它实际提供什么
 ├── check-versions.ts         # 每一个版本展示面都必须和 package.json 一致
 ├── integration-test.ts       # 针对真实 dsh 的闭环测试

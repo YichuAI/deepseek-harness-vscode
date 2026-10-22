@@ -244,6 +244,29 @@ async function main(): Promise<void> {
   // verdict is the only authority — ask each model in turn.
   const catalog = await client.modelCatalog()
   const routes = catalog.groups.flatMap((g) => g.models.map((m) => ({ provider: g.id, model: m.id })))
+
+  // What the panel's picker depends on: a selection is a durable session event
+  // (`model/selection`), not a preference held by whoever asked. That is what a
+  // reload reads back before any turn has run, and it costs no tokens to check —
+  // so it is checked here, before the image loop starts spending them.
+  if (routes.length > 0) {
+    const pick = routes[routes.length - 1] as { provider: string; model: string }
+    const rung = catalog.groups
+      .find((g) => g.id === pick.provider)
+      ?.models.find((m) => m.id === pick.model)
+      ?.reasoning?.efforts.at(-1)?.id
+    await client.selectModel(sessionId, pick.provider, pick.model, rung)
+    const recorded = (await client.getHistory(sessionId, { maxMessages: 50 }))
+      .events.map((e) => e.event)
+      .filter((e) => e.type === 'model/selection')
+      .at(-1)?.data as { provider?: string; model?: string; reasoningEffort?: string } | undefined
+    check('selectModel is recorded as a durable model/selection event',
+      recorded?.provider === pick.provider && recorded?.model === pick.model
+        && recorded?.reasoningEffort === rung,
+      `${pick.provider}/${pick.model}${rung ? ` @ ${String(rung)}` : ''} → `
+      + `${recorded?.provider ?? '?'}/${recorded?.model ?? '?'}`)
+  }
+
   let imageAdmitted = false
   let sawCapabilityRefusal = false
   const refusals: string[] = []

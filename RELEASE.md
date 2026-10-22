@@ -95,7 +95,10 @@ npm run check-versions     # → all checks pass; add --online to include the
 npm run build              # → dist/extension.js
 
 # 1.4 protocol test (fake harness — no dsh web needed)
-npm run protocol-test      # → all 576 assertions ✓
+npm run protocol-test      # → all 602 assertions ✓
+
+# 1.4b end-to-end Open Web UI check (needs a live dsh web on DSH_PORT)
+DSH_PORT=3081 npm run verify-webui   # → 401 baseline, 200 with the minted cookie
 
 # 1.5 end-to-end chains (real filesystem; reports its own coverage)
 npm run e2e-test           # → 3 of 5 chains covered, 2 not written; every
@@ -128,7 +131,7 @@ Manual checks:
       twin. This is a standing rule, not a per-release judgement call.
 - [ ] `CHANGELOG.md` and `ARCHITECTURE.md` still quote the **current** assertion
       count from `npm run protocol-test` (it has grown 50 → 64 → 98 → 83 → 156 →
-      178 → 180 → 190 → 211 → 231 → 243 → 268 → 295 → 312 → 342 → 381 → 461 → 493 → 504 → 512 → 523 → 533 → 576 as
+      178 → 180 → 190 → 211 → 231 → 243 → 268 → 295 → 312 → 342 → 381 → 461 → 493 → 504 → 512 → 523 → 533 → 576 → 602 as
       the rc.2 rewrite replaced the rc.6 fake harness, the waterfall/pending-panel
       groups landed, v0.2.2 added the session-mode vocabulary, the per-platform
       install routing and the launcher's pure functions, and v0.2.3 added the
@@ -200,6 +203,7 @@ unzip -l harness-connector-deepseek-<ver>.vsix
 ```
 
 Expected (v0.4.0 = 18 files, 401,427 bytes in a clean checkout, ~392 KB):
+Expected (v0.4.1 = 18 files, 400,021 bytes in a clean checkout, ~391 KB):
 
 ```
 [Content_Types].xml
@@ -573,6 +577,8 @@ Marketplace, the bytes in the Release asset and the sha256 printed in the log ar
   below belongs to one particular tree, and editing a shipped doc afterwards invalidates it.
   Re-measure; do not carry the old figure forward. Shipped bytes, as `gh release view --json
   assets` reports them — i.e. what a user actually downloads: `v0.4.0` = 401,427 (the same 18 files; +12 KB of
+  shipped docs and code: the settings panel, the delta plumbing and the two new contract sections);
+  `v0.4.1` = 400,021 (the same 18 files; model-selection UI + the verify-webui script);
   shipped docs and code: the settings panel, the delta plumbing and the two new contract sections);
   `v0.3.0` = 389,343 (same 18 files as `v0.2.9`, +94 bytes: this release changed claims and comments, not the shipped set);
   `v0.2.9` = 389,153 (the first baseline with the walkthrough pages in it, and the

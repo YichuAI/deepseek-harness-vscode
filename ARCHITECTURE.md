@@ -1088,7 +1088,7 @@ src/
 │   ├── controller.ts         # AppController — orchestration
 │   ├── state.ts              # UiState shape + mapping helpers
 │   ├── session-mode.ts       # pure: the auto/credentials/managed/paste traits
-│   ├── web-ui-bridge.ts      # one-shot loopback redirect: hands the browser its cookie
+│   ├── web-ui-bridge.ts      # one-shot loopback redirect: hands the browser its cookie (verify with `npm run verify-webui`)
 │   └── diagnosis.ts          # pure: classify a failure, build the redacted report
 ├── conversation/
 │   ├── model.ts              # ConversationModel fold
@@ -1138,7 +1138,7 @@ media/
 ├── markdown-it.umd.min.js    # bundled for VSIX (114 KB)
 └── walkthrough/              # Getting Started pages, one per step (markdown)
 scripts/
-├── protocol-test.ts          # fake-harness protocol test, 576 assertions (no dsh web)
+├── protocol-test.ts          # fake-harness protocol test, 602 assertions (no dsh web)
 ├── protocol-probe.ts         # asks a live `dsh web` what it actually serves
 ├── check-versions.ts         # every version surface must agree with package.json
 ├── integration-test.ts       # closed-loop test against real dsh

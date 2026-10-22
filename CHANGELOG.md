@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),  
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-10-22
+
+Tagline: **model and thinking depth moved into the editor, and "Open Web UI" finally has a one-command end-to-end check.**
+Tagline (ZH): **模型和思考深度进了编辑器，「打开网页」也终于有了一键端到端验证。**
+
+### Added
+
+- **Model & thinking depth selection, in VS Code.** A `model ▾` / `thinking ▾` bar under the composer applies from the next turn; the ⚙ Settings panel has a Model group too, with "reset to Host default" and "fall back when unavailable". The choice goes through the Host's `session/selectModel` and lands as a durable `model/selection` event — reload the session and it is still there.
+- **`npm run verify-webui`.** End-to-end proof that "Open Web UI" works: it mints a cookie through the extension's own `BrowserSessionAuth`, then hits the live Host — `401` with no cookie (the Host gates `/`), `200` with the minted one. Run it before a release instead of trusting the unit test.
+
+### Verification
+
+- Protocol assertions **576 → 602**: model-selection persistence, and that `request/header` can still override it.
+- `tsc --noEmit` clean; e2e **96**; live Host `0.2.1-rc.2` **42/42**; version gate **52**.
+- `npm run verify-webui` passes against `127.0.0.1:3081`: `401` baseline, `200` with the minted cookie.
+
 ## [0.4.0] — 2026-10-20
 
 Tagline: **the extension knew enough to act in three places and refused — and it re-sent the

@@ -95,38 +95,29 @@ VS Code 读取浏览器中已有的工作区和会话，并继续**同一个**�
 
 *左上：同一个会话、同一刻、两个客户端——没有导入，没有镜像，没有分叉。右上：「Diff」打开的是 VS Code 自己的 diff 编辑器，不是 webview 仿的，左边那一侧是插件在改动前抓到的文本。左下：对话就在侧边栏里，工具行和改动卡片都在。右下：浏览器那一侧，原样。*
 
-## v0.4.0 新特性
+## v0.4.1 新特性
 
-**两个死胡同关掉了，另外，对话流不再把自己重发一遍。**
+**模型在编辑器里选，打开网页也不再需要真的开浏览器才能验证。**
 
-三个看起来不相干的抱怨，其实是同一个形状：扩展知道的够多，但知道之后没有做。
-`Open Web UI` 拒绝执行，理由是启动 token 推不出来——这是真的，但 cookie 就够了，只是没人试过把它塞进浏览器。
-特权审批写着「用 Web UI」，这让两个客户端不对等，而当那个浏览器打不开时，用户就彻底卡住了。
-还有，每个流式 token 都会把整段对话重发一次：40 轮时每次推送 82.5 KB。
+两件事落地。模型和思考深度进了 VS Code——输入框下方一条 `model ▾` / `thinking ▾` 栏，加上 ⚙ 设置面板里的 Model 组，都走 Host 的 `session/selectModel`，并以一条 durable 的 `model/selection` 事件落盘。另外 `npm run verify-webui` 通过扩展自身的 `BrowserSessionAuth` 铸 cookie，再打 live Host：无 cookie 是 401（Host 把门），带 cookie 是 200（铸出来的 cookie 真被接受）——发版前一键复现，不必再信单元测试。
 
 | | |
 | --- | --- |
-| **Open Web UI 把 cookie 交给浏览器** | 这个扩展铸出来的 cookie 是被 `/` 接受的——实测 `200 text/html`。缺的只是「没有任何 API 能把 cookie 放进另一个进程的浏览器」。一次性 loopback 跳转解决了这件事：种下 host-only 的 `Set-Cookie`，然后 `302` 到 Host。cookie 按 host 作用域、不按 port（RFC 6265 §8.5），所以另一个 loopback 端口上的监听可以替 Host 种一个。只绑 loopback、只认一个 nonce 路径、只用一次、20 秒、从不写日志。顺带修掉一个更糟的 bug：`auto` 模式下旧逻辑会落到 `start-managed`，也就是**另起一个 Host 并把窗口切过去**。 |
-| **特权审批在这里也能批** | 侧栏以前拒绝任何理由里带 `danger-full-access` 的请求。Web UI 把同一条理由摆在同一个「Allow once」按钮旁边——所以那个拒绝让这边成了同一个 Host 的二等客户端，而且只要浏览器打不开就彻底断路。现在理由只用来标记卡片，不再否决点击。但 `autoApproveApprovals` 仍然拒绝：人可以看着点，设置不能背着人点。 |
-| **只发改动的那一条** | 40 轮对话每次渲染 82.5 KB，其中 93% 是对话流；而流式每个 delta 都会触发一次渲染。现在 host 只发改动的条目加一份删除列表，webview 合并进自己那份——**3.6 KB，4.4%**。首帧与切会话仍然发全量。 |
-| **安装等着被点** | 「配置端口上没人应答」被当成了「没装」，于是一个正在跑的桌面端（它的 Host 用的是系统分配端口）换来了一个 `Get Harness` 按钮。这条分支不再提安装，只有**启动时真的找不到命令**才提。安装变成新面板里的一个按钮；桌面端探测也补上了 `Program Files`——漏一个路径，就会把「打开你已经装好的」变成「装一个」。 |
-| **⚙ 设置与帮助** | 以前只存在于命令面板和 `settings.json` 里的每个开关：一行一个，配一句解释，外加 Find running Host / Install Host / Diagnostics / Show logs / Open Web UI。值每次推送时从配置重读，所以面板不会宣传一个扩展实际没用着的值。 |
-| **一句起手式** | 首装卡片上有「Try: explain this workspace」，点了只填输入框、不发送——回答「我该输点什么」，但不替用户决定。 |
+| **模型和思考深度，在编辑器里** | 输入框下方的 `model ▾` / `thinking ▾` 栏对下一回合生效。⚙ 设置面板也有 Model 组，带「恢复 Host 默认」「不可用时回退」。选择走 Host 的 `session/selectModel`，落为 durable 的 `model/selection` 事件——重载会话仍在。 |
+| **`npm run verify-webui`** | 打开网页的端到端验证：通过扩展自身的 `BrowserSessionAuth` 铸 cookie，再打 live Host——无 cookie 是 401（Host 把门），带 cookie 是 200。发版前跑一遍替代「信单元测试」。 |
 
 门禁：
 
 | 关卡 | 结果 |
 | --- | --- |
-| 协议断言 | **576 项断言**——v0.3.0 时 533 |
+| 协议断言 | **602 项断言**——v0.3.0 时 533 |
 | 端到端链路 | **96** 条，覆盖五条里的三条 |
-| 实机 Host（`0.2.1-rc.2`） | **41/41**，两条认证路径都跑过 |
+| 实机 Host（`0.2.1-rc.2`） | **42/42**，两条认证路径都跑过 |
 | 版本门禁 | **52** 条 |
 
-新增的 43 条断言，大部分关于那两个死胡同而不是 UI：桥接是否真的在一个真 socket 上用 Host 的
-cookie 回应了跳转、升级请求是否以按钮而不是拒绝的形式出现、auto-approve 是否仍然拒绝它、
-以及一条单条目增量是否能在不丢行的前提下并进面板已经持有的对话流。
+新增的 26 条断言，大部分钉的是模型选择的持久化，以及 `request/header` 仍能覆盖它。
 
-上一个版本 v0.3.0 把「支持 `dsh@0.2.1-rc.2`」变成了实测：同一条线缆，两条认证路径各跑一遍，而不是靠版本号猜。v0.2.9 铺出了首次安装这条路，v0.2.8 让默认值第一次有能力起一个 Host；v0.2.7 修的是同一类错误在另一个命令里的表现：`Open Web UI` 把模式读成了一个关于铸签的布尔值，而那个布尔值对两种补救办法相反的模式都是 false。v0.2.6 让那条命令第一次会提议启动 Host。它们的说明、以及更早每个版本的说明，都在 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
+上一个版本 v0.4.0 关掉了三个死胡同（打开网页、特权审批、以及把自己重发一遍的对话流），并新增了设置面板和首装引导。它的说明、以及更早每个版本的说明，都在 [CHANGELOG.zh-CN.md](./CHANGELOG.zh-CN.md)。
 
 ## 环境要求
 
@@ -162,7 +153,7 @@ cookie 回应了跳转、升级请求是否以按钮而不是拒绝的形式出�
    或从 [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases) 安装 VSIX：
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.4.0.vsix
+   code --install-extension harness-connector-deepseek-0.4.1.vsix
    ```
 
 3. **不用配置任何东西。** 默认的 `sessionMode: "auto"` 会先按 `credentials` 的方式连接：读取 `dsh web` 写在 `$DSH_HOME/.credentials.yaml` 里的浏览器会话签名密钥，自己签出同一个 `dsh-auth-…` cookie，**没有需要粘贴的 token**。如果端口上什么都没有，它就把 `dsh web` 起起来。
@@ -322,7 +313,7 @@ path"`、`@dir/`，可带 `:L<n>` / `:L<n>-L<m>` 后缀；从 `@` 补全列表�
 一个独立的 Node 脚本用真实客户端代码驱动一个**假**的 harness（假实现照 `0.2.1-alpha.2` 的服务端那一半写死）—— 不需要 `dsh web`：
 
 ```bash
-npm run protocol-test    # 576 项断言：双流传输拆分（$events 白名单 vs
+npm run protocol-test    # 602 项断言：双流传输拆分（$events 白名单 vs
                          # session/follow）、线缆协商（点分/斜杠、cookie 门禁、
                          # 事件套接字）、认证、cookie 派生、{args} payload、
                          # 审批与提问两条瀑布（Allow/Deny 的确切信封、cancel 撤卡、
@@ -411,9 +402,9 @@ npm run build            # esbuild → dist/extension.js
 npm run watch            # 变更时自动重建
 npm run typecheck
 npm run check-versions   # 每一个版本展示面都必须和 package.json 一致
-npm run protocol-test    # 针对假 harness 的 576 项协议断言
+npm run protocol-test    # 针对假 harness 的 602 项协议断言
 npm run protocol-probe   # 报告真实 dsh web 暴露了什么
-npm run package          # → harness-connector-deepseek-0.4.0.vsix
+npm run package          # → harness-connector-deepseek-0.4.1.vsix
 ```
 
 在 VS Code 中按 `F5` 启动带有该扩展的扩展开发宿主。
@@ -514,7 +505,7 @@ host 不是 `127.0.0.1`、`localhost` 或 `::1`，扩展就会拒绝，而且是
 
 | 场景 | 状态 | 含义 |
 | --- | --- | --- |
-| **本地窗口** | ✅ **已实测** | 受支持的组合，也是本机唯一端到端跑过的组合：对 `127.0.0.1:3080` 上一个活 Host 跑通 **41/41** 条集成断言，外加 576 条协议断言和 96 条端到端断言。 |
+| **本地窗口** | ✅ **已实测** | 受支持的组合，也是本机唯一端到端跑过的组合：对 `127.0.0.1:3080` 上一个活 Host 跑通 **42/42** 条集成断言，外加 602 条协议断言和 96 条端到端断言。 |
 | **Remote-SSH** | ⚠️ **未实测**——本机没有 SSH 服务（`localhost:22` 拒绝连接） | 当 Harness 跑在**远端机器上**时可用。扩展声明了 `extensionKind: "workspace"`，所以在远程窗口里它的扩展宿主就运行在远端：读远端的 `$DSH_HOME`、枚举远端的监听表、连远端的回环。你笔记本上的 Harness 从那里连不到——也不该连得到，因为它要改的工作区并不是你打开的这个。 |
 | **WSL** | ⚠️ **未实测**——`wsl.exe` 在本沙箱的程序黑名单上，根本起不来 | 形状和 Remote-SSH 一样：在发行版里跑 `dsh web`。VS Code 把 WSL 当作一个普通远程交给扩展，所以不需要任何 WSL 专属处理。 |
 | **开发容器** | ⚠️ **未实测**——本机没有装 `docker` | 形状还是一样：在容器里跑 `dsh web`。注意被读的是容器自己的 `$DSH_HOME/.credentials.yaml`，不是宿主机的。 |

@@ -815,7 +815,7 @@ src/
 │   ├── controller.ts         # AppController — 编排
 │   ├── state.ts              # UiState 形状 + 映射辅助
 │   ├── session-mode.ts       # 纯函数：auto/credentials/managed/paste 四种模式的性状
-│   ├── web-ui-bridge.ts      # 一次性 loopback 跳转：把 cookie 交给浏览器
+│   ├── web-ui-bridge.ts      # 一次性 loopback 跳转：把 cookie 交给浏览器（用 `npm run verify-webui` 验证）
 │   └── diagnosis.ts          # 纯函数：失败分类 + 脱敏诊断报告
 ├── conversation/
 │   ├── model.ts              # ConversationModel 折叠（"它说了什么"）
@@ -866,7 +866,7 @@ media/
 ├── origin.png                # 源材料（VSIX 排除）
 └── markdown-it.umd.min.js    # VSIX 打包用（114 KB）
 scripts/
-├── protocol-test.ts          # 假 harness 协议测试，576 项断言（无需 dsh web）
+├── protocol-test.ts          # 假 harness 协议测试，602 项断言（无需 dsh web）
 ├── protocol-probe.ts         # 向真实 `dsh web` 询问它实际提供什么
 ├── check-versions.ts         # 每一个版本展示面都必须和 package.json 一致
 ├── integration-test.ts       # 针对真实 dsh 的闭环测试

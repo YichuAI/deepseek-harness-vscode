@@ -5,6 +5,21 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.1] — 2026-10-22
+
+一句话：**模型和思考深度进了编辑器，「打开网页」也终于有了一键端到端验证。**
+
+### 新增
+
+- **模型和思考深度，在 VS Code 里选。** 输入框下方一条 `model ▾` / `thinking ▾` 栏，对下一回合生效；⚙ 设置面板里也有 Model 组，带「恢复 Host 默认」「不可用时回退」。选择走 Host 的 `session/selectModel`，落为一条 durable 的 `model/selection` 事件——重载会话仍在。
+- **`npm run verify-webui`。** 打开网页的端到端验证：通过扩展自身的 `BrowserSessionAuth` 铸 cookie，再打 live Host——无 cookie 是 401（Host 把门），带 cookie 是 200。发版前跑一遍，不必再信单元测试。
+
+### 验证
+
+- 协议断言 **576 → 602**：模型选择的持久化，以及 `request/header` 仍能覆盖它。
+- `tsc --noEmit` 干净；e2e **96**；实机 Host `0.2.1-rc.2` **42/42**；版本门禁 **52**。
+- `npm run verify-webui` 在 `127.0.0.1:3081` 跑通：401 基线、带 cookie 时 200。
+
 ## [0.4.0] — 2026-10-20
 
 版本定位：**有三处，扩展知道的足够多却选择了拒绝——而且每个流式 token 都会把整段对话重发一遍。**

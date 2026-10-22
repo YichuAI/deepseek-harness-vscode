@@ -137,6 +137,26 @@ function readModel(data: Record<string, unknown>): ControlModel | undefined {
   }
 }
 
+/**
+ * `model/selection` → what the user (or a preset) committed for the next
+ * request. The payload is the selection itself, not a `header.config`.
+ *
+ * This matters more than it looks: a selection made in the panel and followed by
+ * a reload has no `request/header` yet, so without this event the picker would
+ * fall back to the last turn's model and quietly misreport the next one.
+ */
+function readSelection(data: Record<string, unknown>): ControlModel | undefined {
+  const provider = str(data.provider)
+  const model = str(data.model)
+  if (provider === undefined || model === undefined) return undefined
+  const reasoningEffort = str(data.reasoningEffort)
+  return {
+    provider,
+    model,
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+  }
+}
+
 /** `subagent/start` and `subagent/end` carry a scoped identity, not a payload. */
 function subagentKey(data: Record<string, unknown>, event: SessionEvent): string {
   return str(data.id)
@@ -236,6 +256,20 @@ export class ControlSurface {
       case 'request/header': {
         const next = readModel(data)
         if (next === undefined) return false
+        this.model = next
+        this.version++
+        return true
+      }
+      case 'model/selection': {
+        // The committed choice for the *next* request. A later `request/header`
+        // overwrites it with what the host actually used, which is the authority
+        // (a rung the model cannot honour comes back normalised).
+        const next = readSelection(data)
+        if (next === undefined) return false
+        if (this.model !== undefined
+          && this.model.provider === next.provider
+          && this.model.model === next.model
+          && this.model.reasoningEffort === next.reasoningEffort) return false
         this.model = next
         this.version++
         return true

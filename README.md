@@ -57,7 +57,7 @@
 | **What it needs** | VS Code ≥ 1.85, and a Harness on the **same machine** as the window. That is the one hard constraint; see [Remote development](#remote-development). |
 | **Install** | `code --install-extension lucasliang.harness-connector-deepseek` |
 
-**Jump to:** [What it does](#what-it-does) · [What's new](#whats-new-in-v040) · [Quick start](#quick-start) · [Configuration](#configuration) · [Commands](#commands) · [Remote development](#remote-development) · [Limitations](#limitations) · [Development](#development) · [Design](#design-dsh-owns-the-write-the-plugin-observes-and-tells)
+**Jump to:** [What it does](#what-it-does) · [What's new](#whats-new-in-v041) · [Quick start](#quick-start) · [Configuration](#configuration) · [Commands](#commands) · [Remote development](#remote-development) · [Limitations](#limitations) · [Development](#development) · [Design](#design-dsh-owns-the-write-the-plugin-observes-and-tells)
 
 ## What it does
 
@@ -96,41 +96,29 @@ VS Code reads the workspaces and sessions the browser already has, and continues
 
 *Top left: the same session at the same moment in two clients — nothing imported, mirrored or forked. Top right: "Diff" is VS Code's own diff editor, not a webview imitation — the left side is the text the plugin captured before the change. Bottom left: the conversation lives in the sidebar, tool rows and changed-files card included. Bottom right: the browser side, untouched.*
 
-## What's new in v0.4.0
+## What's new in v0.4.1
 
-**Two dead ends closed, and a transcript that stopped re-sending itself.**
+**Pick the model in the editor, and prove "Open Web UI" works without opening a browser.**
 
-Three separate complaints turned out to have one shape: the extension knew enough to act and
-did not act. `Open Web UI` refused because the launch token is unreachable — true, but the
-cookie is enough, and nobody had tried putting it in the browser. A privileged approval said
-"use the Web UI", which made the two clients unequal and left the user stuck when that browser
-would not open. And every streamed token re-sent the whole conversation: 82.5 KB per push at
-40 turns.
+Two changes landed. Model and thinking-depth selection now lives in VS Code — a `model ▾` / `thinking ▾` bar under the composer, and a Model group in the ⚙ Settings panel, both going through the Host's `session/selectModel` and persisting as a durable `model/selection` event. And `npm run verify-webui` mints a cookie through the extension's own `BrowserSessionAuth` and hits the live Host: `401` with no cookie, `200` with the minted one — a one-command end-to-end check instead of trusting the unit test.
 
 | | |
 | --- | --- |
-| **Open Web UI hands the browser its cookie** | The cookie this extension mints is accepted at `/` — measured, `200 text/html`. What was missing is that no API puts a cookie into another process's browser. A one-shot loopback redirect does: host-only `Set-Cookie`, then `302` to the Host. Cookies are scoped by host and not by port (RFC 6265 §8.5), which is why a listener on a different loopback port can install one for the Host. Loopback only, one nonce path, one use, 20 s, never logged. This also removed a worse bug: in `auto` the command used to fall through to `start-managed`, i.e. start a *second* Host and move the window onto it. |
-| **A privileged approval is answerable here** | The sidebar refused anything whose reason mentioned `danger-full-access`. The Web UI shows that same reason next to one "Allow once" button, so the refusal made this a second-class client of the same Host — and a dead end whenever the browser could not open. The reason now marks the card instead of vetoing the click. `autoApproveApprovals` still refuses it: a person may grant unrestricted access, a setting may not grant it while nobody is looking. |
-| **Only what moved is sent** | 40 turns cost 82.5 KB per render, 93% of it the transcript, on every streamed delta. The host now sends the changed items plus a removal list and the webview merges them into the copy it holds — **3.6 KB, 4.4%**. A first paint and a session change still send everything. |
-| **Installing waits to be asked** | Nothing listening on the configured port was treated as evidence that nothing was installed, so a running desktop app — which starts its Host on an OS-assigned port — produced a `Get Harness` button. That branch no longer offers an install; only a launch that failed to find the command does. Installing is a button in the new panel, and desktop detection also looks in `Program Files` now, because one missed path turns "open the app you already have" into "install this". |
-| **⚙ Settings & help** | Every knob that used to live only in the command palette and in `settings.json`: one row each, with the sentence that explains it, plus Find running Host / Install Host / Diagnostics / Show logs / Open Web UI. Values are read from the configuration on every push, so the panel cannot advertise something the extension is not using. |
-| **A first prompt** | The first-run card offers "Try: explain this workspace", which fills the composer instead of sending — answering "what do I even type" without deciding it for you. |
+| **Model & thinking depth, in the editor** | A `model ▾` / `thinking ▾` bar under the composer applies from the next turn. The ⚙ Settings panel has a Model group too, with "reset to Host default" and "fall back when unavailable". The choice goes through the Host's `session/selectModel` and lands as a durable `model/selection` event — reload the session and it is still there. |
+| **`npm run verify-webui`** | End-to-end proof that Open Web UI works: it mints a cookie through the extension's own `BrowserSessionAuth`, then hits the live Host — `401` with no cookie (the Host gates `/`), `200` with the minted one. Run it before a release instead of trusting the unit test. |
 
 Verification:
 
 | Gate | Result |
 | --- | --- |
-| Protocol assertions | **576 assertions** — 533 in v0.3.0 |
+| Protocol assertions | **602 assertions** — 533 in v0.3.0 |
 | End-to-end chains | **96** across 3 of 5 chains |
-| Live Host (`0.2.1-rc.2`) | **41/41**, both authentication paths |
+| Live Host (`0.2.1-rc.2`) | **42/42**, both authentication paths |
 | Version gate | **52** checks |
 
-Most of the 43 new assertions are about the two closures rather than about the UI: that the
-bridge really answers a redirect carrying the Host's cookie over a real socket, that an
-escalation is offered with a button instead of refused, that auto-approve still refuses it, and
-that a one-item delta merges into the transcript the panel already holds without dropping a row.
+Most of the 26 new assertions pin the model-selection persistence and that `request/header` can still override it.
 
-The version before this one — v0.3.0 — declared and measured support for `dsh@0.2.1-rc.2`: the same wire, checked twice (local mint and launch URL) instead of assumed. v0.2.9 built the first-run path; v0.2.8 made the default able to start a Host at all. v0.2.7 fixed the same class of mistake in a different command: `Open Web UI` was reading the mode as a boolean about minting, which is `false` for two modes whose remedies are opposites. v0.2.6 made that command offer to start a Host at all. Their notes, and every earlier release's, are in [CHANGELOG.md](./CHANGELOG.md).
+The release before this one — v0.4.0 — closed three dead ends (Open Web UI, privileged approvals, and a transcript that re-sent itself) and added the settings panel and first-run prompt. Its notes, and every earlier release's, are in [CHANGELOG.md](./CHANGELOG.md).
 
 ## Requirements
 
@@ -170,7 +158,7 @@ The version before this one — v0.3.0 — declared and measured support for `ds
    Or install the VSIX from [GitHub Releases](https://github.com/YichuAI/deepseek-harness-vscode/releases):
 
    ```bash
-   code --install-extension harness-connector-deepseek-0.4.0.vsix
+   code --install-extension harness-connector-deepseek-0.4.1.vsix
    ```
 
 3. Nothing to configure. The default `sessionMode: "auto"` first does what
@@ -354,7 +342,7 @@ that implements the `0.2.1-alpha.2` server half exactly — so no `dsh web` is
 needed:
 
 ```bash
-npm run protocol-test    # 576 assertions: the two-stream transport split
+npm run protocol-test    # 602 assertions: the two-stream transport split
                          # ($events allowlist vs session/follow), wire negotiation
                          # (dot/slash, cookie gating, event socket), auth and cookie
                          # derivation, {args} payloads (wrapped vs bare), the approval
@@ -471,9 +459,9 @@ npm run build            # esbuild → dist/extension.js
 npm run watch            # rebuild on change
 npm run typecheck
 npm run check-versions   # every version surface must agree with package.json
-npm run protocol-test    # 576 protocol assertions against a fake harness
+npm run protocol-test    # 602 protocol assertions against a fake harness
 npm run protocol-probe   # report what your real dsh web exposes
-npm run package          # → harness-connector-deepseek-0.4.0.vsix
+npm run package          # → harness-connector-deepseek-0.4.1.vsix
 ```
 
 Press `F5` in VS Code to launch an Extension Development Host with the extension loaded.
@@ -595,7 +583,7 @@ That leaves four arrangements, and the honest state of each:
 
 | Scenario | State | What it means |
 | --- | --- | --- |
-| **Local window** | ✅ **Measured** | The supported arrangement and the only one exercised here: **41/41** integration assertions against a live Host on `127.0.0.1:3080`, on top of the 576 protocol and 96 end-to-end assertions. |
+| **Local window** | ✅ **Measured** | The supported arrangement and the only one exercised here: **42/42** integration assertions against a live Host on `127.0.0.1:3080`, on top of the 602 protocol and 96 end-to-end assertions. |
 | **Remote-SSH** | ⚠️ **Not measured** — this machine has no SSH server (`localhost:22` refuses) | Works when the Harness runs **on the remote host**. The extension declares `extensionKind: "workspace"`, so in a remote window its extension host runs on the remote machine: it reads that machine's `$DSH_HOME`, probes that machine's listener table, and talks to that machine's loopback. A Harness on your laptop is unreachable from there — and should be, since the workspace it would edit is not the one you have open. |
 | **WSL** | ⚠️ **Not measured** — `wsl.exe` is on this sandbox's program blacklist, so it could not be launched at all | Same shape as Remote-SSH: run `dsh web` inside the distro. VS Code hands WSL over as an ordinary remote, so nothing WSL-specific is needed. |
 | **Dev container** | ⚠️ **Not measured** — `docker` is not installed here | Same shape again: run `dsh web` inside the container. The container's own `$DSH_HOME/.credentials.yaml` is what gets read, not the host's. |

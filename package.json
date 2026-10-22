@@ -2,7 +2,7 @@
   "name": "harness-connector-deepseek",
   "displayName": "DeepSeek Harness Connector",
   "description": "Native VS Code client for DeepSeek Harness. Connect to your existing local Harness instance and continue the same workspaces and sessions directly inside VS Code.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "publisher": "lucasliang",
   "license": "MIT",
   "repository": {
@@ -404,6 +404,7 @@
     "integration-test": "tsx scripts/integration-test.ts",
     "protocol-test": "tsx scripts/protocol-test.ts",
     "protocol-probe": "tsx scripts/protocol-probe.ts",
+    "verify-webui": "tsx scripts/verify-webui.ts",
     "check-versions": "tsx scripts/check-versions.ts",
     "e2e-test": "tsx test/e2e/run.ts",
     "package": "vsce package --no-dependencies",

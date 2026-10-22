@@ -1808,6 +1808,16 @@ async function main(): Promise<void> {
     [false, 'earlier work compacted', 4096])
   surface.apply(ev('agent-preset/selected', { id: 'preset-deep-research' }, 18))
   eq('the selected agent preset is folded', surface.snapshot().agentPreset, 'preset-deep-research')
+  // A committed selection is durable: it is what a reload reads before any turn
+  // has run, so the picker must show it rather than the previous turn's model.
+  check('a committed model selection becomes the next turn\'s model',
+    surface.apply(ev('model/selection', { provider: 'p-deepseek', model: 'flash', reasoningEffort: 'low' }, 19)) === true
+    && surface.snapshot().model?.reasoningEffort === 'low')
+  check('...and a later request/header wins over it (the host may normalise a rung)',
+    surface.apply(ev('request/header', {
+      header: { config: { provider: 'p-deepseek', model: 'flash', reasoningEffort: 'high' } },
+    }, 20)) === true
+    && surface.snapshot().model?.reasoningEffort === 'high')
   // A picker that waits for the host's next `request/header` looks broken for a
   // whole turn. The optimistic note is what makes the click look like it landed.
   check('a picked model is reflected before the host confirms it',

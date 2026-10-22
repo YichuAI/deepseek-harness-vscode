@@ -558,8 +558,13 @@ export class AppController {
       }
       // A non-forced connect against a live session has nothing left to do: the
       // webview asks for one on every boot, and redoing the session handshake
-      // would restart the transcript for no reason.
-      if (!force && alreadyConnected) return
+      // would restart the transcript for no reason. It does still need a model
+      // catalog, and that is fetched below — which is exactly why the picker
+      // could stay empty on a panel that was already talking to a Host.
+      if (!force && alreadyConnected) {
+        if (this.d.getState().modelCatalog === undefined) await this.fetchModelCatalog()
+        return
+      }
       await this.discoverFolder()
       // Model catalog is session-independent — fetch once per connect when the
       // host serves it, so the selector is ready before the first session opens.
@@ -1751,8 +1756,16 @@ export class AppController {
       'selectModel',
     )
     if (res !== undefined) {
-      this.d.notifyInfo(`DeepSeek Harness: model set to ${res.selected.model}`
-        + (res.selected.reasoningEffort !== undefined ? ` (effort ${res.selected.reasoningEffort})` : '') + '.')
+      // The host's answer is the authority on what it selected. A build that
+      // answers without `selected` gets the values that were asked for rather
+      // than throwing *after* a switch that has already happened.
+      const chosen = res.selected ?? { provider, model, reasoningEffort }
+      // Reflect the choice before the host's next `request/header` arrives, or
+      // the picker keeps showing the old model and the click reads as ignored.
+      this.control.noteModelSelection(chosen.provider, chosen.model, chosen.reasoningEffort)
+      this.d.setState({ control: this.control.snapshot() })
+      this.d.notifyInfo(`DeepSeek Harness: model set to ${chosen.model}`
+        + (chosen.reasoningEffort !== undefined ? ` (effort ${chosen.reasoningEffort})` : '') + '.')
     }
   }
 

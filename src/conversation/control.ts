@@ -245,6 +245,31 @@ export class ControlSurface {
     }
   }
 
+  /**
+   * Record a model the user just picked, ahead of the `request/header` the host
+   * sends when that model is next used.
+   *
+   * Without this the picker would keep showing the previous model until the
+   * following turn started, so a successful switch would look like a click that
+   * did nothing. The next `request/header` overwrites it with the host's own
+   * answer, which is the authority — this only closes the gap in between.
+   */
+  noteModelSelection(provider: string, model: string, reasoningEffort?: string): boolean {
+    if (this.model !== undefined
+      && this.model.provider === provider
+      && this.model.model === model
+      && this.model.reasoningEffort === reasoningEffort) return false
+    this.model = {
+      provider,
+      model,
+      // A model without a ladder must not inherit the previous model's effort:
+      // the old value would be shown as if the new model had accepted it.
+      ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+    }
+    this.version++
+    return true
+  }
+
   snapshot(): ControlState {
     return {
       version: this.version,

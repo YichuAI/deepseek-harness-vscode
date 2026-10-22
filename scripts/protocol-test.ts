@@ -544,7 +544,12 @@ function makeHarness(auth: AuthMode, controls: Set<string>): {
         return { status: 200, body: okBody({ title, seq: 12 }) }
       }
       case 'session/selectModel':
-        return controls.has('session/selectModel') ? { status: 200, body: okBody({ accepted: true }) } : missing()
+        // rc.2 answers with the selection it actually applied, not a bare ack —
+        // and that answer is what the picker must end up showing, because the
+        // host may normalise an unsupported rung.
+        return controls.has('session/selectModel')
+          ? { status: 200, body: okBody({ selected: { provider: 'deepseek', model: 'deepseek-v4-pro', reasoningEffort: 'high' } }) }
+          : missing()
       case 'session/updateQueue':
         return controls.has('session/updateQueue') ? { status: 200, body: okBody({ accepted: true }) } : missing()
       case 'workspace/archiveSession':
@@ -1493,6 +1498,19 @@ async function main(): Promise<void> {
     })
     await ctrl.selectSession('session-1')
 
+    // The webview asks for a connect on every boot, and that path returns early
+    // when the client is already connected. It used to return before the model
+    // catalog was fetched, so a panel reconnecting to a Host it was already
+    // talking to could show an empty picker forever.
+    await ctrl.doConnect({ force: false })
+    check('a non-forced connect still fills the model catalog',
+      (ui['modelCatalog'] as { groups?: unknown[] } | undefined)?.groups?.length === 1,
+      JSON.stringify(ui['modelCatalog']))
+    await ctrl.setModel('deepseek', 'deepseek-v4-pro', 'low')
+    eq('the picker shows the selection the host applied, not the one requested',
+      (ui['control'] as { model?: unknown }).model,
+      { provider: 'deepseek', model: 'deepseek-v4-pro', reasoningEffort: 'high' })
+
     // The exact first keystroke: a bare `@`.
     await ctrl.queryFileReferences('')
     eq('the first bare-@ query publishes candidates',
@@ -1790,6 +1808,16 @@ async function main(): Promise<void> {
     [false, 'earlier work compacted', 4096])
   surface.apply(ev('agent-preset/selected', { id: 'preset-deep-research' }, 18))
   eq('the selected agent preset is folded', surface.snapshot().agentPreset, 'preset-deep-research')
+  // A picker that waits for the host's next `request/header` looks broken for a
+  // whole turn. The optimistic note is what makes the click look like it landed.
+  check('a picked model is reflected before the host confirms it',
+    surface.noteModelSelection('p-deepseek', 'flash', 'max') === true
+    && surface.snapshot().model?.reasoningEffort === 'max')
+  check('...and picking the same model again is not a change',
+    surface.noteModelSelection('p-deepseek', 'flash', 'max') === false)
+  surface.noteModelSelection('p-deepseek', 'plain', undefined)
+  check('a model without a ladder does not inherit the previous effort',
+    surface.snapshot().model?.model === 'plain' && surface.snapshot().model?.reasoningEffort === undefined)
   const beforeReset = surface.snapshot().version
   surface.reset()
   check('reset clears the whole control surface',
@@ -1983,6 +2011,123 @@ async function main(): Promise<void> {
       String(starter.el('input')['value']).length > 20
       && starter.actions.every((a) => a['type'] !== 'sendPrompt'),
       String(starter.el('input')['value']).slice(0, 40))
+
+    // ─── G1e. model + thinking depth ─────────────────────────────────────────
+    // The catalog was already being fetched and a picker was already written —
+    // into a panel whose render function was never called, so nothing on screen
+    // could reach it. What is asserted here is that the two surfaces which do
+    // render agree with each other and with the host's own ladder.
+    const ladder = [
+      { id: 'off', name: 'off' }, { id: 'low', name: 'low' },
+      { id: 'high', name: 'high' }, { id: 'max', name: 'max' },
+    ]
+    const catalog = {
+      default: { provider: 'p-deepseek', model: 'flash', reasoningEffort: 'high' },
+      routableProviders: ['p-deepseek', 'p-account'],
+      groups: [
+        {
+          id: 'p-deepseek', name: 'DeepSeek', models: [
+            { id: 'flash', name: 'V4.1-Flash', reasoning: { efforts: ladder, defaultEffort: 'high' } },
+            { id: 'plain', name: 'Text only' },
+          ],
+        },
+        {
+          id: 'p-account', name: 'DeepSeek Account', models: [
+            { id: 'flash', name: 'V4.1-Flash', reasoning: { efforts: ladder, defaultEffort: 'low' } },
+          ],
+        },
+      ],
+      failures: [{ id: 'p-broken', name: 'Broken', message: 'no api key' }],
+    }
+    const modelState = {
+      activeSessionId: 'session-1',
+      modelCatalog: catalog,
+      capabilities: { 'session/selectModel': true },
+      control: { version: 3, model: { provider: 'p-deepseek', model: 'flash', reasoningEffort: 'max' } },
+    }
+
+    const picker = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, modelState)
+    check('a session with a catalog shows the model bar',
+      (picker.el('model-bar')['style'] as Record<string, string>)['display'] !== 'none')
+    check('...listing every provider that serves a model',
+      stubText(picker.el('model-pick')).includes('DeepSeek Account'))
+    eq('...preselecting what the host reported', picker.el('model-pick')['value'], 'p-deepseek|flash')
+    eq('...and the rung it reported, not the catalog default',
+      picker.el('effort-pick')['value'], 'max')
+
+    picker.el('model-pick')['value'] = 'p-deepseek|plain'
+    fire(picker.el('model-pick'), 'change')
+    check('a model without a reasoning ladder hides the thinking slot',
+      (picker.el('effort-slot')['style'] as Record<string, string>)['display'] === 'none')
+    check('...and the switch carries no effort over from the previous model',
+      (() => {
+        const a = picker.actions.at(-1)
+        return a !== undefined && a['type'] === 'controlModel' && a['model'] === 'plain'
+          && a['reasoningEffort'] === undefined
+      })(), JSON.stringify(picker.actions.at(-1)))
+
+    picker.el('model-pick')['value'] = 'p-deepseek|flash'
+    fire(picker.el('model-pick'), 'change')
+    eq('switching back starts on that model\'s own default rung',
+      picker.el('effort-pick')['value'], 'high')
+
+    picker.el('effort-pick')['value'] = 'max'
+    fire(picker.el('effort-pick'), 'change')
+    check('changing the thinking depth posts the model and the rung together',
+      (() => {
+        const a = picker.actions.at(-1)
+        return a !== undefined && a['type'] === 'controlModel' && a['provider'] === 'p-deepseek'
+          && a['model'] === 'flash' && a['reasoningEffort'] === 'max'
+      })(), JSON.stringify(picker.actions.at(-1)))
+
+    const noSelect = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON,
+      { ...modelState, capabilities: {} })
+    check('a host that does not serve selectModel gets no picker',
+      (noSelect.el('model-bar')['style'] as Record<string, string>)['display'] === 'none')
+    const noSession = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON,
+      { ...modelState, activeSessionId: undefined })
+    check('neither does a panel with no session — the choice is per session',
+      (noSession.el('model-bar')['style'] as Record<string, string>)['display'] === 'none')
+
+    // A provider can drop out of the catalog between turns. Showing the first
+    // remaining model as if it were current would be a lie about what the next
+    // turn runs on; naming the missing one is the honest rendering.
+    const gone = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, {
+      ...modelState,
+      control: { version: 4, model: { provider: 'p-gone', model: 'retired', reasoningEffort: 'max' } },
+    })
+    eq('a session on a model the catalog dropped keeps showing that model',
+      gone.el('model-pick')['value'], 'p-gone|retired')
+    check('...and says why it is not in the list',
+      stubText(gone.el('model-pick')).includes('not in this host catalog'))
+
+    // The same two choices in the settings panel, with the sentences that say
+    // what they do — the panel is where somebody goes to find out, not to guess.
+    const panelBoot = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, modelState)
+    fire(panelBoot.el('btn-settings'), 'click')
+    const panelText = stubText(panelBoot.el('settings-body'))
+    check('the settings panel carries the same two choices',
+      panelText.includes('Thinking depth') && panelText.includes('future turns of this session'))
+    check('...names the provider that answers for a model', panelText.includes('DeepSeek Account'))
+    check('...and reports a provider that could not be reached',
+      panelText.includes('no api key'))
+    const panelSelects = walk(panelBoot.el('settings-body')).filter((n) => n['tag'] === 'select')
+    check('...as selects, not free text', panelSelects.length >= 2, String(panelSelects.length))
+    const defaultBtn = stubButtons(panelBoot.el('settings-body'))
+      .find((b) => String(b['textContent']).indexOf('Host default') === 0)
+    check('...plus a way back to the host default', defaultBtn !== undefined)
+    if (defaultBtn) fire(defaultBtn, 'click')
+    check('...which posts the catalog default triple',
+      (() => {
+        const a = panelBoot.actions.at(-1)
+        return a !== undefined && a['type'] === 'controlModel' && a['provider'] === 'p-deepseek'
+          && a['model'] === 'flash' && a['reasoningEffort'] === 'high'
+      })(), JSON.stringify(panelBoot.actions.at(-1)))
+
+    const offlineSettings = bootWebviewInteractive(CLIENT_SCRIPT, HTML_SKELETON, { connection: 'disconnected' })
+    fire(offlineSettings.el('btn-settings'), 'click')
+    check('offline, the model row says the choice needs a session',
+      stubText(offlineSettings.el('settings-body')).includes('Chosen per session'))
 
     // ─── G2. the pending panel: approvals + ask_user_question ───────────────
     // Both block the Host, and a question used to be dropped on the floor by the

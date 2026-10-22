@@ -38,15 +38,6 @@ export const HTML_SKELETON = /* html */ `
     </div>
   </div>
 
-  <div id="control" class="ctl" style="display:none;">
-    <div id="ctl-head" class="ctl-head">
-      <span id="ctl-arrow" class="ctl-arrow">▸</span>
-      <span class="ctl-title">Controls</span>
-      <span id="ctl-summary" class="ctl-summary"></span>
-    </div>
-    <div id="ctl-body" class="ctl-body"></div>
-  </div>
-
   <div id="settings-panel" class="subpanel" style="display:none;">
     <div class="subpanel-head">
       <span>⚙ Settings &amp; help</span>
@@ -100,6 +91,17 @@ export const HTML_SKELETON = /* html */ `
       <label id="steer-wrap" class="steer-wrap" title="Inject this message into the agent's current turn instead of queueing it" style="display:none;">
         <input type="checkbox" id="steer" /> Steer
       </label>
+    </div>
+    <div id="model-bar" class="model-bar" style="display:none;">
+      <label class="model-slot" title="Model used for the next turn of this session">
+        <span class="model-tag">model</span>
+        <select id="model-pick"></select>
+      </label>
+      <label id="effort-slot" class="model-slot" title="How much reasoning the model may spend before answering">
+        <span class="model-tag">thinking</span>
+        <select id="effort-pick"></select>
+      </label>
+      <span id="model-note" class="model-note"></span>
     </div>
     <div id="atfile-hint" class="atfile-hint">Tip: type @ to reference a file — the agent reads it itself, nothing is pasted. / for commands.</div>
   </div>
